@@ -12,7 +12,7 @@ SunAndMon（日月同辉）以 **GNU General Public License v3.0（GPL-3.0）** 
 | `moonlight-qt/` | [qiin2333/moonlight-qt](https://github.com/qiin2333/moonlight-qt)（源自 [moonlight-stream/moonlight-qt](https://github.com/moonlight-stream/moonlight-qt)） | GPL-3.0 | Windows / Linux 桌面端控制客户端与剪贴板助手 |
 | `moonlight-vplus/` | [qiin2333/moonlight-vplus](https://github.com/qiin2333/moonlight-vplus)（源自 [moonlight-stream/moonlight-android](https://github.com/moonlight-stream/moonlight-android)） | GPL-3.0 | Android 控制端应用（集成 USB/IP、补帧、PyroWave 与触觉反馈模块） |
 | `moonlight-audio-haptics`（构建依赖） | [AlkaidLab/moonlight-audio-haptics](https://github.com/AlkaidLab/moonlight-audio-haptics) | Apache-2.0 | Android / 主机音频触觉 SDK |
-| `center/`、`scripts/` | SunAndMon 原创代码 | GPL-3.0 | 轻量级 Go 中心服务（设备发现、节点管理、短时配对签票）及多平台构建与打包脚本 |
+| `center/`、`tunnel/`、`scripts/` | SunAndMon 原创代码（`tunnel/` 集成 [Tailscale `tsnet`](https://github.com/tailscale/tailscale) 与 [EasyTier](https://github.com/EasyTier/EasyTier)） | GPL-3.0（`tsnet`: BSD-3-Clause；EasyTier: LGPL-3.0） | 轻量级 Go 中心服务、统一用户态 `TunnelProvider` 隧道守护程序（Tailscale/Headscale + EasyTier）及多平台构建打包脚本 |
 
 ## SunAndMon 相对上游的主要改动
 

@@ -40,6 +40,7 @@ constexpr int HostPortsUnavailableExitCode = 86;
 const QByteArray HostPortPrefix = "SUNANDMON_PORTS ";
 const QByteArray HostPortConflictPrefix = "SUNANDMON_PORT_CONFLICT ";
 const QString DevicesPath = QStringLiteral("/v1/devices");
+const QString TunnelConfigPath = QStringLiteral("/v1/tunnel-config");
 const QString AdminNodesPath = QStringLiteral("/admin/api/nodes");
 const QRegularExpression CenterKeyFormat(QStringLiteral("^[a-f0-9]{64}$"));
 const QRegularExpression NodeIdFormat(QStringLiteral("^[a-f0-9]{32}$"));
@@ -536,6 +537,15 @@ CenterClient::CenterClient(ComputerManager* computers)
             emit hostConnected(uuid);
         }
     });
+    m_Tunnel = new TunnelManager(this);
+    connect(m_Tunnel, &TunnelManager::connectedStateChanged, this, [this] {
+        if (hostReady()) {
+            m_Tunnel->syncHostExposure(true, m_HttpPort, static_cast<quint16>(m_HttpsPort));
+            if (connected()) {
+                publishHost();
+            }
+        }
+    });
     connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit, this, &CenterClient::stopHost);
 }
 
@@ -683,10 +693,14 @@ void CenterClient::startOnLaunch()
         m_Poll.start();
     }
 #endif
+    if (m_Tunnel) {
+        m_Tunnel->startOnLaunch();
+    }
     if (startHostOnLaunch()) {
         startHost(m_AdvertisedAddress);
     }
     refresh();
+    loadCenterTunnelDefaults();
 }
 
 bool CenterClient::startAtLogin() const
@@ -929,6 +943,7 @@ void CenterClient::loadDevices(const CenterEndpoint& endpoint, const QByteArray&
                 }
 #endif
                 m_Poll.start();
+                loadCenterTunnelDefaults();
                 if (hostActive() && !m_Stopping) {
                     m_RestartHost = true;
                     stopHostProcess();
@@ -1156,8 +1171,33 @@ void CenterClient::signOut()
 #endif
     m_Key.clear();
     m_Devices.clear();
+    m_CenterTunnelDefaults.clear();
     m_CenterStatus.clear();
     emit changed();
+}
+
+void CenterClient::loadCenterTunnelDefaults()
+{
+    if (!connected()) {
+        return;
+    }
+    auto* reply = request(m_Endpoint, m_Key, TunnelConfigPath, "GET");
+    connect(reply, &QNetworkReply::finished, this, [this, reply] {
+        reply->deleteLater();
+        if (!connected() || reply->error() != QNetworkReply::NoError ||
+            reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() != 200) {
+            return;
+        }
+        const auto doc = QJsonDocument::fromJson(reply->readAll());
+        if (!doc.isObject()) {
+            return;
+        }
+        const QVariantMap map = doc.object().toVariantMap();
+        if (map != m_CenterTunnelDefaults) {
+            m_CenterTunnelDefaults = map;
+            emit changed();
+        }
+    });
 }
 
 void CenterClient::connectDevice(const QString& id)
@@ -1183,13 +1223,30 @@ void CenterClient::connectDevice(const QString& id)
     emit changed();
     connect(reply, &QNetworkReply::finished, this, [this, reply, id] {
         m_DirectoryRequest = nullptr;
-        const auto grant = QJsonDocument::fromJson(reply->readAll()).object();
+        auto grant = QJsonDocument::fromJson(reply->readAll()).object();
+        grant.remove(QStringLiteral("tunnelLocalAddress"));
         if (reply->error() != QNetworkReply::NoError ||
             reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() != 200 ||
             grant.value("id").toString() != id) {
             m_Busy = false;
             m_CenterStatus = tr("The center could not authorize this host. Refresh the device list and try again.");
             emit changed();
+            return;
+        }
+        const QString tunnelProvider = grant.value("tunnelProvider").toString();
+        const QString tunnelAddress = grant.value("tunnelAddress").toString();
+        const quint16 grantPort = static_cast<quint16>(grant.value("port").toInt());
+        const quint16 grantHttpsPort = static_cast<quint16>(grant.value("httpsPort").toInt());
+        if (m_Tunnel && m_Tunnel->state() == QStringLiteral("connected") &&
+            !tunnelProvider.isEmpty() && tunnelProvider == m_Tunnel->provider() &&
+            !tunnelAddress.isEmpty() && grantPort > 0 && grantHttpsPort > 0) {
+            m_Tunnel->ensureForwardAsync(tunnelAddress, grantPort, grantHttpsPort,
+                                         [this, grant](const QString& localHost, const QString&) mutable {
+                                             if (!localHost.isEmpty()) {
+                                                 grant.insert(QStringLiteral("tunnelLocalAddress"), localHost);
+                                             }
+                                             m_Computers->connectFromCenter(grant);
+                                         });
             return;
         }
         m_Computers->connectFromCenter(grant);
@@ -1548,6 +1605,9 @@ void CenterClient::publishHost()
     if (!connected() || !hostActive() || m_Stopping || m_Registration || m_PublicCertificate.isEmpty()) {
         return;
     }
+    if (m_Tunnel && m_Tunnel->state() == QStringLiteral("connected")) {
+        m_Tunnel->syncHostExposure(true, m_HttpPort, static_cast<quint16>(m_HttpsPort));
+    }
     QJsonArray addresses;
     if (!m_AdvertisedAddress.isEmpty()) {
         addresses.append(QHostAddress(m_AdvertisedAddress).toString());
@@ -1557,14 +1617,27 @@ void CenterClient::publishHost()
             addresses.append(ip.toString());
         }
     }
+    QString tunnelProvider;
+    QString tunnelAddress;
+    if (m_Tunnel && m_Tunnel->state() == QStringLiteral("connected") && !m_Tunnel->exposeIp().isEmpty()) {
+        tunnelProvider = m_Tunnel->provider();
+        tunnelAddress = m_Tunnel->exposeIp();
+        if (!addresses.contains(tunnelAddress) && addresses.size() < 16) {
+            addresses.append(tunnelAddress);
+        }
+    }
     if (addresses.isEmpty()) {
         setHostStatus(tr("The host has no reachable network address to publish."));
         return;
     }
-    const QJsonObject body{{"name", QHostInfo::localHostName().left(100)}, {"addresses", addresses},
-                           {"port", m_HttpPort}, {"httpsPort", m_HttpsPort},
-                           {"certificate", QString::fromLatin1(m_PublicCertificate)},
-                           {"hostKey", QString::fromLatin1(m_HostKey)}};
+    QJsonObject body{{"name", QHostInfo::localHostName().left(100)}, {"addresses", addresses},
+                     {"port", m_HttpPort}, {"httpsPort", m_HttpsPort},
+                     {"certificate", QString::fromLatin1(m_PublicCertificate)},
+                     {"hostKey", QString::fromLatin1(m_HostKey)}};
+    if (!tunnelProvider.isEmpty() && !tunnelAddress.isEmpty()) {
+        body.insert(QStringLiteral("tunnelProvider"), tunnelProvider);
+        body.insert(QStringLiteral("tunnelAddress"), tunnelAddress);
+    }
     const auto token = m_ManagedToken;
     auto reply = m_Registration = request(m_Endpoint, m_Key, DevicesPath + "/" + m_HostId, "PUT",
                                          QJsonDocument(body).toJson(QJsonDocument::Compact));
@@ -1591,6 +1664,9 @@ void CenterClient::publishHost()
 
 void CenterClient::withdrawHost()
 {
+    if (m_Tunnel) {
+        m_Tunnel->syncHostExposure(false, 0, 0);
+    }
     if (!connected() || m_HostId.isEmpty() || m_HostKey.isEmpty()) {
         return;
     }

@@ -67,6 +67,8 @@ func (c *center) addAdminRoutes(mux *http.ServeMux) {
 	api.HandleFunc("PATCH /admin/api/nodes/{id}", c.adminEdit)
 	api.HandleFunc("DELETE /admin/api/nodes/{id}", c.adminDelete)
 	api.HandleFunc("POST /admin/api/nodes/{id}/restore", c.adminRestore)
+	api.HandleFunc("GET /admin/api/tunnel-config", c.adminGetTunnelConfig)
+	api.HandleFunc("PUT /admin/api/tunnel-config", c.adminPutTunnelConfig)
 	mux.Handle("/admin/api/", requireKey(c.adminHash, api))
 }
 

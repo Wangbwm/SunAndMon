@@ -244,6 +244,7 @@ SOURCES += \
     backend/nvpairingmanager.cpp \
     backend/computermanager.cpp \
     backend/centerclient.cpp \
+    backend/tunnelmanager.cpp \
     backend/boxartmanager.cpp \
     backend/richpresencemanager.cpp \
     cli/commandlineparser.cpp \
@@ -323,6 +324,7 @@ HEADERS += \
     backend/nvpairingmanager.h \
     backend/computermanager.h \
     backend/centerclient.h \
+    backend/tunnelmanager.h \
     backend/boxartmanager.h \
     backend/richpresencemanager.h \
     cli/commandlineparser.h \

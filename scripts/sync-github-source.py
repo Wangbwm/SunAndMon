@@ -24,6 +24,7 @@ TOP_LEVEL_DIRS = (
     ".github",
     "center",
     "scripts",
+    "tunnel",
 )
 
 EXECUTABLE_PATHS = {

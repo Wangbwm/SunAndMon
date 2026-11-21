@@ -5,6 +5,7 @@
         <file>gui/PcView.qml</file>
         <file>gui/DeviceDashboard.qml</file>
         <file>gui/NodeManagementDialog.qml</file>
+        <file>gui/TunnelDialog.qml</file>
         <file>gui/LiquidPageTransition.qml</file>
         <file>gui/GlassBackdrop.qml</file>
         <file>gui/AppView.qml</file>

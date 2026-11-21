@@ -369,6 +369,26 @@ Rectangle {
                 Rectangle { Layout.fillWidth: true; height: 1; color: dashboard.line }
                 RailButton {
                     Layout.fillWidth: true
+                    text: qsTr("Built-in tunnel")
+                    secondary: {
+                        const t = dashboard.center ? dashboard.center.tunnel : null
+                        if (!t || t.state === "stopped") return ""
+                        if (t.state === "connected") return t.provider === "easytier" ? "EasyTier" : "Tailscale"
+                        if (t.state === "needs_auth") return qsTr("Sign in")
+                        if (t.state === "starting") return qsTr("Connecting")
+                        return qsTr("Error")
+                    }
+                    secondaryColor: {
+                        const t = dashboard.center ? dashboard.center.tunnel : null
+                        if (t && t.state === "connected") return Theme.success
+                        if (t && t.state === "error") return "#e5534b"
+                        return dashboard.muted
+                    }
+                    showMonitor: false
+                    onClicked: tunnelDialog.open()
+                }
+                RailButton {
+                    Layout.fillWidth: true
                     text: qsTr("Center server")
                     secondary: dashboard.center.connected ? qsTr("Connected") : ""
                     secondaryColor: Theme.success
@@ -973,6 +993,11 @@ Rectangle {
 
     NodeManagementDialog {
         id: nodeManagement
+        center: dashboard.center
+    }
+
+    TunnelDialog {
+        id: tunnelDialog
         center: dashboard.center
     }
 

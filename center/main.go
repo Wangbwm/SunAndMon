@@ -28,12 +28,14 @@ import (
 const onlineFor = 45 * time.Second
 
 type device struct {
-	ID          string   `json:"id"`
-	Name        string   `json:"name"`
-	Addresses   []string `json:"addresses"`
-	Port        uint16   `json:"port"`
-	HTTPSPort   uint16   `json:"httpsPort"`
-	Certificate string   `json:"certificate"`
+	ID             string   `json:"id"`
+	Name           string   `json:"name"`
+	Addresses      []string `json:"addresses"`
+	Port           uint16   `json:"port"`
+	HTTPSPort      uint16   `json:"httpsPort"`
+	Certificate    string   `json:"certificate"`
+	TunnelProvider string   `json:"tunnelProvider,omitempty"`
+	TunnelAddress  string   `json:"tunnelAddress,omitempty"`
 }
 
 type registration struct {
@@ -51,10 +53,14 @@ type center struct {
 	path      string
 	mu        sync.Mutex
 	devices   map[string]registration
+	tunnel    tunnelConfig
 }
 
 func newCenter(path, login string) (*center, error) {
 	c := &center{path: path, loginHash: sha256.Sum256([]byte(login)), devices: make(map[string]registration)}
+	if err := c.loadTunnelConfig(); err != nil {
+		return nil, err
+	}
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return c, nil
@@ -144,6 +150,7 @@ func (c *center) handler() http.Handler {
 	devices.HandleFunc("PUT /v1/devices/{id}", c.register)
 	devices.HandleFunc("DELETE /v1/devices/{id}", c.remove)
 	devices.HandleFunc("POST /v1/devices/{id}/pair", c.pair)
+	devices.HandleFunc("GET /v1/tunnel-config", c.getTunnelConfig)
 	mux := http.NewServeMux()
 	mux.Handle("/v1/", requireKey(&c.loginHash, devices))
 	c.addAdminRoutes(mux)
@@ -171,9 +178,11 @@ func requireKey(expected *[sha256.Size]byte, next http.Handler) http.Handler {
 
 func (c *center) list(w http.ResponseWriter, _ *http.Request) {
 	type listedDevice struct {
-		ID     string `json:"id"`
-		Name   string `json:"name"`
-		Online bool   `json:"online"`
+		ID             string `json:"id"`
+		Name           string `json:"name"`
+		Online         bool   `json:"online"`
+		TunnelProvider string `json:"tunnelProvider,omitempty"`
+		TunnelAddress  string `json:"tunnelAddress,omitempty"`
 	}
 	type endpointKey struct {
 		name, address   string
@@ -214,7 +223,7 @@ func (c *center) list(w http.ResponseWriter, _ *http.Request) {
 		if !online && duplicate {
 			continue
 		}
-		devices = append(devices, listedDevice{host.ID, host.effectiveDevice().Name, online})
+		devices = append(devices, listedDevice{host.ID, host.effectiveDevice().Name, online, host.TunnelProvider, host.TunnelAddress})
 		if host.Certificate != "" {
 			certificates[cert] = true
 		}
@@ -263,7 +272,14 @@ func (c *center) register(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	tunnelProvider, tunnelAddress, err := normalizeTunnelEndpoint(input.TunnelProvider, input.TunnelAddress)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	input.Addresses = addresses
+	input.TunnelProvider = tunnelProvider
+	input.TunnelAddress = tunnelAddress
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	old, exists := c.devices[input.ID]
@@ -281,7 +297,9 @@ func (c *center) register(w http.ResponseWriter, r *http.Request) {
 	}
 	c.devices[input.ID] = registration{device: input.device, HostKey: input.HostKey, LastSeen: time.Now().UTC(), Owner: owner, Override: old.Override}
 	if !exists || old.Name != input.Name || old.Port != input.Port ||
-		old.HTTPSPort != input.HTTPSPort || old.Certificate != input.Certificate || !slices.Equal(old.Addresses, addresses) {
+		old.HTTPSPort != input.HTTPSPort || old.Certificate != input.Certificate ||
+		old.TunnelProvider != input.TunnelProvider || old.TunnelAddress != input.TunnelAddress ||
+		!slices.Equal(old.Addresses, addresses) {
 		if err := c.save(); err != nil {
 			if exists {
 				c.devices[input.ID] = old

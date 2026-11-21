@@ -4264,6 +4264,18 @@
 <context>
     <name>DeviceDashboard</name>
     <message>
+        <source>Built-in tunnel</source>
+        <translation>内置隧道</translation>
+    </message>
+    <message>
+        <source>Connecting</source>
+        <translation>连接中</translation>
+    </message>
+    <message>
+        <source>Error</source>
+        <translation>异常</translation>
+    </message>
+    <message>
         <source>Search devices</source>
         <translation>搜索设备</translation>
     </message>
@@ -4838,6 +4850,164 @@
     <message>
         <source>Open SunAndMon</source>
         <translation>打开 SunAndMon</translation>
+    </message>
+</context>
+<context>
+    <name>TunnelManager</name>
+    <message>
+        <source>Tunnel daemon stopped unexpectedly.</source>
+        <translation>内置隧道进程意外退出。</translation>
+    </message>
+    <message>
+        <source>Built-in tunnel component (sunandmon-tunnel) is not installed.</source>
+        <translation>未找到内置隧道组件（sunandmon-tunnel）。</translation>
+    </message>
+    <message>
+        <source>Built-in tunnel is not connected.</source>
+        <translation>内置隧道尚未连接。</translation>
+    </message>
+</context>
+<context>
+    <name>TunnelDialog</name>
+    <message>
+        <source>Built-in tunnel</source>
+        <translation>内置打洞隧道</translation>
+    </message>
+    <message>
+        <source>Runs in isolated userspace without touching your system Tailscale, VPN, or routing table. Configuration and node identity persist across updates.</source>
+        <translation>在应用独立用户态运行，不改动系统路由表，不与系统原有 Tailscale / VPN 冲突；配置与节点身份持久化保存，更新程序不丢失。</translation>
+    </message>
+    <message>
+        <source>Tunnel binary unavailable</source>
+        <translation>未检测到内置隧道程序</translation>
+    </message>
+    <message>
+        <source>Connected (%1)</source>
+        <translation>已连接（%1）</translation>
+    </message>
+    <message>
+        <source>Waiting for browser sign-in (Web OAuth)</source>
+        <translation>等待浏览器网页登录授权（Web OAuth）</translation>
+    </message>
+    <message>
+        <source>Connecting…</source>
+        <translation>正在连接…</translation>
+    </message>
+    <message>
+        <source>Connection error</source>
+        <translation>连接失败</translation>
+    </message>
+    <message>
+        <source>Disconnected</source>
+        <translation>未连接</translation>
+    </message>
+    <message>
+        <source>%1 peers</source>
+        <translation>%1 个在线节点</translation>
+    </message>
+    <message>
+        <source>Virtual IP: %1  ·  Host tunnel IP: %2</source>
+        <translation>虚拟 IP：%1  ·  主机隧道 IP：%2</translation>
+    </message>
+    <message>
+        <source>Virtual IP: %1</source>
+        <translation>虚拟 IP：%1</translation>
+    </message>
+    <message>
+        <source>Open browser to sign in</source>
+        <translation>打开浏览器登录授权</translation>
+    </message>
+    <message>
+        <source>Center server provides default %1 tunnel settings.</source>
+        <translation>中心服务器已下发默认 %1 隧道配置。</translation>
+    </message>
+    <message>
+        <source>Load defaults</source>
+        <translation>一键载入默认配置</translation>
+    </message>
+    <message>
+        <source>Tunnel provider</source>
+        <translation>隧道引擎</translation>
+    </message>
+    <message>
+        <source>Disabled</source>
+        <translation>关闭</translation>
+    </message>
+    <message>
+        <source>Authentication mode</source>
+        <translation>认证方式</translation>
+    </message>
+    <message>
+        <source>Web OAuth (browser)</source>
+        <translation>Web OAuth 网页登录</translation>
+    </message>
+    <message>
+        <source>Manual Auth Key</source>
+        <translation>手动输入 Auth Key</translation>
+    </message>
+    <message>
+        <source>Control server URL (leave blank for official Tailscale, or enter Headscale URL)</source>
+        <translation>控制服务器地址（留空使用官方 Tailscale，或填写自建 Headscale 地址）</translation>
+    </message>
+    <message>
+        <source>Pre-Auth Key</source>
+        <translation>预授权密钥（Pre-Auth Key）</translation>
+    </message>
+    <message>
+        <source>easytier-core / easytier-cli not detected next to the tunnel binary. Specify its path below or use the full SunAndMon package.</source>
+        <translation>未在隧道目录检测到 easytier-core / easytier-cli，请在下方指定路径或使用完整 SunAndMon 发布包。</translation>
+    </message>
+    <message>
+        <source>Network name</source>
+        <translation>网络名称（Network Name）</translation>
+    </message>
+    <message>
+        <source>Network secret</source>
+        <translation>网络密钥（Network Secret）</translation>
+    </message>
+    <message>
+        <source>Shared network secret</source>
+        <translation>共享网络密钥</translation>
+    </message>
+    <message>
+        <source>Peer / relay nodes (comma or space separated)</source>
+        <translation>初始节点 / 中继服务器（逗号或空格分隔）</translation>
+    </message>
+    <message>
+        <source>Static virtual IP (optional, blank = DHCP)</source>
+        <translation>固定虚拟 IP（可选，留空自动 DHCP）</translation>
+    </message>
+    <message>
+        <source>easytier-core path (optional)</source>
+        <translation>easytier-core 路径（可选）</translation>
+    </message>
+    <message>
+        <source>Auto-detect</source>
+        <translation>自动检测</translation>
+    </message>
+    <message>
+        <source>Tunnel hostname (optional)</source>
+        <translation>隧道节点主机名（可选）</translation>
+    </message>
+    <message>
+        <source>Auto (sunandmon-&lt;computer&gt;)</source>
+        <translation>自动（sunandmon-&lt;本机名&gt;）</translation>
+    </message>
+    <message>
+        <source>Connect tunnel automatically when SunAndMon starts</source>
+        <translation>启动 SunAndMon 时自动连接内置隧道</translation>
+    </message>
+    <message>
+        <source>Disconnect</source>
+        <translation>断开连接</translation>
+    </message>
+    <message>
+        <source>Save &amp; Disable</source>
+        <translation>保存并关闭</translation>
+    </message>
+    <message>
+        <source>Save &amp; Connect</source>
+        <translation>保存并连接</translation>
     </message>
 </context>
 </TS>

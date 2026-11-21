@@ -116,6 +116,35 @@ jobs:
           CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /tmp/sunandmon-center-windows-amd64.exe .
           ls -lh /tmp/sunandmon-center-*
 
+  tunnel-test:
+    name: TunnelProvider Go tests & cross-build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tunnel
+    env:
+      GOTOOLCHAIN: auto
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "stable"
+          cache-dependency-path: tunnel/go.sum
+
+      - name: Run vet and race tests
+        run: |
+          go vet ./...
+          go test -v -race ./...
+
+      - name: Verify Linux & Windows cross-compilation
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /tmp/sunandmon-tunnel-linux-amd64 .
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /tmp/sunandmon-tunnel-windows-amd64.exe .
+          ls -lh /tmp/sunandmon-tunnel-*
+
   android-verify:
     name: Android Debug APK verification
     if: github.event_name == 'workflow_dispatch' && inputs.run_android == true

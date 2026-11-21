@@ -7,6 +7,9 @@
 #include <QStringList>
 #include <QUrl>
 #include <QVariantList>
+#include <QVariantMap>
+
+#include "tunnelmanager.h"
 
 class ComputerManager;
 class QNetworkReply;
@@ -40,6 +43,8 @@ class CenterClient : public QObject
     Q_PROPERTY(QUrl hostSettingsUrl READ hostSettingsUrl NOTIFY changed)
     Q_PROPERTY(bool startAtLogin READ startAtLogin NOTIFY changed)
     Q_PROPERTY(QString advertisedAddress READ advertisedAddress NOTIFY changed)
+    Q_PROPERTY(TunnelManager* tunnel READ tunnel CONSTANT)
+    Q_PROPERTY(QVariantMap centerTunnelDefaults READ centerTunnelDefaults NOTIFY changed)
 
 public:
     explicit CenterClient(ComputerManager* computers);
@@ -72,6 +77,8 @@ public:
     QUrl hostSettingsUrl() const;
     bool startAtLogin() const;
     QString advertisedAddress() const { return m_AdvertisedAddress; }
+    TunnelManager* tunnel() const { return m_Tunnel; }
+    QVariantMap centerTunnelDefaults() const { return m_CenterTunnelDefaults; }
 
     Q_INVOKABLE void signIn(const QString& url, const QString& key, const QString& directIp = {});
     Q_INVOKABLE void signOut();
@@ -116,6 +123,7 @@ private:
                            const QByteArray& method, const QByteArray& body = {},
                            const QByteArray& hostKey = {});
     void loadDevices(const CenterEndpoint& endpoint, const QByteArray& key, bool signingIn);
+    void loadCenterTunnelDefaults();
     void sendAdminRequest(const QByteArray& method, const QString& suffix = {}, const QByteArray& body = {});
     void launchHost();
     void launchLocalHostProcess();
@@ -134,6 +142,8 @@ private:
     void setHostStatus(const QString& status);
 
     ComputerManager* m_Computers;
+    TunnelManager* m_Tunnel = nullptr;
+    QVariantMap m_CenterTunnelDefaults;
     QNetworkAccessManager m_Network;
     QNetworkAccessManager m_Direct;
     QProcess m_Engine;

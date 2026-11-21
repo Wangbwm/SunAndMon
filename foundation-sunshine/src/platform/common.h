@@ -1034,6 +1034,13 @@ namespace platf {
 #endif
 
   /**
+   * @brief Toggle the host-side privacy curtain overlay (blackout physical monitors while excluding capture).
+   * @return `true` if the requested state is active (or disabling succeeded), `false` if unsupported or failed.
+   */
+  bool
+  set_privacy_curtain(bool enabled);
+
+  /**
    * @brief Check if GPUs/drivers have changed since the last call to this function.
    * @return `true` if a change has occurred or if it is unknown whether a change occurred.
    */

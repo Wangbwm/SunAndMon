@@ -412,6 +412,7 @@ private:
     bool m_OverrideStreamResolution = false;
     bool m_OverrideStreamFps = false;
     bool m_PrivacyScreen = false;
+    QString m_LastStreamSettingError;
     SDL_Window* m_Window;
     IVideoDecoder* m_VideoDecoder;
     SDL_mutex* m_DecoderLock;

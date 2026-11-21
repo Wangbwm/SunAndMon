@@ -816,7 +816,13 @@ QNetworkReply* CenterClient::request(const CenterEndpoint& endpoint, const QByte
     if (prefix.endsWith('/')) {
         prefix.chop(1);
     }
-    url.setPath(prefix + path);
+    const qsizetype queryPos = path.indexOf('?');
+    if (queryPos >= 0) {
+        url.setPath(prefix + path.left(queryPos));
+        url.setQuery(path.mid(queryPos + 1));
+    } else {
+        url.setPath(prefix + path);
+    }
     const bool direct = !endpoint.directIp.isEmpty();
     if (direct) {
         url.setHost(endpoint.directIp);
@@ -1063,6 +1069,13 @@ void CenterClient::deleteAdminNode(const QString& id)
 {
     if (adminAuthenticated() && NodeIdFormat.match(id).hasMatch()) {
         sendAdminRequest("DELETE", "/" + id);
+    }
+}
+
+void CenterClient::purgeAdminNode(const QString& id)
+{
+    if (adminAuthenticated() && NodeIdFormat.match(id).hasMatch()) {
+        sendAdminRequest("DELETE", "/" + id + "?permanent=1");
     }
 }
 

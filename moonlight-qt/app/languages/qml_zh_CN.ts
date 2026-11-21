@@ -3114,6 +3114,18 @@
         <translation>新设置未能应用，已恢复原串流设置。</translation>
     </message>
     <message>
+        <source>Could not apply the new stream settings: %1</source>
+        <translation>新设置未能应用：%1</translation>
+    </message>
+    <message>
+        <source>Privacy screen enabled</source>
+        <translation>已开启隐私屏</translation>
+    </message>
+    <message>
+        <source>Privacy screen disabled</source>
+        <translation>已关闭隐私屏</translation>
+    </message>
+    <message>
         <source>Applying stream settings…</source>
         <translation>正在应用串流设置…</translation>
     </message>
@@ -4252,6 +4264,14 @@
 <context>
     <name>DeviceDashboard</name>
     <message>
+        <source>Search devices</source>
+        <translation>搜索设备</translation>
+    </message>
+    <message>
+        <source>No matching devices</source>
+        <translation>没有匹配的设备</translation>
+    </message>
+    <message>
         <source>Port in use</source>
         <translation>端口被占用</translation>
     </message>
@@ -4535,8 +4555,40 @@
         <translation>已登记</translation>
     </message>
     <message>
+        <source>Registered (%1)</source>
+        <translation>已登记 (%1)</translation>
+    </message>
+    <message>
         <source>Deleted</source>
         <translation>已删除</translation>
+    </message>
+    <message>
+        <source>Deleted (%1)</source>
+        <translation>已删除 (%1)</translation>
+    </message>
+    <message>
+        <source>Delete permanently</source>
+        <translation>彻底删除</translation>
+    </message>
+    <message>
+        <source>Move to Deleted</source>
+        <translation>移入已删除</translation>
+    </message>
+    <message>
+        <source>%1 nodes · Page %2 / %3</source>
+        <translation>共 %1 个节点 · 第 %2 / %3 页</translation>
+    </message>
+    <message>
+        <source>Previous</source>
+        <translation>上一页</translation>
+    </message>
+    <message>
+        <source>Next</source>
+        <translation>下一页</translation>
+    </message>
+    <message>
+        <source>Move to Deleted removes this node and blocks re-registration; Delete permanently erases the record immediately.</source>
+        <translation>“移入已删除”会移除节点并阻止其重新登记；“彻底删除”会立即永久清除该记录。</translation>
     </message>
     <message>
         <source>Search nodes</source>

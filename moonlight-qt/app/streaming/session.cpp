@@ -3983,21 +3983,35 @@ bool Session::applyStreamSettings()
 
     update(*m_RequestedStreamSettings);
     m_RequestedStreamSettings.reset();
+    m_LastStreamSettingError.clear();
     m_ApplyingStreamSettings = true;
     m_ConnectionInterrupted = false;
     m_ReconfigureHostDisplay = true;
     bool connected = tryReconnect(true);
     m_ReconfigureHostDisplay = false;
     if (!connected) {
+        const QString applyError = m_LastStreamSettingError;
         update(previous);
         if (!m_ShouldExit) {
             connected = tryReconnect(true);
             if (connected) {
-                showStreamingToast(tr("Could not apply the new stream settings. Restored the previous settings."), 3500);
+                if (!applyError.isEmpty()) {
+                    showStreamingToast(tr("Could not apply the new stream settings: %1").arg(applyError), 4500);
+                } else {
+                    showStreamingToast(tr("Could not apply the new stream settings. Restored the previous settings."), 3500);
+                }
             } else if (!m_ShouldExit) {
                 emit displayLaunchError(tr("Could not reconnect after changing the stream settings."));
             }
         }
+    } else if (m_PrivacyScreen != previous.privacyScreen) {
+        showStreamingToast(m_PrivacyScreen ? tr("Privacy screen enabled") : tr("Privacy screen disabled"), 2500);
+    }
+    if (m_MenuPanel != nullptr) {
+        m_MenuPanel->updateStreamSettings(QSize(m_StreamConfig.width, m_StreamConfig.height), m_StreamConfig.fps,
+                                          m_StreamDisplays, m_LaunchDisplayName, m_LaunchUseVdd,
+                                          !m_Computer->isNvidiaServerSoftware && !m_PrivacyScreen,
+                                          m_Computer->privacyScreenSupported, m_PrivacyScreen);
     }
     m_ApplyingStreamSettings = false;
     return connected;
@@ -4438,11 +4452,17 @@ bool Session::startConnectionAsync()
                         qPrintable(e.toQString()));
         }
     } catch (const GfeHttpResponseException& e) {
+        if (m_ApplyingStreamSettings) {
+            m_LastStreamSettingError = e.toQString();
+        }
         if (!m_SuppressConnectionErrorDialog) {
             emit displayLaunchError(tr("Host returned error: %1").arg(e.toQString()));
         }
         return false;
     } catch (const QtNetworkReplyException& e) {
+        if (m_ApplyingStreamSettings) {
+            m_LastStreamSettingError = e.toQString();
+        }
         if (!m_SuppressConnectionErrorDialog) {
             emit displayLaunchError(e.toQString());
         }

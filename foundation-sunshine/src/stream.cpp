@@ -4871,6 +4871,7 @@ namespace stream {
 #endif
           }
 
+          platf::set_privacy_curtain(false);
           if (restore_display_state || session.config.audio.privacy_screen) {
             display_device::session_t::get().restore_state();
           }

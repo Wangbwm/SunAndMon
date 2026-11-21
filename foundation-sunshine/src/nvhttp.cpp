@@ -247,7 +247,8 @@ namespace nvhttp {
     }
     launch_session->use_vdd = util::from_view(get_arg(args, "useVdd", "0"));
     launch_session->custom_screen_mode = util::from_view(get_arg(args, "customScreenMode", "-1"));
-    if (launch_session->privacy_screen) {
+    if (launch_session->privacy_screen &&
+        display_device::vdd_capability::query_state() == display_device::vdd_capability::state_e::ready) {
       launch_session->use_vdd = true;
       launch_session->custom_screen_mode = static_cast<int>(display_device::parsed_config_t::device_prep_e::ensure_only_display);
     }
@@ -546,9 +547,7 @@ namespace nvhttp {
       tree.put("root.SunAndMonFileClipboard", 1);
     }
 #ifdef _WIN32
-    if (!center_pairing::managed_token.empty()) {
-      tree.put("root.SunAndMonPrivacyScreen", 1);
-    }
+    tree.put("root.SunAndMonPrivacyScreen", 1);
 #endif
     tree.put("root.ExternalPort", net::map_port(PORT_HTTP));
     tree.put("root.MaxLumaPixelsHEVC", video::active_hevc_mode > 1 ? "1869449984" : "0");
@@ -649,6 +648,7 @@ namespace nvhttp {
       response->close_connection_after_response = true;
 
       if (need_to_restore_display_state) {
+        platf::set_privacy_curtain(false);
         display_device::session_t::get().restore_state();
       }
     });
@@ -715,6 +715,12 @@ namespace nvhttp {
       tree.put("root.<xmlattr>.status_code", 500);
       tree.put("root.<xmlattr>.status_message", "Failed to generate launch session credentials");
       return;
+    }
+    if (launch_session->privacy_screen && rtsp_stream::session_starting_or_active()) {
+      const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2500);
+      while (rtsp_stream::session_starting_or_active() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      }
     }
     if (launch_session->privacy_screen && rtsp_stream::session_starting_or_active()) {
       tree.put("root.<xmlattr>.status_code", 409);
@@ -883,6 +889,7 @@ namespace nvhttp {
       response->close_connection_after_response = true;
 
       if (need_to_restore_display_state) {
+        platf::set_privacy_curtain(false);
         display_device::session_t::get().restore_state();
       }
     });
@@ -927,10 +934,18 @@ namespace nvhttp {
     // A session whose ticket is published but whose RTSP handshake is not done yet (or whose launch is still being
     // prepared) is not in session_count() yet, but it owns the display: preparing it again here destroys the virtual display
     // that client is about to capture (a second client's resume did exactly that on 2026-11-12 15:10).
+    const bool wants_reconfigure = get_arg(args, "sunandmonReconfigure", "0") == "1" ||
+                                   get_arg(args, "sunandmonPrivacyScreen", "0") == "1";
+    if (wants_reconfigure) {
+      const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2500);
+      while ((rtsp_stream::session_count() > 0 || rtsp_stream::session_starting_or_active()) &&
+             std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      }
+    }
     const bool session_starting { rtsp_stream::session_starting_or_active() && rtsp_stream::session_count() == 0 };
     const bool no_active_sessions { rtsp_stream::session_count() == 0 && !session_starting };
-    if (!no_active_sessions && (get_arg(args, "sunandmonReconfigure", "0") == "1" ||
-                                get_arg(args, "sunandmonPrivacyScreen", "0") == "1")) {
+    if (!no_active_sessions && wants_reconfigure) {
       tree.put("root.<xmlattr>.status_code", 409);
       tree.put("root.<xmlattr>.status_message", "The previous display is still in use");
       tree.put("root.resume", 0);
@@ -983,8 +998,8 @@ namespace nvhttp {
     if (no_active_sessions) {
       // Prepare before publishing the ticket so the handshake expiration
       // window starts only when the host is ready to accept RTSP.
-      need_to_restore_display_state = launch_session->privacy_screen;
-      if (!stream_start::prepare_display_and_probe_encoders(tree, *launch_session, false)) {
+      need_to_restore_display_state = launch_session->privacy_screen || wants_reconfigure;
+      if (!stream_start::prepare_display_and_probe_encoders(tree, *launch_session, wants_reconfigure)) {
         tree.put("root.resume", 0);
         return;
       }
@@ -1093,6 +1108,7 @@ namespace nvhttp {
 
     // GameStream 的 /cancel 表示退出当前应用，而普通断开由 RTSP/控制通道处理。
     // 清理可能需要等待编码器和应用退出，不能阻塞 NVHTTP 工作线程。
+    platf::set_privacy_curtain(false);
     stream::session::request_global_cancel("Global app cancel"sv);
   }
 

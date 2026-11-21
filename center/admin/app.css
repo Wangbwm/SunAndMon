@@ -84,6 +84,8 @@ tbody tr:last-child td { border-bottom: 0; }
 .status { background: var(--surface); border-inline-start: 3px solid var(--blue); border-radius: 6px; }
 .status.error, .error { color: var(--fail); border-color: var(--fail); }
 .empty { margin: 0; text-align: center; padding: 36px 12px; }
+.pager { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; flex-wrap: wrap; }
+.pager-actions { display: flex; gap: 8px; }
 dialog { width: min(100% - 32px, 500px); padding: 0; margin: auto; color: var(--ink); background: var(--surface);
   border: 1px solid var(--line); border-radius: 14px; box-shadow: 0 20px 90px #04132742; }
 dialog::backdrop { background: #0616268c; }

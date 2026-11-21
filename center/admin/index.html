@@ -45,6 +45,13 @@
         </table>
         <p id="empty" class="empty" hidden></p>
       </div>
+      <div id="pager" class="pager" hidden>
+        <span id="page-info" class="hint"></span>
+        <div class="pager-actions">
+          <button type="button" id="prev-page">上一页</button>
+          <button type="button" id="next-page">下一页</button>
+        </div>
+      </div>
     </section>
   </main>
   <dialog id="edit" aria-labelledby="edit-title">
@@ -73,12 +80,13 @@
       <div class="dialog-body">
         <h2 id="remove-title">删除节点</h2>
         <p id="remove-name"></p>
-        <p class="hint">节点将从中心列表移除。允许重新登记前，中心会拒绝该节点的登记请求。</p>
+        <p class="hint">「移入已删除」会移除节点并阻止原设备 ID 再次登记；「彻底删除记录」会直接清除该条记录且不留痕迹。</p>
         <p class="error" role="alert" hidden></p>
       </div>
       <div class="dialog-actions">
         <button type="button" data-close autofocus>取消</button>
-        <button type="submit" class="danger">删除节点</button>
+        <button type="submit">移入已删除</button>
+        <button type="button" id="purge-confirm" class="danger">彻底删除记录</button>
       </div>
     </form>
   </dialog>

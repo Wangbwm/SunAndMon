@@ -1121,4 +1121,8 @@ namespace platf {
   adapter_names() {
     return {};
   }
+  bool
+  set_privacy_curtain(bool) {
+    return false;
+  }
 }  // namespace platf

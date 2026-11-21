@@ -7,6 +7,8 @@ let key = "";
 let nodes = [];
 let showDeleted = false;
 let selected = null;
+const PAGE_SIZE = 20;
+let currentPage = 1;
 
 function status(message, error = false) {
   const banner = byId("status");
@@ -72,7 +74,11 @@ function render() {
     const { name, addresses = [] } = effective(node);
     return [node.id, name, node.reported.name, ...addresses].some(value => value?.toLowerCase().includes(query));
   });
-  const rows = visible.map(node => {
+  const totalPages = Math.max(1, Math.ceil(visible.length / PAGE_SIZE));
+  if (currentPage > totalPages) currentPage = totalPages;
+  if (currentPage < 1) currentPage = 1;
+  const pageItems = visible.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE);
+  const rows = pageItems.map(node => {
     const { name, addresses = [], port, httpsPort } = effective(node);
     const row = document.createElement("tr");
     const identity = row.insertCell();
@@ -90,16 +96,28 @@ function render() {
     const actions = document.createElement("div");
     actions.className = "actions";
     if (node.deleted) {
-      actions.append(button("允许重新登记", async event => {
-        event.currentTarget.disabled = true;
-        try {
-          await request("/" + encodeURIComponent(node.id) + "/restore", "POST");
-          await reload("已允许重新登记。");
-        } catch (error) {
-          status(error.message, true);
-          render();
-        }
-      }));
+      actions.append(
+        button("允许重新登记", async event => {
+          event.currentTarget.disabled = true;
+          try {
+            await request("/" + encodeURIComponent(node.id) + "/restore", "POST");
+            await reload("已允许重新登记。");
+          } catch (error) {
+            status(error.message, true);
+            render();
+          }
+        }),
+        button("彻底删除", async event => {
+          event.currentTarget.disabled = true;
+          try {
+            await request("/" + encodeURIComponent(node.id) + "?permanent=1", "DELETE");
+            await reload("已彻底删除记录。");
+          } catch (error) {
+            status(error.message, true);
+            render();
+          }
+        }, "remove")
+      );
     } else {
       actions.append(button("编辑", () => showEdit(node)),
                      button("删除", () => showRemove(node), "remove"));
@@ -109,8 +127,13 @@ function render() {
   });
   byId("nodes").replaceChildren(...rows);
   const empty = byId("empty");
-  empty.hidden = rows.length !== 0;
+  empty.hidden = visible.length !== 0;
   empty.textContent = query ? "没有匹配的节点。" : showDeleted ? "暂无已删除的节点。" : "暂无已登记的节点。";
+  const pager = byId("pager");
+  pager.hidden = visible.length === 0;
+  byId("page-info").textContent = `共 ${visible.length} 条 · 第 ${currentPage} / ${totalPages} 页`;
+  byId("prev-page").disabled = currentPage <= 1;
+  byId("next-page").disabled = currentPage >= totalPages;
 }
 
 async function reload(message = "") {
@@ -143,14 +166,14 @@ function showRemove(node) {
   remove.showModal();
 }
 
-async function save(form, method, message, body) {
+async function save(form, method, message, body, suffix = "") {
   const dialog = form.closest("dialog");
   const errorText = form.querySelector(".error");
   const controls = [...form.querySelectorAll("button")];
   controls.forEach(control => { control.disabled = true; });
   errorText.hidden = true;
   try {
-    await request("/" + encodeURIComponent(selected), method, body);
+    await request("/" + encodeURIComponent(selected) + suffix, method, body);
     dialog.close();
     try {
       await reload(message);
@@ -205,9 +228,11 @@ byId("refresh").addEventListener("click", async event => {
   try { await reload(); } catch (error) { status(error.message, true); }
   finally { control.disabled = false; }
 });
-byId("query").addEventListener("input", render);
-byId("active-filter").addEventListener("click", () => { showDeleted = false; render(); });
-byId("deleted-filter").addEventListener("click", () => { showDeleted = true; render(); });
+byId("query").addEventListener("input", () => { currentPage = 1; render(); });
+byId("active-filter").addEventListener("click", () => { showDeleted = false; currentPage = 1; render(); });
+byId("deleted-filter").addEventListener("click", () => { showDeleted = true; currentPage = 1; render(); });
+byId("prev-page").addEventListener("click", () => { if (currentPage > 1) { currentPage--; render(); } });
+byId("next-page").addEventListener("click", () => { currentPage++; render(); });
 for (const control of document.querySelectorAll("[data-close]")) {
   control.addEventListener("click", () => control.closest("dialog").close());
 }
@@ -228,5 +253,8 @@ byId("edit-form").addEventListener("submit", event => {
 });
 byId("remove-form").addEventListener("submit", event => {
   event.preventDefault();
-  save(event.currentTarget, "DELETE", "节点已删除。");
+  save(event.currentTarget, "DELETE", "节点已移入已删除列表。");
+});
+byId("purge-confirm").addEventListener("click", () => {
+  save(byId("remove-form"), "DELETE", "已彻底删除节点记录。", undefined, "?permanent=1");
 });

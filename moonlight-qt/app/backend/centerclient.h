@@ -82,6 +82,7 @@ public:
     Q_INVOKABLE void editAdminNode(const QString& id, const QString& name, const QStringList& addresses,
                                   const QString& httpPort, const QString& httpsPort);
     Q_INVOKABLE void deleteAdminNode(const QString& id);
+    Q_INVOKABLE void purgeAdminNode(const QString& id);
     Q_INVOKABLE void restoreAdminNode(const QString& id);
     Q_INVOKABLE void hideDevice(const QString& id);
     Q_INVOKABLE void restoreHiddenDevices();

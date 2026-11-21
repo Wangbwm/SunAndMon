@@ -196,6 +196,26 @@ func TestDeviceRegistrationAndPairing(t *testing.T) {
 	}
 	call("POST", adminEndpoint+"/restore", adminKey, "", "", http.StatusNoContent)
 	call("PUT", endpoint, login, "", encode(input), http.StatusNoContent)
+	// Soft-delete then permanently purge the deleted record via DELETE.
+	call("DELETE", adminEndpoint, adminKey, "", "", http.StatusNoContent)
+	call("DELETE", adminEndpoint, adminKey, "", "", http.StatusNoContent)
+	if got := call("GET", nodes, adminKey, "", "", http.StatusOK); strings.TrimSpace(got) != "[]" {
+		t.Fatalf("purged deleted node still present: %s", got)
+	}
+	c, err = newCenter(path, login)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.adminHash = &adminHash
+	if got := call("GET", nodes, adminKey, "", "", http.StatusOK); strings.TrimSpace(got) != "[]" {
+		t.Fatalf("purged node reappeared after restart: %s", got)
+	}
+	// Direct permanent delete removes active record immediately without leaving a tombstone.
+	call("PUT", endpoint, login, "", encode(input), http.StatusNoContent)
+	call("DELETE", adminEndpoint+"?permanent=1", adminKey, "", "", http.StatusNoContent)
+	if got := call("GET", nodes, adminKey, "", "", http.StatusOK); strings.TrimSpace(got) != "[]" {
+		t.Fatalf("permanently deleted node still present: %s", got)
+	}
 }
 
 func TestDirectoryDeduplicatesOldEndpoints(t *testing.T) {

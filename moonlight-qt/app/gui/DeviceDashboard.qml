@@ -276,50 +276,77 @@ Rectangle {
                         }
                     }
                 }
-                ListView {
-                    id: devices
+                Input {
+                    id: railSearch
+                    visible: dashboard.deviceSource.length > 6 || text.length > 0
                     Layout.fillWidth: true
-                    Layout.preferredHeight: Math.max(0, Math.min(contentHeight, heightLimit))
-                    readonly property real heightLimit: Math.max(0, dashboard.height - 254)
-                    spacing: 3
+                    placeholderText: qsTr("Search devices")
+                    font.pixelSize: 13
+                    padding: 7
+                }
+                Item {
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    Layout.minimumHeight: 0
                     clip: true
-                    model: dashboard.deviceSource
-                    ScrollBar.vertical: ScrollBar {}
-                    delegate: RailButton {
-                        id: deviceRow
-                        required property var modelData
-                        width: ListView.view.width
-                        text: modelData.name || qsTr("Unnamed device")
-                        current: !dashboard.showingLocal && !!dashboard.selectedDevice && dashboard.selectedDevice.id === modelData.id
-                        showDot: true
-                        online: modelData.online === true
-                        Accessible.description: online ? qsTr("Online") : qsTr("Offline")
-                        onClicked: dashboard.selectDevice(modelData)
-                        onPressAndHold: dashboard.showDeviceMenu(modelData, this, Qt.point(width / 2, height / 2))
-                        Keys.onMenuPressed: dashboard.showDeviceMenu(modelData, this, Qt.point(width / 2, height))
-                        Keys.onDeletePressed: dashboard.showDeviceMenu(modelData, this, Qt.point(width / 2, height))
-                        MouseArea {
-                            anchors.fill: parent
-                            acceptedButtons: Qt.RightButton
-                            onClicked: function(mouse) {
-                                dashboard.showDeviceMenu(deviceRow.modelData, deviceRow, Qt.point(mouse.x, mouse.y))
+                    readonly property var filteredDevices: {
+                        const query = railSearch.text.trim().toLowerCase()
+                        if (query.length === 0) {
+                            return dashboard.deviceSource
+                        }
+                        return dashboard.deviceSource.filter(device =>
+                            (device.name || "").toLowerCase().includes(query) ||
+                            (device.id || "").toLowerCase().includes(query)
+                        )
+                    }
+                    ListView {
+                        id: devices
+                        anchors.fill: parent
+                        spacing: 3
+                        clip: true
+                        boundsBehavior: Flickable.StopAtBounds
+                        model: parent.filteredDevices
+                        ScrollBar.vertical: ScrollBar {
+                            policy: devices.contentHeight > devices.height ? ScrollBar.AlwaysOn : ScrollBar.AsNeeded
+                        }
+                        delegate: RailButton {
+                            id: deviceRow
+                            required property var modelData
+                            width: Math.max(0, ListView.view.width - (devices.contentHeight > devices.height ? 12 : 0))
+                            text: modelData.name || qsTr("Unnamed device")
+                            current: !dashboard.showingLocal && !!dashboard.selectedDevice && dashboard.selectedDevice.id === modelData.id
+                            showDot: true
+                            online: modelData.online === true
+                            Accessible.description: online ? qsTr("Online") : qsTr("Offline")
+                            onClicked: dashboard.selectDevice(modelData)
+                            onPressAndHold: dashboard.showDeviceMenu(modelData, this, Qt.point(width / 2, height / 2))
+                            Keys.onMenuPressed: dashboard.showDeviceMenu(modelData, this, Qt.point(width / 2, height))
+                            Keys.onDeletePressed: dashboard.showDeviceMenu(modelData, this, Qt.point(width / 2, height))
+                            MouseArea {
+                                anchors.fill: parent
+                                acceptedButtons: Qt.RightButton
+                                onClicked: function(mouse) {
+                                    dashboard.showDeviceMenu(deviceRow.modelData, deviceRow, Qt.point(mouse.x, mouse.y))
+                                }
                             }
                         }
                     }
-                }
-                Copy {
-                    visible: devices.count === 0
-                    Layout.fillWidth: true
-                    Layout.leftMargin: 7
-                    Layout.rightMargin: 7
-                    text: dashboard.showingLan ? qsTr("No devices discovered")
-                        : dashboard.center.connected ? qsTr("No registered devices") : qsTr("Sign in to see your devices")
-                    font.pixelSize: 13
-                    color: dashboard.muted
-                    wrapMode: Text.WordWrap
+                    Copy {
+                        visible: devices.count === 0
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.top: parent.top
+                        anchors.margins: 7
+                        text: railSearch.text.trim().length > 0 ? qsTr("No matching devices")
+                            : dashboard.showingLan ? qsTr("No devices discovered")
+                            : dashboard.center.connected ? qsTr("No registered devices") : qsTr("Sign in to see your devices")
+                        font.pixelSize: 13
+                        color: dashboard.muted
+                        wrapMode: Text.WordWrap
+                    }
                 }
                 Rectangle {
-                    Layout.fillWidth: true; Layout.topMargin: 8; Layout.bottomMargin: 4
+                    Layout.fillWidth: true; Layout.topMargin: 4; Layout.bottomMargin: 4
                     height: 1; color: dashboard.line
                 }
                 RailButton {
@@ -339,7 +366,6 @@ Rectangle {
                     text: qsTr("Local network")
                     onClicked: dashboard.directoryRequested(false)
                 }
-                Item { Layout.fillHeight: true }
                 Rectangle { Layout.fillWidth: true; height: 1; color: dashboard.line }
                 RailButton {
                     Layout.fillWidth: true

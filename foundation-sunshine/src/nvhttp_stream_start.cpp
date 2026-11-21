@@ -20,6 +20,7 @@
 #include "display_device/vdd_capability.h"
 #include "hdr/session_target.h"
 #include "logging.h"
+#include "platform/common.h"
 #include "telemetry/telemetry.h"
 #include "video.h"
 
@@ -690,152 +691,173 @@ namespace nvhttp::stream_start {
     }
   }
 
+  namespace {
+    bool
+    prepare_display_and_probe_encoders_inner(
+      pt::ptree &tree,
+      rtsp_stream::launch_session_t &launch_session,
+      bool is_reconfigure) {
+      const auto intent = display_device::resolve_display_intent(config::video, launch_session);
+      if (!validate_display_intent(tree, intent)) {
+        return false;
+      }
+
+      // The host may select a VDD even when the client omitted useVdd. Publish
+      // that resolved intent before choosing luminance or programming the driver.
+      const bool use_vdd = intent.target == display_device::display_intent_t::target_e::vdd;
+      if (launch_session.use_vdd != use_vdd) {
+        launch_session.use_vdd = use_vdd;
+        launch_session.env["SUNSHINE_CLIENT_USE_VDD"] = use_vdd ? "true" : "false";
+        hdr::resolve_session_target(launch_session);
+      }
+
+      // Display configuration can change the active capture target, so probe
+      // encoders only after the display stack has settled.
+      const auto display_started = std::chrono::steady_clock::now();
+      auto display_result = display_device::session_t::get().configure_display(config::video, launch_session, is_reconfigure);
+      telemetry::stream_stage(use_vdd ? "vdd_create" : "display_prepare", std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - display_started).count());
+      auto outcome = classify_configure_result(display_result.result);
+
+      auto_recovery_result_t recovery_result;
+      const auto probe_target = make_probe_target(intent);
+      bool probe_matches_display_state = false;
+
+      if (outcome == configure_outcome_e::fatal) {
+        set_display_config_error(tree, display_result);
+        return false;
+      }
+
+      // Track whether the configured display was actually passed to the encoder
+      // probe. Deferred configurations are reclassified after their final retry.
+      const bool initial_state_can_be_probed =
+        outcome == configure_outcome_e::ok || outcome == configure_outcome_e::retry_later;
+      if (initial_state_can_be_probed) {
+        const auto configured_probe_target = make_configured_probe_target(intent, probe_target);
+        const auto probe_started = std::chrono::steady_clock::now();
+        const auto probe_result = video::probe_encoders(configured_probe_target);
+        telemetry::stream_stage("encoder_init", std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - probe_started).count());
+        probe_matches_display_state = true;
+        if (!probe_result) {
+          return true;
+        }
+
+        if (retry_deferred_display_config(
+              launch_session,
+              is_reconfigure,
+              display_result,
+              recovery_result,
+              probe_target,
+              probe_matches_display_state,
+              intent.target == display_device::display_intent_t::target_e::vdd)) {
+          set_auto_recovery_status(tree, recovery_result);
+          return true;
+        }
+
+        // Every retry reconfigures the display, so display_result now describes the
+        // last attempt instead of the deferral. Re-classify, or the fallback below and
+        // the error we report would still be answering the original question.
+        outcome = classify_configure_result(display_result.result);
+        if (outcome == configure_outcome_e::fatal) {
+          set_auto_recovery_status(tree, recovery_result);
+          set_display_config_error(tree, display_result);
+          return false;
+        }
+      }
+
+      const bool no_display_to_capture =
+        probe_matches_display_state &&
+        video::last_encoder_probe_result.error == video::probe_error_e::no_active_display;
+      bool display_recovery_attempted = false;
+
+      if (recover_display(
+            intent,
+            outcome,
+            no_display_to_capture,
+            launch_session,
+            is_reconfigure,
+            display_result,
+            recovery_result,
+            display_recovery_attempted)) {
+        set_auto_recovery_status(tree, recovery_result);
+        return true;
+      }
+
+      auto_recovery_result_t encoder_recovery_result;
+      if (!display_recovery_attempted && probe_matches_display_state &&
+          recover_with_temporary_encoder_config(
+            encoder_recovery_result,
+            make_configured_probe_target(intent, probe_target))) {
+        set_auto_recovery_status(tree, encoder_recovery_result);
+        return true;
+      }
+      if (!display_recovery_attempted && encoder_recovery_result.attempted) {
+        recovery_result = std::move(encoder_recovery_result);
+      }
+
+      set_auto_recovery_status(tree, recovery_result);
+
+      const bool display_is_the_cause =
+        outcome == configure_outcome_e::mode_refused ||
+        outcome == configure_outcome_e::topology_refused ||
+        outcome == configure_outcome_e::current_only ||
+        outcome == configure_outcome_e::retry_later;
+
+      if (display_is_the_cause) {
+        set_display_config_error(tree, display_result);
+      }
+      else {
+        set_video_probe_error(tree);
+      }
+
+      return false;
+    }
+  }  // namespace
+
   bool
   prepare_display_and_probe_encoders(
     pt::ptree &tree,
     rtsp_stream::launch_session_t &launch_session,
     bool is_reconfigure) {
-    if (launch_session.privacy_screen) {
-      bool has_virtual_output = false;
-#ifdef _WIN32
-      auto com = platf::init_audio_thread();
-      auto audio = com ? platf::audio_control() : nullptr;
-      const auto sink = audio ? audio->sink_info() : std::nullopt;
-      has_virtual_output = config::audio.stream && sink && sink->null_is_virtual_output && sink->null &&
-                           audio->is_sink_format_supported(sink->null->stereo);
-#endif
-      if (!has_virtual_output) {
-        set_sunshine_error(tree, 503, "The privacy screen requires a working virtual audio output.",
-                           "PRIVACY_AUDIO_UNAVAILABLE", "Set up Steam Streaming Speakers or VB-CABLE on the Windows host.",
-                           "review_audio_settings", "audio", "privacy_screen", false);
-        return false;
-      }
-    }
-    const auto intent = display_device::resolve_display_intent(config::video, launch_session);
-    if (!validate_display_intent(tree, intent)) {
-      return false;
+    if (!launch_session.privacy_screen) {
+      platf::set_privacy_curtain(false);
+      return prepare_display_and_probe_encoders_inner(tree, launch_session, is_reconfigure);
     }
 
-    // The host may select a VDD even when the client omitted useVdd. Publish
-    // that resolved intent before choosing luminance or programming the driver.
-    const bool use_vdd = intent.target == display_device::display_intent_t::target_e::vdd;
-    if (launch_session.use_vdd != use_vdd) {
-      launch_session.use_vdd = use_vdd;
-      launch_session.env["SUNSHINE_CLIENT_USE_VDD"] = use_vdd ? "true" : "false";
+    // If ZakoVDD exclusive display was selected (only when ZakoVDD is ready), try it first.
+    if (launch_session.use_vdd) {
+      pt::ptree vdd_tree;
+      if (prepare_display_and_probe_encoders_inner(vdd_tree, launch_session, is_reconfigure)) {
+        platf::set_privacy_curtain(false);
+        return true;
+      }
+      BOOST_LOG(warning) << "Privacy screen VDD exclusive mode failed; falling back to Windows privacy curtain";
+      display_device::session_t::get().restore_state();
+      launch_session.use_vdd = false;
+      launch_session.custom_screen_mode = -1;
+      launch_session.env["SUNSHINE_CLIENT_USE_VDD"] = "false";
       hdr::resolve_session_target(launch_session);
     }
 
-    // Display configuration can change the active capture target, so probe
-    // encoders only after the display stack has settled.
-    const auto display_started = std::chrono::steady_clock::now();
-    auto display_result = display_device::session_t::get().configure_display(config::video, launch_session, is_reconfigure);
-    telemetry::stream_stage(use_vdd ? "vdd_create" : "display_prepare", std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - display_started).count());
-    auto outcome = classify_configure_result(display_result.result);
-
-    auto_recovery_result_t recovery_result;
-    const auto probe_target = make_probe_target(intent);
-    bool probe_matches_display_state = false;
-
-    if (launch_session.privacy_screen) {
-      if (outcome != configure_outcome_e::ok) {
-        set_display_config_error(tree, display_result);
-        return false;
-      }
-      if (video::probe_encoders(make_configured_probe_target(intent, probe_target))) {
-        set_video_probe_error(tree);
-        return false;
-      }
-      return true;
-    }
-
-    if (outcome == configure_outcome_e::fatal) {
-      set_display_config_error(tree, display_result);
+    if (!prepare_display_and_probe_encoders_inner(tree, launch_session, is_reconfigure)) {
+      platf::set_privacy_curtain(false);
       return false;
     }
 
-    // Track whether the configured display was actually passed to the encoder
-    // probe. Deferred configurations are reclassified after their final retry.
-    const bool initial_state_can_be_probed =
-      outcome == configure_outcome_e::ok || outcome == configure_outcome_e::retry_later;
-    if (initial_state_can_be_probed) {
-      const auto configured_probe_target = make_configured_probe_target(intent, probe_target);
-      const auto probe_started = std::chrono::steady_clock::now();
-      const auto probe_result = video::probe_encoders(configured_probe_target);
-      telemetry::stream_stage("encoder_init", std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - probe_started).count());
-      probe_matches_display_state = true;
-      if (!probe_result) {
-        return true;
-      }
-
-      if (retry_deferred_display_config(
-            launch_session,
-            is_reconfigure,
-            display_result,
-            recovery_result,
-            probe_target,
-            probe_matches_display_state,
-            intent.target == display_device::display_intent_t::target_e::vdd)) {
-        set_auto_recovery_status(tree, recovery_result);
-        return true;
-      }
-
-      // Every retry reconfigures the display, so display_result now describes the
-      // last attempt instead of the deferral. Re-classify, or the fallback below and
-      // the error we report would still be answering the original question.
-      outcome = classify_configure_result(display_result.result);
-      if (outcome == configure_outcome_e::fatal) {
-        set_auto_recovery_status(tree, recovery_result);
-        set_display_config_error(tree, display_result);
-        return false;
-      }
+    if (!platf::set_privacy_curtain(true)) {
+      set_sunshine_error(
+        tree,
+        503,
+        "Could not enable the privacy screen overlay on this host.",
+        "PRIVACY_CURTAIN_FAILED",
+        "Ensure SunAndMon host is running in an active Windows desktop session (Windows 10 2004+ / Windows 11).",
+        "check_host_session",
+        "display",
+        "privacy_screen",
+        false);
+      return false;
     }
 
-    const bool no_display_to_capture =
-      probe_matches_display_state &&
-      video::last_encoder_probe_result.error == video::probe_error_e::no_active_display;
-    bool display_recovery_attempted = false;
-
-    if (recover_display(
-          intent,
-          outcome,
-          no_display_to_capture,
-          launch_session,
-          is_reconfigure,
-          display_result,
-          recovery_result,
-          display_recovery_attempted)) {
-      set_auto_recovery_status(tree, recovery_result);
-      return true;
-    }
-
-    auto_recovery_result_t encoder_recovery_result;
-    if (!display_recovery_attempted && probe_matches_display_state &&
-        recover_with_temporary_encoder_config(
-          encoder_recovery_result,
-          make_configured_probe_target(intent, probe_target))) {
-      set_auto_recovery_status(tree, encoder_recovery_result);
-      return true;
-    }
-    if (!display_recovery_attempted && encoder_recovery_result.attempted) {
-      recovery_result = std::move(encoder_recovery_result);
-    }
-
-    set_auto_recovery_status(tree, recovery_result);
-
-    const bool display_is_the_cause =
-      outcome == configure_outcome_e::mode_refused ||
-      outcome == configure_outcome_e::topology_refused ||
-      outcome == configure_outcome_e::current_only ||
-      outcome == configure_outcome_e::retry_later;
-
-    if (display_is_the_cause) {
-      set_display_config_error(tree, display_result);
-    }
-    else {
-      set_video_probe_error(tree);
-    }
-
-    return false;
+    return true;
   }
 
 }  // namespace nvhttp::stream_start

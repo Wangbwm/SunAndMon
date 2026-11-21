@@ -606,6 +606,11 @@ namespace platf {
   query_session_locked() {
     return std::nullopt;
   }
+
+  bool
+  set_privacy_curtain(bool) {
+    return false;
+  }
 }  // namespace platf
 
 namespace dyn {

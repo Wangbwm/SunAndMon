@@ -599,22 +599,21 @@ namespace audio {
       }
       const auto frame_size = config.packetDuration * stream.sampleRate / 1000;
       const bool continuous_audio = config.flags[config_t::CONTINUOUS_AUDIO];
-      const std::string capture_sink = config.privacy_screen || !config::audio.sink.empty() ? *sink : std::string {};
+      const bool has_privacy_virtual_sink = config.privacy_screen && ref->sink.null_is_virtual_output && muted_route;
+      const std::string capture_sink = has_privacy_virtual_sink || !config::audio.sink.empty() ? *sink : std::string {};
       return control->microphone(capture_mapping, capture_channels, stream.sampleRate, frame_size, continuous_audio, capture_sink);
     };
 
-    if (config.privacy_screen && (!ref->sink.null_is_virtual_output || !muted_route_for_stream())) {
-      BOOST_LOG(error) << "Privacy screen audio could not be routed to a virtual output";
-      shutdown_event->raise(true);
-      return;
-    }
     std::unique_ptr<platf::deinit_t> muted_outputs;
     if (config.privacy_screen) {
-      muted_outputs = control->mute_playback_except(*muted_route->sink);
-      if (!muted_outputs) {
-        BOOST_LOG(error) << "Privacy screen could not mute the other audio outputs";
-        shutdown_event->raise(true);
-        return;
+      if (ref->sink.null_is_virtual_output && muted_route_for_stream()) {
+        muted_outputs = control->mute_playback_except(*muted_route->sink);
+        if (!muted_outputs) {
+          BOOST_LOG(warning) << "Privacy screen could not mute other audio outputs; continuing stream";
+        }
+      }
+      else {
+        BOOST_LOG(warning) << "Privacy screen has no virtual audio output available; continuing with default audio capture";
       }
     }
     if (!ref->sink_flag->exchange(true, std::memory_order_acquire)) {
@@ -627,11 +626,11 @@ namespace audio {
       if (ref->restore_sink || (config::audio.keep_sink_default && !sink->empty())) {
         const auto sink_status = control->set_sink(*sink);
         if (sink_status && config.privacy_screen) {
-          BOOST_LOG(error) << "Privacy screen could not set the virtual audio output";
-          shutdown_event->raise(true);
+          BOOST_LOG(warning) << "Privacy screen could not set the virtual audio output; continuing stream";
+        }
+        else if (sink_status && ref->restore_sink) {
           return;
         }
-        if (sink_status && ref->restore_sink) return;
       }
     }
 
@@ -640,9 +639,7 @@ namespace audio {
     bool applied_host_audio = host_audio();
     auto mic = open_microphone(applied_host_audio, capture_channels, capture_mapping);
     if (config.privacy_screen && !mic) {
-      BOOST_LOG(error) << "Privacy screen could not capture the virtual audio output";
-      shutdown_event->raise(true);
-      return;
+      BOOST_LOG(warning) << "Privacy screen could not open virtual audio output immediately; will retry";
     }
 
     // Opens the capture endpoint again until it works or the stream ends. The system losing its default playback device while

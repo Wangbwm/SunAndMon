@@ -13,7 +13,9 @@
 
 #include <atomic>
 #include <chrono>
+#include <future>
 #include <mutex>
+#include <thread>
 
 #include <boost/algorithm/string.hpp>
 #include <boost/asio/ip/address.hpp>
@@ -2660,5 +2662,205 @@ namespace platf {
       default:
         return std::nullopt;
     }
+  }
+
+#ifndef WDA_EXCLUDEFROMCAPTURE
+  #define WDA_EXCLUDEFROMCAPTURE 0x00000011
+#endif
+
+  namespace {
+    constexpr wchar_t kPrivacyCurtainClassName[] = L"SunAndMonPrivacyCurtainWnd";
+    constexpr UINT_PTR kPrivacyCurtainTimerId = 1;
+
+    LRESULT CALLBACK
+    privacy_curtain_wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
+      switch (msg) {
+        case WM_ERASEBKGND: {
+          RECT rc {};
+          GetClientRect(hwnd, &rc);
+          FillRect(reinterpret_cast<HDC>(wparam), &rc, static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
+          return 1;
+        }
+        case WM_PAINT: {
+          PAINTSTRUCT ps {};
+          HDC hdc = BeginPaint(hwnd, &ps);
+          if (hdc) {
+            FillRect(hdc, &ps.rcPaint, static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
+          }
+          EndPaint(hwnd, &ps);
+          return 0;
+        }
+        case WM_NCHITTEST:
+          return HTTRANSPARENT;
+        case WM_MOUSEACTIVATE:
+          return MA_NOACTIVATE;
+        case WM_DISPLAYCHANGE:
+        case WM_TIMER: {
+          int vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
+          int vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
+          int vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+          int vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+          if (vw <= 0 || vh <= 0) {
+            vx = 0;
+            vy = 0;
+            vw = GetSystemMetrics(SM_CXSCREEN);
+            vh = GetSystemMetrics(SM_CYSCREEN);
+          }
+          SetWindowPos(hwnd, HWND_TOPMOST, vx, vy, vw, vh, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+          return 0;
+        }
+        case WM_CLOSE:
+          KillTimer(hwnd, kPrivacyCurtainTimerId);
+          DestroyWindow(hwnd);
+          return 0;
+        case WM_DESTROY:
+          PostQuitMessage(0);
+          return 0;
+        default:
+          return DefWindowProcW(hwnd, msg, wparam, lparam);
+      }
+    }
+
+    struct privacy_curtain_controller_t {
+      std::mutex mutex;
+      std::thread worker;
+      HWND hwnd { nullptr };
+      bool active { false };
+
+      ~privacy_curtain_controller_t() {
+        set(false);
+      }
+
+      bool
+      set(bool enabled) {
+        std::thread old_worker;
+        if (!enabled) {
+          {
+            std::lock_guard<std::mutex> lock(mutex);
+            if (!active && !worker.joinable()) {
+              return true;
+            }
+            if (hwnd && IsWindow(hwnd)) {
+              PostMessageW(hwnd, WM_CLOSE, 0, 0);
+            }
+            old_worker = std::move(worker);
+            hwnd = nullptr;
+            active = false;
+          }
+          if (old_worker.joinable()) {
+            old_worker.join();
+          }
+          BOOST_LOG(info) << "Privacy screen curtain disabled"sv;
+          return true;
+        }
+
+        std::lock_guard<std::mutex> lock(mutex);
+        if (active && hwnd && IsWindow(hwnd)) {
+          return true;
+        }
+        if (worker.joinable()) {
+          if (hwnd && IsWindow(hwnd)) {
+            PostMessageW(hwnd, WM_CLOSE, 0, 0);
+          }
+          worker.join();
+          hwnd = nullptr;
+          active = false;
+        }
+
+        std::promise<HWND> ready_promise;
+        auto ready_future = ready_promise.get_future();
+
+        worker = std::thread([promise = std::move(ready_promise)]() mutable {
+          const HINSTANCE instance = GetModuleHandleW(nullptr);
+          WNDCLASSEXW wc {};
+          wc.cbSize = sizeof(wc);
+          wc.lpfnWndProc = privacy_curtain_wnd_proc;
+          wc.hInstance = instance;
+          wc.hbrBackground = static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
+          wc.lpszClassName = kPrivacyCurtainClassName;
+          if (!RegisterClassExW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
+            BOOST_LOG(error) << "Privacy screen curtain failed to register window class: "sv << GetLastError();
+            promise.set_value(nullptr);
+            return;
+          }
+
+          int vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
+          int vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
+          int vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+          int vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+          if (vw <= 0 || vh <= 0) {
+            vx = 0;
+            vy = 0;
+            vw = GetSystemMetrics(SM_CXSCREEN);
+            vh = GetSystemMetrics(SM_CYSCREEN);
+          }
+
+          const DWORD ex_style = WS_EX_TOPMOST | WS_EX_TRANSPARENT | WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
+          HWND created = CreateWindowExW(
+            ex_style,
+            kPrivacyCurtainClassName,
+            L"SunAndMon Privacy Screen",
+            WS_POPUP,
+            vx,
+            vy,
+            vw,
+            vh,
+            nullptr,
+            nullptr,
+            instance,
+            nullptr);
+          if (!created) {
+            BOOST_LOG(error) << "Privacy screen curtain failed to create window: "sv << GetLastError();
+            promise.set_value(nullptr);
+            return;
+          }
+
+          SetLayeredWindowAttributes(created, 0, 255, LWA_ALPHA);
+          if (!SetWindowDisplayAffinity(created, WDA_EXCLUDEFROMCAPTURE)) {
+            BOOST_LOG(error) << "Privacy screen curtain failed to set WDA_EXCLUDEFROMCAPTURE: "sv << GetLastError();
+            DestroyWindow(created);
+            promise.set_value(nullptr);
+            return;
+          }
+
+          ShowWindow(created, SW_SHOWNOACTIVATE);
+          SetWindowPos(created, HWND_TOPMOST, vx, vy, vw, vh, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+          SetTimer(created, kPrivacyCurtainTimerId, 500, nullptr);
+          promise.set_value(created);
+
+          MSG msg {};
+          while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+          }
+        });
+
+        HWND created_hwnd = ready_future.get();
+        if (!created_hwnd) {
+          if (worker.joinable()) {
+            worker.join();
+          }
+          hwnd = nullptr;
+          active = false;
+          return false;
+        }
+
+        hwnd = created_hwnd;
+        active = true;
+        BOOST_LOG(info) << "Privacy screen curtain enabled (WDA_EXCLUDEFROMCAPTURE)"sv;
+        return true;
+      }
+    };
+
+    privacy_curtain_controller_t &
+    privacy_curtain_controller() {
+      static privacy_curtain_controller_t controller;
+      return controller;
+    }
+  }  // namespace
+
+  bool
+  set_privacy_curtain(bool enabled) {
+    return privacy_curtain_controller().set(enabled);
   }
 }  // namespace platf

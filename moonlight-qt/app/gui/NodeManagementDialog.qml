@@ -10,14 +10,23 @@ Basic.Dialog {
     property bool showDeleted: false
     property string mode: "list"
     property var selectedNode: null
+    property int currentPage: 1
+    readonly property int pageSize: 10
+    readonly property int activeCount: center.adminNodes.filter(node => !node.deleted).length
+    readonly property int deletedCount: center.adminNodes.filter(node => node.deleted).length
 
     readonly property var rows: center.adminNodes.filter(node => {
         if (node.deleted !== showDeleted)
             return false
         const query = search.text.trim().toLowerCase()
+        if (query.length === 0)
+            return true
         const keys = [node.id, titleFor(node), node.reported.name, ...valueFor(node, "addresses", [])]
         return keys.some(key => key && key.toLowerCase().includes(query))
     })
+    readonly property int totalPages: Math.max(1, Math.ceil(rows.length / pageSize))
+    readonly property int safePage: Math.min(Math.max(1, currentPage), totalPages)
+    readonly property var pagedRows: rows.slice((safePage - 1) * pageSize, safePage * pageSize)
 
     parent: Overlay.overlay
     anchors.centerIn: parent
@@ -61,6 +70,7 @@ Basic.Dialog {
         keyField.clear()
         search.clear()
         showDeleted = false
+        currentPage = 1
         mode = "list"
         selectedNode = null
         center.adminSignOut()
@@ -136,24 +146,31 @@ Basic.Dialog {
             visible: dialog.center.adminAuthenticated && dialog.mode === "list"
             Layout.fillWidth: true
             HardButton {
-                text: qsTr("Registered")
+                text: qsTr("Registered (%1)").arg(dialog.activeCount)
                 checkable: true
                 checked: !dialog.showDeleted
                 primary: checked
-                onClicked: dialog.showDeleted = false
+                onClicked: {
+                    dialog.showDeleted = false
+                    dialog.currentPage = 1
+                }
             }
             HardButton {
-                text: qsTr("Deleted")
+                text: qsTr("Deleted (%1)").arg(dialog.deletedCount)
                 checkable: true
                 checked: dialog.showDeleted
                 primary: checked
-                onClicked: dialog.showDeleted = true
+                onClicked: {
+                    dialog.showDeleted = true
+                    dialog.currentPage = 1
+                }
             }
             Field {
                 id: search
                 Layout.fillWidth: true
                 placeholderText: qsTr("Search nodes")
                 Accessible.name: placeholderText
+                onTextChanged: dialog.currentPage = 1
             }
             HardButton {
                 text: qsTr("Refresh")
@@ -168,7 +185,7 @@ Basic.Dialog {
             visible: dialog.center.adminAuthenticated && dialog.mode === "list"
             clip: true
             spacing: 8
-            model: dialog.rows
+            model: dialog.pagedRows
             ScrollBar.vertical: ScrollBar {}
             delegate: Rectangle {
                 id: row
@@ -242,6 +259,12 @@ Basic.Dialog {
                         enabled: !dialog.center.adminBusy
                         onClicked: dialog.center.restoreAdminNode(row.modelData.id)
                     }
+                    HardButton {
+                        visible: row.modelData.deleted
+                        text: qsTr("Delete permanently")
+                        enabled: !dialog.center.adminBusy
+                        onClicked: dialog.center.purgeAdminNode(row.modelData.id)
+                    }
                 }
             }
             LabelText {
@@ -249,6 +272,27 @@ Basic.Dialog {
                 visible: list.count === 0
                 color: Theme.textDim
                 text: dialog.center.adminBusy ? qsTr("Loading…") : qsTr("No matching nodes")
+            }
+        }
+        RowLayout {
+            visible: dialog.center.adminAuthenticated && dialog.mode === "list" && dialog.rows.length > 0
+            Layout.fillWidth: true
+            LabelText {
+                Layout.fillWidth: true
+                color: Theme.textDim
+                font.pixelSize: 12
+                text: qsTr("%1 nodes · Page %2 / %3")
+                    .arg(dialog.rows.length).arg(dialog.safePage).arg(dialog.totalPages)
+            }
+            HardButton {
+                text: qsTr("Previous")
+                enabled: !dialog.center.adminBusy && dialog.safePage > 1
+                onClicked: dialog.currentPage = dialog.safePage - 1
+            }
+            HardButton {
+                text: qsTr("Next")
+                enabled: !dialog.center.adminBusy && dialog.safePage < dialog.totalPages
+                onClicked: dialog.currentPage = dialog.safePage + 1
             }
         }
         ColumnLayout {
@@ -342,7 +386,7 @@ Basic.Dialog {
             LabelText {
                 Layout.fillWidth: true
                 color: Theme.textDim
-                text: qsTr("This node will be removed from the center until registration is allowed again.")
+                text: qsTr("Move to Deleted removes this node and blocks re-registration; Delete permanently erases the record immediately.")
                 wrapMode: Text.Wrap
             }
             Item { Layout.fillHeight: true }
@@ -355,9 +399,15 @@ Basic.Dialog {
                     onClicked: dialog.mode = "list"
                 }
                 HardButton {
-                    text: qsTr("Delete")
+                    text: qsTr("Move to Deleted")
                     enabled: !dialog.center.adminBusy && dialog.selectedNode !== null
                     onClicked: dialog.center.deleteAdminNode(dialog.selectedNode.id)
+                }
+                HardButton {
+                    text: qsTr("Delete permanently")
+                    primary: true
+                    enabled: !dialog.center.adminBusy && dialog.selectedNode !== null
+                    onClicked: dialog.center.purgeAdminNode(dialog.selectedNode.id)
                 }
             }
         }

@@ -143,12 +143,13 @@ func (c *center) adminDelete(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	if old.Deleted {
-		w.WriteHeader(http.StatusNoContent)
-		return
-	}
-	c.devices[id] = registration{
-		device: device{ID: id, Name: old.effectiveDevice().Name}, Deleted: true,
+	permanent := r.URL.Query().Get("permanent") == "1" || old.Deleted
+	if permanent {
+		delete(c.devices, id)
+	} else {
+		c.devices[id] = registration{
+			device: device{ID: id, Name: old.effectiveDevice().Name}, Deleted: true,
+		}
 	}
 	c.saveAdminChange(w, id, old)
 }

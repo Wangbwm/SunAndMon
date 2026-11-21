@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -261,7 +262,49 @@ func (e *EasyTierProvider) Start(ctx context.Context, cfg Config) error {
 	return nil
 }
 
+func diagnoseEasyTierPeers(peers []string) string {
+	var failures []string
+	for _, raw := range peers {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		u, err := url.Parse(raw)
+		if err != nil || u.Host == "" {
+			failures = append(failures, fmt.Sprintf("%s (invalid URL)", raw))
+			continue
+		}
+		host := u.Hostname()
+		port := u.Port()
+		if port == "" {
+			port = "11010"
+		}
+		if net.ParseIP(host) == nil {
+			if addrs, derr := net.LookupHost(host); derr != nil || len(addrs) == 0 {
+				failures = append(failures, fmt.Sprintf("%s (DNS lookup failed)", raw))
+				continue
+			}
+		}
+		if strings.EqualFold(u.Scheme, "tcp") || strings.EqualFold(u.Scheme, "ws") || strings.EqualFold(u.Scheme, "wss") {
+			c, cerr := net.DialTimeout("tcp", net.JoinHostPort(host, port), 2*time.Second)
+			if cerr != nil {
+				failures = append(failures, fmt.Sprintf("%s (unreachable)", raw))
+				continue
+			}
+			_ = c.Close()
+			return ""
+		}
+		return ""
+	}
+	if len(failures) == 0 {
+		return ""
+	}
+	return "Peer unreachable: " + strings.Join(failures, ", ") + ". Enter a reachable EasyTier relay or self-hosted node."
+}
+
 func (e *EasyTierProvider) pollStatus(ctx context.Context, cliPath, rpcAddr string) {
+	startedAt := time.Now()
+	diagnosed := false
 	ticker := time.NewTicker(1200 * time.Millisecond)
 	defer ticker.Stop()
 
@@ -288,6 +331,22 @@ func (e *EasyTierProvider) pollStatus(ctx context.Context, cliPath, rpcAddr stri
 						e.lastErr = ""
 					}
 					e.mu.Unlock()
+				} else if !diagnosed && time.Since(startedAt) >= 4*time.Second {
+					diagnosed = true
+					e.mu.Lock()
+					peersCopy := append([]string(nil), e.cfg.Peers...)
+					e.mu.Unlock()
+					if len(peersCopy) == 0 {
+						peersCopy = []string{"tcp://public.easytier.top:11010"}
+					}
+					if msg := diagnoseEasyTierPeers(peersCopy); msg != "" {
+						e.mu.Lock()
+						if e.state == "starting" {
+							e.state = "error"
+							e.lastErr = msg
+						}
+						e.mu.Unlock()
+					}
 				}
 			}
 		}

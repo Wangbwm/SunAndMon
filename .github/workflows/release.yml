@@ -1,0 +1,504 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version without leading v (defaults to tag or dev)"
+        required: false
+        default: ""
+        type: string
+      publish_release:
+        description: "Publish GitHub Release (automatic for v* tags)"
+        required: false
+        default: false
+        type: boolean
+      build_windows:
+        description: "Build Windows x64 portable bundle"
+        type: boolean
+        default: true
+      build_linux:
+        description: "Build Linux amd64 .deb package"
+        type: boolean
+        default: true
+      build_android:
+        description: "Build Android APK"
+        type: boolean
+        default: true
+      build_center:
+        description: "Build Go Center binaries (Linux & Windows)"
+        type: boolean
+        default: true
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    name: Resolve release version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      tag: ${{ steps.meta.outputs.tag }}
+      should_publish: ${{ steps.meta.outputs.should_publish }}
+      run_windows: ${{ steps.meta.outputs.run_windows }}
+      run_linux: ${{ steps.meta.outputs.run_linux }}
+      run_android: ${{ steps.meta.outputs.run_android }}
+      run_center: ${{ steps.meta.outputs.run_center }}
+    steps:
+      - id: meta
+        run: |
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            TAG="${{ github.ref_name }}"
+            VERSION="${TAG#v}"
+            SHOULD_PUBLISH="true"
+            RUN_WIN="true"; RUN_LIN="true"; RUN_AND="true"; RUN_CTR="true"
+          else
+            RAW="${{ inputs.version }}"
+            VERSION="${RAW#v}"
+            if [[ -z "$VERSION" ]]; then
+              VERSION="0.0.0-${GITHUB_SHA::7}"
+            fi
+            TAG="v${VERSION}"
+            SHOULD_PUBLISH="${{ inputs.publish_release }}"
+            RUN_WIN="${{ inputs.build_windows }}"
+            RUN_LIN="${{ inputs.build_linux }}"
+            RUN_AND="${{ inputs.build_android }}"
+            RUN_CTR="${{ inputs.build_center }}"
+          fi
+          {
+            echo "version=$VERSION"
+            echo "tag=$TAG"
+            echo "should_publish=$SHOULD_PUBLISH"
+            echo "run_windows=$RUN_WIN"
+            echo "run_linux=$RUN_LIN"
+            echo "run_android=$RUN_AND"
+            echo "run_center=$RUN_CTR"
+          } >> "$GITHUB_OUTPUT"
+
+  build-center:
+    name: Center (Linux & Windows)
+    needs: prepare
+    if: needs.prepare.outputs.run_center == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: center/go.mod
+          cache-dependency-path: center/go.mod
+
+      - name: Test and build center binaries
+        working-directory: center
+        run: |
+          go test -race ./...
+          mkdir -p ../dist-release
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o ../dist-release/sunandmon-center-linux-amd64 .
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o ../dist-release/sunandmon-center-windows-amd64.exe .
+          ls -lh ../dist-release/
+
+      - name: Upload Center artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-center
+          path: dist-release/*
+          if-no-files-found: error
+
+  build-web-ui:
+    name: Sunshine Web UI (shared)
+    needs: prepare
+    if: needs.prepare.outputs.run_linux == 'true' || needs.prepare.outputs.run_windows == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: foundation-sunshine/.node-version
+          cache: npm
+          cache-dependency-path: foundation-sunshine/package-lock.json
+
+      - name: Fetch foundation-ui sibling dependency
+        run: |
+          set -euo pipefail
+          SHA=$(tr -d '\r\n' < foundation-sunshine/scripts/ci/foundation-ui.sha)
+          DIR="${GITHUB_WORKSPACE}/ds5-ui-m3e"
+          git init -q "$DIR"
+          git -C "$DIR" fetch -q --depth 1 https://github.com/AlkaidLab/foundation-ui "$SHA"
+          git -C "$DIR" -c advice.detachedHead=false checkout -q FETCH_HEAD
+          npm ci --prefix "$DIR" --no-audit --no-fund
+
+      - name: Build Sunshine Web UI
+        working-directory: foundation-sunshine
+        run: |
+          set -euo pipefail
+          npm ci --no-audit --no-fund
+          mkdir -p build
+          SUNSHINE_SOURCE_ASSETS_DIR="${GITHUB_WORKSPACE}/foundation-sunshine/src_assets" \
+          SUNSHINE_ASSETS_DIR="${GITHUB_WORKSPACE}/foundation-sunshine/build" \
+          npm run build
+          test -f build/assets/web/index.html
+
+      - name: Upload Web UI assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: sunshine-web-ui
+          path: foundation-sunshine/build/assets/web
+          if-no-files-found: error
+
+  build-linux:
+    name: Linux amd64 (.deb)
+    needs: [prepare, build-web-ui]
+    if: needs.prepare.outputs.run_linux == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Download Sunshine Web UI assets
+        uses: actions/download-artifact@v4
+        with:
+          name: sunshine-web-ui
+          path: .ci-web-assets
+
+      - name: Install Ubuntu 24.04 build dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build pkg-config dpkg-dev python3 git curl ca-certificates \
+            qmake6 qt6-base-dev qt6-declarative-dev qt6-svg-dev qt6-multimedia-dev qt6-wayland-dev \
+            qml6-module-qtquick qml6-module-qtquick-controls qml6-module-qtquick-layouts \
+            qml6-module-qtquick-window qml6-module-qtquick-dialogs qml6-module-qtquick-templates \
+            qml6-module-qtqml-workerscript qml6-module-qtcore qml6-module-qt-labs-platform \
+            qt6-wayland libqt6svg6 \
+            libgl1-mesa-dev libegl1-mesa-dev libdrm-dev libva-dev libvdpau-dev libgbm-dev \
+            libsdl2-dev libsdl2-ttf-dev libavcodec-dev libavformat-dev libavutil-dev libswscale-dev \
+            libopus-dev libssl-dev libcap-dev libcurl4-openssl-dev libevdev-dev libminiupnpc-dev \
+            libnotify-dev libnuma-dev libpulse-dev libpipewire-0.3-dev libwayland-dev wayland-protocols \
+            libx11-dev libxcb1-dev libxcb-shm0-dev libxcb-xfixes0-dev libxfixes-dev libxrandr-dev \
+            libxtst-dev libudev-dev libboost-all-dev
+
+      - name: Build and package Linux .deb
+        env:
+          SUNANDMON_VERSION: ${{ needs.prepare.outputs.version }}
+          SUNANDMON_WEB_ASSETS_DIR: ${{ github.workspace }}/.ci-web-assets
+        run: |
+          set -euo pipefail
+          bash scripts/build-linux.sh
+          ls -lh dist/sunandmon_${SUNANDMON_VERSION}_amd64.deb
+
+      - name: Upload Linux .deb artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-linux
+          path: dist/sunandmon_*_amd64.deb
+          if-no-files-found: error
+
+  build-android:
+    name: Android APK
+    needs: prepare
+    if: needs.prepare.outputs.run_android == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      AUDIO_HAPTICS_SDK_REF: b3f97c3bb7500ea7b1985aea568e5c7b40308d3b
+      AUDIO_HAPTICS_SDK_DIR: ${{ github.workspace }}/.deps/moonlight-audio-haptics
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Checkout audio haptics SDK
+        uses: actions/checkout@v4
+        with:
+          repository: AlkaidLab/moonlight-audio-haptics
+          ref: ${{ env.AUDIO_HAPTICS_SDK_REF }}
+          path: .deps/moonlight-audio-haptics
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+          cache-dependency-path: |
+            moonlight-vplus/**/*.gradle*
+            moonlight-vplus/**/gradle-wrapper.properties
+
+      - name: Set up Android SDK/NDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools platforms;android-36 build-tools;36.0.0 ndk;28.2.13676358 cmake;3.22.1
+
+      - name: Accept Android licenses
+        run: yes | sdkmanager --licenses > /dev/null || true
+
+      - name: Build signed APK (Release when keystore configured, else Debug)
+        working-directory: moonlight-vplus
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          rm -f local.properties
+          chmod +x gradlew
+          mkdir -p ../dist-release
+
+          if [[ -n "${ANDROID_KEYSTORE_BASE64:-}" && -n "${KEYSTORE_PASSWORD:-}" && -n "${KEY_ALIAS:-}" && -n "${KEY_PASSWORD:-}" ]]; then
+            echo "Building formally signed NonRoot Release APK..."
+            echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/sunandmon-release.jks"
+            export KEYSTORE_PATH="$RUNNER_TEMP/sunandmon-release.jks"
+            ./gradlew :app:assembleNonRootRelease --stacktrace
+            APK=$(find app/build/outputs/apk/nonRoot/release -maxdepth 1 -type f -name '*.apk' -print -quit)
+            OUT="../dist-release/SunAndMon-Android-${RELEASE_VERSION}.apk"
+          else
+            echo "ANDROID_KEYSTORE_* secrets not configured; building signed NonRoot Debug APK..."
+            ./gradlew :app:assembleNonRootDebug --stacktrace
+            APK=$(find app/build/outputs/apk/nonRoot/debug -maxdepth 1 -type f -name '*.apk' -print -quit)
+            OUT="../dist-release/SunAndMon-Android-${RELEASE_VERSION}-debug.apk"
+          fi
+
+          test -n "$APK"
+          cp "$APK" "$OUT"
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs "$OUT"
+          python3 - "$OUT" <<'PY'
+          import sys, zipfile
+          with zipfile.ZipFile(sys.argv[1]) as z:
+              assert z.testzip() is None
+              names = set(z.namelist())
+              for req in (
+                  "lib/arm64-v8a/libmoonlight-core.so",
+                  "lib/arm64-v8a/libmoonlight_usbip.so",
+                  "lib/arm64-v8a/libmoonlight-framegen.so",
+                  "lib/armeabi-v7a/libmoonlight-core.so",
+                  "lib/armeabi-v7a/libmoonlight_usbip.so",
+                  "res/drawable-nodpi-v4/ic_sunandmon_foreground.png",
+              ):
+                  assert req in names, f"Missing {req}"
+              dex = b"".join(z.read(n) for n in names if n.startswith("classes") and n.endswith(".dex"))
+              for marker in (b"CenterDirectory", b"CenterDeviceView", b"sunandmon-pair", b"/v1/devices"):
+                  assert marker in dex, f"Missing DEX marker {marker}"
+          print("Android APK verified:", sys.argv[1])
+          PY
+
+      - name: Upload Android APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-android
+          path: dist-release/*.apk
+          if-no-files-found: error
+
+  build-windows:
+    name: Windows x64 (Portable ZIP)
+    needs: [prepare, build-web-ui]
+    if: needs.prepare.outputs.run_windows == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Download Sunshine Web UI assets
+        uses: actions/download-artifact@v4
+        with:
+          name: sunshine-web-ui
+          path: foundation-sunshine/build/assets/web
+
+      - name: Download Moonlight Qt Windows dependencies
+        working-directory: moonlight-qt
+        shell: pwsh
+        run: ./setup-deps.ps1
+
+      - name: Install Qt 6 (MSVC x64)
+        uses: jurplel/install-qt-action@v4
+        with:
+          cache: true
+          version: "6.8.3"
+          host: windows
+          target: desktop
+          arch: win64_msvc2022_64
+          modules: "qtmultimedia qtimageformats"
+          tools: "tools_qtcreator_gui"
+
+      - name: Build Moonlight Qt SunAndMon portable ZIP
+        working-directory: moonlight-qt
+        shell: cmd
+        run: |
+          setlocal enableDelayedExpansion
+          set "SOURCE_DIR=%CD%"
+          for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath`) do (
+            call "%%i\VC\Auxiliary\Build\vcvarsall.bat" amd64
+          )
+          for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -find VC\Redist\MSVC\*\x64\Microsoft.VC*.CRT`) do set "VC_CRT=%%i"
+          set "BUILD_DIR=%SOURCE_DIR%\build-sunandmon-x64"
+          set "DEPLOY_DIR=%SOURCE_DIR%\deploy-sunandmon-x64"
+          mkdir "%BUILD_DIR%" "%DEPLOY_DIR%"
+          pushd "%BUILD_DIR%"
+          qmake.exe "%SOURCE_DIR%\moonlight-qt.pro" CONFIG+=release CONFIG+=sunandmon
+          if errorlevel 1 exit /b 1
+          where /q jom.exe
+          if !errorlevel! equ 0 (
+            jom.exe release
+          ) else (
+            nmake release
+          )
+          if errorlevel 1 exit /b 1
+          popd
+          copy "%BUILD_DIR%\app\release\SunAndMon.exe" "%DEPLOY_DIR%\"
+          copy "%BUILD_DIR%\clipboard-helper\release\moonlight-clipboard-helper.exe" "%DEPLOY_DIR%\"
+          copy "%BUILD_DIR%\AntiHooking\release\AntiHooking.dll" "%DEPLOY_DIR%\"
+          copy "%SOURCE_DIR%\libs\windows\lib\x64\*.dll" "%DEPLOY_DIR%\"
+          copy "%SOURCE_DIR%\app\SDL_GameControllerDB\gamecontrollerdb.txt" "%DEPLOY_DIR%\"
+          windeployqt.exe --dir "%DEPLOY_DIR%" --release --qmldir "%SOURCE_DIR%\app\gui" --no-opengl-sw --no-compiler-runtime --no-sql --no-system-d3d-compiler --no-system-dxc-compiler --skip-plugin-types qmltooling,generic --no-ffmpeg --force-openssl "%DEPLOY_DIR%\SunAndMon.exe"
+          if errorlevel 1 exit /b 1
+          copy "%VC_CRT%\*.dll" "%DEPLOY_DIR%\"
+          echo. > "%DEPLOY_DIR%\portable.dat"
+          7z a "%GITHUB_WORKSPACE%\Moonlight-SunAndMon-Portable-x64.zip" "%DEPLOY_DIR%\*"
+          if errorlevel 1 exit /b 1
+
+      - name: Set up MSYS2 UCRT64 for Foundation Sunshine
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: ucrt64
+          update: false
+          cache: false
+
+      - name: Prepare MSYS2 toolchain
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          script="$(cygpath -u "$GITHUB_WORKSPACE")/foundation-sunshine/scripts/ci/msys2-pacman.sh"
+          bash "$script" prepare
+
+      - name: Upgrade MSYS2 base system
+        shell: pwsh
+        run: |
+          $script = (Join-Path $env:GITHUB_WORKSPACE 'foundation-sunshine/scripts/ci/msys2-pacman.sh') -replace '\\', '/'
+          $script = '/' + $script.Substring(0, 1).ToLower() + $script.Substring(2)
+          msys2.cmd -c "bash '$script' upgrade"
+          taskkill /F /FI "MODULES eq msys-2.0.dll" 2>$null
+          msys2.cmd -c "mv -f /etc/pacman.conf.pacnew /etc/pacman.conf || true; bash '$script' prepare"
+          msys2.cmd -c "bash '$script' upgrade"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Install pinned Sunshine MSYS2 packages
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          P=mingw-w64-ucrt-x86_64
+          packages=(git diffutils curl $P-ccache $P-cmake $P-ninja $P-gcc $P-binutils $P-crt $P-headers $P-winpthreads
+            $P-libwinpthread $P-pkgconf $P-make $P-python $P-cppwinrt $P-curl-winssl $P-MinHook $P-miniupnpc $P-nlohmann-json
+            $P-libvpl $P-openssl $P-opus)
+          script="$(cygpath -u "$GITHUB_WORKSPACE")/foundation-sunshine/scripts/ci/msys2-pacman.sh"
+          bash "$script" install "${packages[@]}"
+
+      - name: Build Foundation Sunshine portable ZIP
+        shell: msys2 {0}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SUNSHINE_BUILD_COMMIT: ${{ github.sha }}
+          SUNSHINE_BUILD_BRANCH: ${{ github.ref_name }}
+          SUNSHINE_BUILD_CHANNEL: release
+          SUNSHINE_BUILD_BUILDER: ci
+        run: |
+          set -euo pipefail
+          export PATH="$PATH:/c/Program Files/dotnet"
+          cd "$(cygpath -u "$GITHUB_WORKSPACE")/foundation-sunshine"
+          cmake -B build -G Ninja -S . \
+            -DSUNSHINE_PRECOMPILED_HEADERS=ON \
+            -DBUILD_DOCS=OFF \
+            -DBUILD_TESTS=OFF \
+            -DBUILD_WEB_UI=OFF \
+            -DSUNSHINE_RTX_HDR=OFF \
+            -DSUNSHINE_ASSETS_DIR=assets \
+            -DDRIVER_DEPS_REQUIRED=OFF
+          cmake --build build --parallel
+          cpack -G ZIP --config build/CPackConfig.cmake -D CPACK_STRIP_FILES=ON --verbose
+          cp build/cpack_artifacts/Sunshine.zip "$(cygpath -u "$GITHUB_WORKSPACE")/Sunshine-Portable-x64.zip"
+
+      - name: Package unified SunAndMon Windows x64 ZIP
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist-release | Out-Null
+          python scripts/package-windows.py `
+            Moonlight-SunAndMon-Portable-x64.zip `
+            Sunshine-Portable-x64.zip `
+            dist-release/SunAndMon-Windows-x64.zip
+          Get-Item dist-release/SunAndMon-Windows-x64.zip
+
+      - name: Upload Windows ZIP artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-windows
+          path: dist-release/SunAndMon-Windows-x64.zip
+          if-no-files-found: error
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: [prepare, build-center, build-linux, build-android, build-windows]
+    if: always() && needs.prepare.outputs.should_publish == 'true' && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all built release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Generate SHA256SUMS.txt and release notes
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          cd release-assets
+          rm -f SHA256SUMS.txt
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+          APK_NAME=$(ls -1 SunAndMon-Android-*.apk 2>/dev/null | head -n 1 || true)
+          DEB_NAME=$(ls -1 sunandmon_*_amd64.deb 2>/dev/null | head -n 1 || true)
+          cat > ../release-notes.md <<EOF
+          ## 下载（SunAndMon 日月同辉 ${TAG}）
+
+          - **Windows x64** · 下载 \`SunAndMon-Windows-x64.zip\`，解压后运行 \`SunAndMon.exe\`（含控制端与 Sunshine 被控端）。
+          - **Linux amd64** · 下载 \`${DEB_NAME:-sunandmon_${VERSION}_amd64.deb}\`（含控制端与 Sunshine 被控端）。
+          - **Android** · 下载 \`${APK_NAME:-SunAndMon-Android-${VERSION}.apk}\`（支持 \`arm64-v8a\` / \`armeabi-v7a\`，含中心设备页与直连 IP）。
+          - **中心服务** · 下载对应平台的 \`sunandmon-center-windows-amd64.exe\` 或 \`sunandmon-center-linux-amd64\`。
+          - \`SHA256SUMS.txt\` 提供以上全部文件的 SHA-256 校验值。
+
+          所有产物均由本 Release 对应源码提交 \`${SHA::7}\` 自动构建。Linux 合盖 1080p 120 Hz 虚拟屏配置见 [scripts/linux/virtual-display](https://github.com/${REPO}/tree/${TAG}/scripts/linux/virtual-display)。
+          EOF
+
+      - name: Create or update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          name: SunAndMon ${{ needs.prepare.outputs.tag }}
+          body_path: release-notes.md
+          files: release-assets/*
+          make_latest: true

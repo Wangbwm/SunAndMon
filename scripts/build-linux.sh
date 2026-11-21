@@ -68,15 +68,26 @@ cp "$SUNANDMON_BIN" "$STRIPPED_DIR/SunAndMon"
 cp "$HELPER_BIN" "$STRIPPED_DIR/moonlight-clipboard-helper"
 strip --strip-unneeded "$STRIPPED_DIR/sunshine" "$STRIPPED_DIR/SunAndMon" "$STRIPPED_DIR/moonlight-clipboard-helper"
 
-WEB_ZIP="$REPO_ROOT/.build-win/sunshine-portable-uac-x64.zip"
+WEB_DIR="${SUNANDMON_WEB_ASSETS_DIR:-}"
+WEB_ZIP="${SUNANDMON_WEB_ASSETS_ZIP:-$REPO_ROOT/.build-win/sunshine-portable-uac-x64.zip}"
 OUT_DEB="$REPO_ROOT/dist/sunandmon_${VERSION}_amd64.deb"
+
+WEB_ARGS=()
+if [ -n "$WEB_DIR" ] && [ -d "$WEB_DIR" ]; then
+  WEB_ARGS=(--web-assets-dir "$WEB_DIR")
+elif [ -f "$WEB_ZIP" ]; then
+  WEB_ARGS=(--web-assets-zip "$WEB_ZIP")
+else
+  echo "ERROR: Set SUNANDMON_WEB_ASSETS_DIR (built assets/web directory) or SUNANDMON_WEB_ASSETS_ZIP." >&2
+  exit 1
+fi
 
 python3 "$REPO_ROOT/scripts/package-linux-deb.py" \
   --repo-root "$REPO_ROOT" \
   --controller "$STRIPPED_DIR/SunAndMon" \
   --clipboard-helper "$STRIPPED_DIR/moonlight-clipboard-helper" \
   --host "$STRIPPED_DIR/sunshine" \
-  --web-assets-zip "$WEB_ZIP" \
+  "${WEB_ARGS[@]}" \
   --version "$VERSION" \
   --arch amd64 \
   --output "$OUT_DEB"

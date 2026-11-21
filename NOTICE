@@ -1,0 +1,32 @@
+# SunAndMon（日月同辉）开源许可与上游声明
+
+SunAndMon（日月同辉）以 **GNU General Public License v3.0（GPL-3.0）** 发布，详见根目录 [LICENSE](LICENSE)。
+
+## 上游项目与组件
+
+本仓库整合并基于以下开源项目进行了二次开发与一体化打包：
+
+| 目录 | 上游项目 | 许可证 | 说明 |
+| --- | --- | --- | --- |
+| `foundation-sunshine/` | [AlkaidLab/foundation-sunshine](https://github.com/AlkaidLab/foundation-sunshine)（源自 [LizardByte/Sunshine](https://github.com/LizardByte/Sunshine)） | GPL-3.0 | 被控端串流主机引擎、硬件编码、隐私屏与 Web 控制面板。其内含的 `foundation-ui` 遵循 MPL-2.0，Windows 便携包内含的第三方驱动/运行库许可详见 [foundation-sunshine/NOTICE](foundation-sunshine/NOTICE) |
+| `moonlight-qt/` | [qiin2333/moonlight-qt](https://github.com/qiin2333/moonlight-qt)（源自 [moonlight-stream/moonlight-qt](https://github.com/moonlight-stream/moonlight-qt)） | GPL-3.0 | Windows / Linux 桌面端控制客户端与剪贴板助手 |
+| `moonlight-vplus/` | [qiin2333/moonlight-vplus](https://github.com/qiin2333/moonlight-vplus)（源自 [moonlight-stream/moonlight-android](https://github.com/moonlight-stream/moonlight-android)） | GPL-3.0 | Android 控制端应用（集成 USB/IP、补帧、PyroWave 与触觉反馈模块） |
+| `moonlight-audio-haptics`（构建依赖） | [AlkaidLab/moonlight-audio-haptics](https://github.com/AlkaidLab/moonlight-audio-haptics) | Apache-2.0 | Android / 主机音频触觉 SDK |
+| `center/`、`scripts/` | SunAndMon 原创代码 | GPL-3.0 | 轻量级 Go 中心服务（设备发现、节点管理、短时配对签票）及多平台构建与打包脚本 |
+
+## SunAndMon 相对上游的主要改动
+
+1. **中心化设备目录与免 PIN 配对（`center/`、三端客户端与 `foundation-sunshine`）**
+   - 实现轻量单进程 Go 中心服务，提供 `/v1/` 设备注册、心跳、列表查询与 1 分钟有效的一次性配对票据签发，以及独立的 `/admin/` 节点管理控制台。
+   - Windows、Linux 与 Android 客户端支持 HTTPS 中心登录及「域名校验 + 数字 IP 直连」模式，无需手动输入 PIN 即可完成 TLS 客户端证书配对。
+2. **Windows / Linux 一体化客户端与被控端打包（`moonlight-qt/`、`foundation-sunshine/`、`scripts/`）**
+   - 在同一应用窗口内管理本机被控进程生命周期、发布 IP、开机自启与关闭按钮行为（托盘常驻/退出确认）。
+   - 支持跨平台大文件分块剪贴板传输、Windows 系统快捷键（如 `Win+R`）与 UAC 提权界面捕获、以及串流期隐私屏切换。
+   - 提供 Linux `.deb` 打包方案与合盖 1080p 120 Hz 虚拟显示器配置脚本。
+3. **Android 中心设备页与统一品牌图标（`moonlight-vplus/`）**
+   - 新增「我的设备」中心列表与设备详情页（桌面连接、应用列表、副屏串流、设备操作），兼容保留原有局域网设备页。
+   - 统一 Android 自适应图标、单色主题图标与 Windows/Linux 同款日月图标。
+
+## 第三方组件声明
+
+Windows 与 Linux 发行包中所包含的第三方二进制文件（如 ViGEmBus、usbip-win2、nefcon、ZakoVDD、Zako Virtual Mouse、Qt、FFmpeg、SDL2 等）均保留各自原有版权与许可证条款，完整清单参见 [foundation-sunshine/NOTICE](foundation-sunshine/NOTICE) 及各子目录的许可文件。

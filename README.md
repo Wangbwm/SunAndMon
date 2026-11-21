@@ -1,10 +1,54 @@
-# SunAndMon
+# SunAndMon（日月同辉）
 
-SunAndMon 把 Moonlight Qt 控制端与 Foundation Sunshine 被控引擎放进同一个 Windows x64 便携包。解压后运行 `SunAndMon.exe`，从同一个窗口连接其他设备或开启本机被控。Android 版 Moonlight VPlus 可以使用同一个中心连接电脑。
+[![Release](https://img.shields.io/github/v/release/Wangbwm/SunAndMon?display_name=tag)](https://github.com/Wangbwm/SunAndMon/releases)
+[![CI](https://github.com/Wangbwm/SunAndMon/actions/workflows/ci.yml/badge.svg)](https://github.com/Wangbwm/SunAndMon/actions/workflows/ci.yml)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 
-## 启动中心
+**SunAndMon（日月同辉）** 取名自 **Sun**shine（日）与 **Mon**light（月）的融合，将 **Moonlight Qt 控制端**与 **Foundation Sunshine 被控引擎**整合进统一的 Windows 便携包与 Linux 安装包，并配套提供 **Android 控制端**与单进程 **Go 中心服务**。
 
-中心是单进程 Go 服务。生成 32 字节随机密钥并编码成小写十六进制，将它保存在部署环境的 `SUNANDMON_CENTER_KEY` 中。同一个密钥的持有者可查看该中心的设备并申请配对，只应发给允许控制这些设备的人。
+在同一个窗口内即可查看并连接远端设备，或一键开启本机被控，支持跨网中心自动发现与免 PIN 短期票据配对，音视频与键鼠输入保持端到端直连。
+
+## 平台与功能一览
+
+| 组件 | 产物 | 说明 |
+| --- | --- | --- |
+| **Windows x64** | `SunAndMon-Windows-x64.zip` | 解压即用，包含 `SunAndMon.exe` 控制端、内置 Sunshine 被控端、大文件分块剪贴板、系统快捷键（如 `Win+R`）、UAC 弹窗捕获、隐私屏与托盘/开机自启管理 |
+| **Linux amd64** | `sunandmon_<ver>_amd64.deb` | Ubuntu 24.04 一体包，包含控制端、被控端、桌面图标与 udev 规则；可选配合合盖 1080p 120 Hz 虚拟屏 |
+| **Android** | `SunAndMon-Android-<ver>.apk` | 基于 Moonlight V+（`arm64-v8a` / `armeabi-v7a`），新增「我的设备」中心列表、直连 IP、桌面/应用/副屏串流入口，并保留局域网设备页 |
+| **中心服务** | `sunandmon-center-*` | 单进程 Go 服务（Linux / Windows），提供设备注册、在线状态同步、1 分钟一次性配对票据签发与 `/admin/` 节点管理后台 |
+
+## 架构简图
+
+```mermaid
+flowchart LR
+    subgraph Clients["控制端"]
+        WIN["Windows SunAndMon"]
+        LIN["Linux SunAndMon"]
+        AND["Android SunAndMon"]
+    end
+
+    CTR["Go 中心服务<br/>/v1/ 设备发现与 1 分钟配对票据<br/>/admin/ 节点管理"]
+    HOST["被控主机<br/>SunAndMon 内置 Foundation Sunshine"]
+
+    WIN -- "HTTPS 发现 / 申请配对票据" --> CTR
+    LIN -- "HTTPS 发现 / 申请配对票据" --> CTR
+    AND -- "HTTPS 发现 / 申请配对票据" --> CTR
+    HOST -- "HTTPS 登记与心跳" --> CTR
+
+    WIN == "音视频 / 键鼠 / 大文件剪贴板 端到端直连" ==> HOST
+    LIN == "音视频 / 键鼠 / 大文件剪贴板 端到端直连" ==> HOST
+    AND == "音视频 / 触控与手柄 端到端直连" ==> HOST
+```
+
+> 中心仅负责设备发现与一次性短期配对授权，不中转音视频流与输入数据；设备之间需通过同一局域网、VPN（如 Tailscale / WireGuard / EasyTier）或已映射的公网端口互相可达。
+
+---
+
+## 快速开始
+
+### 1. 部署中心服务
+
+中心是单进程 Go 服务。先生成 32 字节随机密钥并编码为小写十六进制，保存在部署环境的 `SUNANDMON_CENTER_KEY` 中。持有相同密钥的客户端可查看该中心的设备并申请配对，请仅分发给受信任的设备。
 
 ```sh
 cd center
@@ -12,42 +56,34 @@ export SUNANDMON_CENTER_KEY="$(openssl rand -hex 32)"
 go run . -listen 127.0.0.1:8787 -state state/devices.json
 ```
 
-跨设备访问时，可在服务前配置 HTTPS 反向代理并将请求转发到 `127.0.0.1:8787`，也可用 `-listen :8787 -tls-cert fullchain.pem -tls-key privkey.pem` 让中心直接提供 HTTPS。客户端使用系统信任的 HTTPS 证书。本机调试可用 `http://127.0.0.1:8787`。
+也可以直接从 [Releases](https://github.com/Wangbwm/SunAndMon/releases) 下载预编译的中心二进制（Linux 使用 `sunandmon-center-linux-amd64`，Windows 使用 `sunandmon-center-windows-amd64.exe`）。
 
-也可以直接运行 `dist` 中对应平台的中心服务二进制文件。Windows x64 使用 `sunandmon-center.exe`，Linux x64 使用 `sunandmon-center-linux-amd64`。
+- **HTTPS 部署**：跨设备访问时，建议在服务前配置 HTTPS 反向代理并转发到 `127.0.0.1:8787`，或直接使用 `-listen :8787 -tls-cert fullchain.pem -tls-key privkey.pem` 提供 HTTPS。本机调试可使用 `http://127.0.0.1:8787`。
+- **直连 IP 访问 HTTPS 中心**：Windows 与 Android 客户端均支持在「中心服务器」中填写证书对应的 HTTPS 网址，并在「直连 IP」填入服务器数字 IP；客户端会直连该 IP，同时严格按网址中的域名校验 TLS 证书。留空则走常规 DNS 解析。
 
-### 节点管理
+### 2. 节点管理后台（可选）
 
-在中心服务的部署环境添加独立的管理员密钥 `SUNANDMON_CENTER_ADMIN_KEY`，可用 `openssl rand -hex 32` 生成。重启中心后，打开中心网址下的 `/admin/`，或在 Windows 客户端打开「中心服务器 → 管理节点」。使用反向代理时，同一中心的 `/v1/` 和 `/admin/` 都需要转发到中心服务。
+在中心服务部署环境中配置独立的管理员密钥 `SUNANDMON_CENTER_ADMIN_KEY`（同样可用 `openssl rand -hex 32` 生成）并重启中心。使用反向代理时需同时转发 `/v1/` 与 `/admin/`。
 
-管理页列出所有登记记录，包括普通设备列表隐藏的重复记录。可修改节点名称、连接 IP 和 HTTP/HTTPS 端口。字段留空时跟随主机上报。删除节点会从中心列表移除该记录，并拒绝原设备 ID 再次登记，直到管理员选择「允许重新登记」。删除前已完成的设备配对可在对应主机上撤销。
+打开中心网址下的 `/admin/`，或在 Windows 客户端点击「中心服务器 → 管理节点」即可：
+- 查看所有登记记录（含普通列表隐藏的重复记录）；
+- 覆盖节点的显示名称、连接 IP 与 HTTP/HTTPS 端口（留空则跟随主机上报）；
+- 删除节点并禁止原设备 ID 再次登记，直到管理员显式选择「允许重新登记」。
 
-中心将 IP、端口、公钥证书和用于签发配对票据的被控端密钥存入状态文件。该文件应由服务账号独占。每个被控端单独拥有登记密钥。Windows 一体包用当前用户的 Windows 数据保护机制加密保存中心登录密钥。退出中心会清除保存的密钥，运行中的被控引擎会重启并继续提供局域网连接。需要撤销之前已完成的配对时，可在该电脑的「主机设置」内禁用对应控制端。
+### 3. 使用桌面端与移动端
 
-## 构建并使用客户端
+- **Windows**：下载并解压 `SunAndMon-Windows-x64.zip` 到当前用户可写目录（保留内部 `host` 目录），运行 `SunAndMon.exe`。左下角打开「中心服务器」填写 HTTPS URL 与密钥后，本机被控会自动登记；在设备页选中在线主机点「连接桌面」即可由中心自动授权，无需输入 PIN。
+  - 在「本机被控」中可开关「登录 Windows 时自动启动」、指定「发布 IP」或打开 Sunshine 原有控制面板（「主机设置」）。
+  - 在「设置 → 软件 → 关闭按钮行为」中可选择确认退出或最小化到托盘。
+  - 串流期间可在「控制中心 → 视频和显示」切换**隐私屏**（被控端需新版 SunAndMon、ZakoVDD 虚拟显示器与虚拟音频设备如 Steam Streaming Speakers 或 VB-CABLE）。
+- **Linux（Ubuntu 24.04）**：下载 `sunandmon_<ver>_amd64.deb` 后执行 `sudo apt install ./sunandmon_<ver>_amd64.deb` 安装，即可从应用菜单或命令行 `sunandmon` 启动。
+- **Android**：安装 `SunAndMon-Android-<ver>.apk`。在「我的设备」打开「中心服务器」登录，点击在线电脑进入详情页即可一键连接桌面、打开应用列表、开启副屏串流或执行电源操作；「局域网设备」保留原 Moonlight 局域网发现与 PIN 配对入口。
 
-首次克隆后，在项目根目录运行 `git submodule update --init --recursive` 初始化上游依赖。
+---
 
-1. 按各仓库自带的构建流程准备修改后的 [Moonlight Qt](https://github.com/qiin2333/moonlight-qt) 与 [Foundation Sunshine](https://github.com/AlkaidLab/foundation-sunshine) 的 Windows x64 构建依赖。控制端便携构建调用 qmake 时追加 `CONFIG+=sunandmon`，部署生成的 `SunAndMon.exe`、剪贴板助手和运行库。
-2. 在工作区运行 `python scripts/package-windows.py Moonlight-VPlus-Portable-x64.zip Sunshine-Portable-x64.zip SunAndMon-Windows-x64.zip`。解压到当前用户可写目录，保留内部 `host` 目录。
-3. 两台电脑打开 `SunAndMon.exe` 后都会启动本机被控。从左下角「中心服务器」填写相同的 HTTPS URL 和密钥。登录成功后，被控端会自动登记。在设备页选中上线的远端电脑并点「连接桌面」即可由中心授权，无需输入 PIN。同一页可打开应用列表、显示器与虚拟屏、设备操作及串流设置。需要登录 Windows 后自动运行时，在「本机被控」打开「登录 Windows 时自动启动」。
-4. Android 端按 [Moonlight VPlus](https://github.com/qiin2333/moonlight-vplus) 的构建流程生成 APK。从「我的设备」打开「中心服务器」登录，再进入在线电脑的详情页。详情页提供桌面连接、应用列表、副屏串流和原设备操作。「局域网设备」可进入原来的设备页。
+## Linux 虚拟显示器（可选）
 
-局域网设备发现、手动添加 PC 和常规 PIN 配对可从「局域网」页继续使用。在「本机被控」开启主机后，从「主机设置」进入 Sunshine 原有控制面板，可配置虚拟显示器、应用、音视频编码和串流端口。控制端会在主机按新配置重启后更新入口地址和中心登记。便携主机的配置保存在解压目录的 `host/config`。
-
-Windows 客户端的「设置 → 软件 → 关闭按钮行为」可选择确认后退出或缩小到托盘。从托盘选择退出时也需要确认。
-
-串流期间可从「控制中心 → 视频和显示」开启或关闭隐私屏。被控端需要新版 SunAndMon、可用的 ZakoVDD 虚拟显示驱动和虚拟音频设备（Steam Streaming Speakers 或 VB-CABLE）。开启时串流会重连，主机切到虚拟显示器，仅通过虚拟音频输出提供串流声音。正常退出串流时恢复原显示布局和应用静音前的输出状态。
-
-中心处理设备发现和配对。音视频和输入走设备间直连。设备需要通过同一局域网、VPN 或已配置的公网端口互相访问。需要优先使用指定网卡地址或外部地址时，可在开启被控前填写「发布 IP」。
-
-中心签发的配对票据期限为一分钟。被控端验票时容忍前后各 30 分钟的时钟偏差，同一张票据在整个接受窗口内只能使用一次。
-
-Windows 和 Android 客户端可以通过 IP 直连 HTTPS 中心。在「中心服务器」填写证书对应的 HTTPS 网址，并在「直连 IP」填写服务器的数字 IP 地址。客户端直接连接该 IP，并使用网址里的域名校验服务器证书。选项留空时会按网址正常解析。Windows 客户端内的「管理节点」沿用同一连接设置。
-
-## Linux 虚拟显示器
-
-`scripts/linux/virtual-display/` 提供合盖场景下的 1080p 120 Hz 虚拟屏配置。它使用 Intel `i915` 的空闲 `HDMI-A-1`，供桌面和 Sunshine 的 KMS 捕获使用。仅在目标机器具备这个输出且 HDMI 未接显示器时部署。
+`scripts/linux/virtual-display/` 提供合盖场景下的 1080p 120 Hz 虚拟屏配置，利用 Intel `i915` 的空闲 `HDMI-A-1` 供桌面和 Sunshine KMS 捕获使用（仅适用于具备该输出且 HDMI 未接物理显示器的机器）：
 
 ```sh
 cd scripts/linux/virtual-display
@@ -58,12 +94,61 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now sunandmon-virtual-display.service
 ```
 
-## 目录
+---
 
-- `foundation-sunshine/` 提供受控引擎、被控进程生命周期和基于 TLS 客户端证书的配对。
-- `moonlight-qt/` 提供桌面端设备界面、中心登录、本机被控与串流启动。
-- `moonlight-vplus/` 提供 Android 中心设备入口和串流启动。
-- `center/` 保存设备注册表、在线状态和短时配对授权。
+## 从源码构建与自动化发版
+
+### 本地构建
+
+首次克隆仓库后先初始化子模块：
+
+```sh
+git submodule update --init --recursive
+```
+
+- **中心服务**：`cd center && go test -race ./... && go build .`
+- **Linux `.deb`（Ubuntu 24.04）**：准备好 Sunshine Web UI 目录后运行 `SUNANDMON_VERSION=1.0.2 SUNANDMON_WEB_ASSETS_DIR=/path/to/assets/web bash scripts/build-linux.sh`
+- **Windows x64 便携包**：分别以 `CONFIG+=release CONFIG+=sunandmon` 编译 `moonlight-qt` 并编译 `foundation-sunshine` 便携包后，执行：
+  ```sh
+  python scripts/package-windows.py Moonlight-SunAndMon-Portable-x64.zip Sunshine-Portable-x64.zip SunAndMon-Windows-x64.zip
+  ```
+- **Android APK**：进入 `moonlight-vplus/`，配置 `AUDIO_HAPTICS_SDK_DIR` 指向 `AlkaidLab/moonlight-audio-haptics` 检出目录后执行 `./gradlew :app:assembleNonRootDebug`（或配置签名变量后执行 `:app:assembleNonRootRelease`）。
+
+### GitHub Actions 自动 CI 与全平台 Release
+
+仓库已配置两套工作流：
+
+- **[CI](.github/workflows/ci.yml)**：每次 Push / PR 到 `main` 自动执行 Go 中心单测与交叉编译、开源合规文件检查、脚本语法校验及密钥泄露审计。
+- **[Build & Release](.github/workflows/release.yml)**：推送 `v*` 标签（如 `git tag v1.0.2 && git push origin v1.0.2`）或通过 Actions 页面手动触发时，自动并行构建：
+  1. Linux / Windows 中心二进制
+  2. Sunshine Web UI（共享给 Linux 与 Windows 作业复用）
+  3. Ubuntu 24.04 `.deb` 安装包
+  4. Android APK（若在仓库 Secrets 中配置了 `ANDROID_KEYSTORE_BASE64`、`ANDROID_KEYSTORE_PASSWORD`、`ANDROID_KEY_ALIAS`、`ANDROID_KEY_PASSWORD`，自动产出正式签名 Release APK；未配置时自动回退为签名 Debug APK）
+  5. Windows x64 一体便携 ZIP
+  6. 汇总生成 `SHA256SUMS.txt` 并发布到对应 Tag 的 GitHub Release。
+
+---
+
+## 常见问题排查
+
+- **配对票据过期或时间不同步**：中心签发的配对票据有效期为 1 分钟；被控端验票容忍前后 30 分钟时钟偏差，每张票据仅可使用一次。若仍提示无效，请确认控制端、中心与被控端系统时间已开启 NTP 同步。
+- **远端无法直连**：请确认两端处于同一局域网/组网（如 Tailscale/EasyTier）或主机已正确转发 Sunshine 端口，并可在主机端「本机被控 → 发布 IP」显式指定希望对外公布的网卡或组网 IP。
+- **撤销旧设备授权**：中心删除节点仅禁止该设备重新登记；若需撤销已完成配对的某台控制端，请在对应被控主机的「主机设置」中移除该客户端。
+
+## 目录结构
+
+- `foundation-sunshine/` — 被控端串流引擎、被控进程生命周期与客户端证书配对
+- `moonlight-qt/` — Windows / Linux 控制端界面、中心登录、本机被控管理与串流启动
+- `moonlight-vplus/` — Android 控制端中心设备入口、统一图标与串流启动
+- `center/` — Go 中心服务（设备注册表、在线状态、短时配对授权与 `/admin/` 后台）
+- `scripts/` — Windows / Linux 构建打包、虚拟显示器配置与仓库同步脚本
+- `.github/workflows/` — 自动化 CI 检验与多平台 Release 发布工作流
+
+## 开源协议与致谢
+
+本项目以 **GNU General Public License v3.0（GPL-3.0）** 开源发布，详见 [LICENSE](LICENSE)。
+
+有关上游项目归属（[Foundation Sunshine](https://github.com/AlkaidLab/foundation-sunshine)、[Moonlight Qt](https://github.com/qiin2333/moonlight-qt)、[Moonlight V+](https://github.com/qiin2333/moonlight-vplus)、[moonlight-audio-haptics](https://github.com/AlkaidLab/moonlight-audio-haptics)）、改动摘要及第三方组件许可，请参阅 [NOTICE](NOTICE)；安全模型与漏洞反馈请参阅 [SECURITY.md](SECURITY.md)。
 
 ## 上游基线
 

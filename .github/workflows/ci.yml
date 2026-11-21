@@ -1,0 +1,185 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      run_android:
+        description: "Run Android debug verification build"
+        type: boolean
+        default: false
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  repo-checks:
+    name: Compliance, scripts & secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify open-source compliance files
+        run: |
+          set -euo pipefail
+          for f in LICENSE NOTICE SECURITY.md README.md .gitignore; do
+            test -s "$f" || { echo "Missing required file: $f" >&2; exit 1; }
+          done
+          grep -q "GNU GENERAL PUBLIC LICENSE" LICENSE
+
+      - name: Syntax check scripts
+        run: |
+          set -euo pipefail
+          python3 -m py_compile scripts/package-windows.py scripts/package-linux-deb.py scripts/sync-github-source.py
+          bash -n scripts/build-linux.sh
+          bash -n scripts/linux/virtual-display/sunandmon-virtual-display
+
+      - name: Audit repository for secrets and blocked paths
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re, subprocess, sys
+
+          blocked = re.compile(
+              r"(^|/)(\.deployment|state/devices\.json|\.env(?!\.example)|\.build-[^/]+|dist|id_ed25519|id_rsa|local\.properties)(\.|/|$)",
+              re.I,
+          )
+          secrets = re.compile(
+              rb"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----"
+              rb"|\b(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{50,}|AKIA[0-9A-Z]{16})\b"
+              rb"|SUNANDMON_CENTER_(?:ADMIN_)?KEY\s*=\s*['\"]?[a-fA-F0-9]{64}\b"
+          )
+          allowed_fixtures = {
+              "foundation-sunshine/tests/data/log_scrub_vectors.json",
+              "foundation-sunshine/tests/unit/test_log_scrub.cpp",
+              "foundation-sunshine/tests/unit/test_telemetry.cpp",
+              "moonlight-qt/tests/clipboard_payload_routing/fixtures/server-key.pem",
+          }
+
+          findings = []
+          out = subprocess.check_output(["git", "ls-files", "--stage", "-z"]).split(b"\0")
+          for rec in out:
+              if not rec:
+                  continue
+              meta, raw_name = rec.split(b"\t", 1)
+              if meta.decode().split()[0] == "160000":
+                  continue
+              rel = raw_name.decode()
+              if blocked.search(rel):
+                  findings.append(("BLOCKED_PATH", rel))
+                  continue
+              if rel in allowed_fixtures:
+                  continue
+              p = Path(rel)
+              if p.is_file() and secrets.search(p.read_bytes()):
+                  findings.append(("SECRET_PATTERN", rel))
+
+          if findings:
+              for kind, rel in findings:
+                  print(f"::error file={rel}::{kind} detected in {rel}")
+              sys.exit(1)
+          print("Repository compliance and secret scan passed.")
+          PY
+
+  center-test:
+    name: Center Go tests & cross-build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: center
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: center/go.mod
+          cache-dependency-path: center/go.mod
+
+      - name: Run vet and race tests
+        run: |
+          go vet ./...
+          go test -v -race ./...
+
+      - name: Verify Linux & Windows cross-compilation
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /tmp/sunandmon-center-linux-amd64 .
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /tmp/sunandmon-center-windows-amd64.exe .
+          ls -lh /tmp/sunandmon-center-*
+
+  android-verify:
+    name: Android Debug APK verification
+    if: github.event_name == 'workflow_dispatch' && inputs.run_android == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      AUDIO_HAPTICS_SDK_REF: b3f97c3bb7500ea7b1985aea568e5c7b40308d3b
+      AUDIO_HAPTICS_SDK_DIR: ${{ github.workspace }}/.deps/moonlight-audio-haptics
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Checkout audio haptics SDK
+        uses: actions/checkout@v4
+        with:
+          repository: AlkaidLab/moonlight-audio-haptics
+          ref: ${{ env.AUDIO_HAPTICS_SDK_REF }}
+          path: .deps/moonlight-audio-haptics
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+          cache-dependency-path: |
+            moonlight-vplus/**/*.gradle*
+            moonlight-vplus/**/gradle-wrapper.properties
+
+      - name: Set up Android SDK/NDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools platforms;android-36 build-tools;36.0.0 ndk;28.2.13676358 cmake;3.22.1
+
+      - name: Accept Android licenses
+        run: yes | sdkmanager --licenses > /dev/null || true
+
+      - name: Build & verify NonRoot Debug APK
+        working-directory: moonlight-vplus
+        run: |
+          rm -f local.properties
+          chmod +x gradlew
+          ./gradlew :app:assembleNonRootDebug --stacktrace
+          APK=$(find app/build/outputs/apk/nonRoot/debug -maxdepth 1 -type f -name '*.apk' -print -quit)
+          test -n "$APK"
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs "$APK"
+          python3 - "$APK" <<'PY'
+          import sys, zipfile
+          with zipfile.ZipFile(sys.argv[1]) as z:
+              assert z.testzip() is None
+              names = set(z.namelist())
+              for req in (
+                  "lib/arm64-v8a/libmoonlight-core.so",
+                  "lib/arm64-v8a/libmoonlight_usbip.so",
+                  "lib/arm64-v8a/libmoonlight-framegen.so",
+                  "lib/armeabi-v7a/libmoonlight-core.so",
+                  "lib/armeabi-v7a/libmoonlight_usbip.so",
+                  "res/drawable-nodpi-v4/ic_sunandmon_foreground.png",
+              ):
+                  assert req in names, f"Missing {req}"
+              dex = b"".join(z.read(n) for n in names if n.startswith("classes") and n.endswith(".dex"))
+              for marker in (b"CenterDirectory", b"CenterDeviceView", b"sunandmon-pair", b"/v1/devices"):
+                  assert marker in dex, f"Missing DEX marker {marker}"
+          print("Android APK verification passed.")
+          PY

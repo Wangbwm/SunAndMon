@@ -1,10 +1,11 @@
 <resources>
     <string name="center_devices">Center devices</string>
     <string name="center_url">Center URL</string>
+    <string name="center_direct_ip">Direct IP (optional)</string>
     <string name="center_key">Access key</string>
     <string name="center_sign_in">Sign in</string>
     <string name="center_sign_out">Sign out</string>
-    <string name="center_login_failed">Could not sign in. Check the HTTPS URL and access key.</string>
+    <string name="center_login_failed">Could not sign in. Check the HTTPS URL, direct IP, and access key.</string>
     <string name="center_list_failed">Could not load the center device list.</string>
     <string name="center_empty">Enable hosting on a computer signed into this center.</string>
     <string name="center_device_online">%1$s · Online</string>
@@ -29,6 +30,7 @@
     <string name="center_connect_desktop">Connect desktop</string>
     <string name="center_common_actions">Common actions</string>
     <string name="center_app_list">App list</string>
+    <string name="center_secondary_screen">Stream as a secondary display</string>
     <string name="center_stream_settings">Streaming settings</string>
     <string name="center_device_options">Device options</string>
     <plurals name="center_online_count">

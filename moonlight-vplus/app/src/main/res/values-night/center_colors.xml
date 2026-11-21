@@ -1,0 +1,13 @@
+<resources>
+    <color name="center_ink">#EEF4FF</color>
+    <color name="center_muted">#ABBED5</color>
+    <color name="center_line">#2D4058</color>
+    <color name="center_accent">#A4C7FF</color>
+    <color name="center_selected">#213754</color>
+    <color name="center_canvas">#101927</color>
+    <color name="center_surface">#192638</color>
+    <color name="center_online_ink">#9FE2BB</color>
+    <color name="center_online_fill">#203B36</color>
+    <color name="center_on_accent">#102746</color>
+    <color name="center_ripple">#28A4C7FF</color>
+</resources>

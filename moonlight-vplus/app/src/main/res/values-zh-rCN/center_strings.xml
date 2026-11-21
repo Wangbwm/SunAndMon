@@ -1,10 +1,11 @@
 <resources>
     <string name="center_devices">中心设备</string>
     <string name="center_url">中心服务器网址</string>
+    <string name="center_direct_ip">直连 IP（选填）</string>
     <string name="center_key">访问密钥</string>
     <string name="center_sign_in">登录</string>
     <string name="center_sign_out">退出登录</string>
-    <string name="center_login_failed">登录失败，请检查 HTTPS 网址和访问密钥。</string>
+    <string name="center_login_failed">登录失败，请检查 HTTPS 网址、直连 IP 和访问密钥。</string>
     <string name="center_list_failed">无法获取中心设备列表。</string>
     <string name="center_empty">请在已登录此中心的电脑上开启被控。</string>
     <string name="center_device_online">%1$s · 在线</string>
@@ -29,6 +30,7 @@
     <string name="center_connect_desktop">连接桌面</string>
     <string name="center_common_actions">常用操作</string>
     <string name="center_app_list">应用列表</string>
+    <string name="center_secondary_screen">作为副屏串流</string>
     <string name="center_stream_settings">串流设置</string>
     <string name="center_device_options">设备操作</string>
     <plurals name="center_online_count">

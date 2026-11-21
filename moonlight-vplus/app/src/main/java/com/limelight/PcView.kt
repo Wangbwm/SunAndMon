@@ -747,8 +747,9 @@ class PcView : ThemedActivity(), AdapterFragmentCallbacks, ShakeDetector.Listene
         if (legacyBarAppearance == null) {
             legacyBarAppearance = bars.isAppearanceLightStatusBars to bars.isAppearanceLightNavigationBars
         }
-        bars.isAppearanceLightStatusBars = true
-        bars.isAppearanceLightNavigationBars = true
+        val lightBars = !AppTheme.wantedNight(this)
+        bars.isAppearanceLightStatusBars = lightBars
+        bars.isAppearanceLightNavigationBars = lightBars
         page.visibility = View.VISIBLE
         findViewById<View>(R.id.pcViewRootLayout)?.visibility = View.INVISIBLE
         ViewCompat.requestApplyInsets(page)
@@ -782,12 +783,18 @@ class PcView : ThemedActivity(), AdapterFragmentCallbacks, ShakeDetector.Listene
                 .show()
             return
         }
-        val savedUrl = getSharedPreferences("center", MODE_PRIVATE).getString("url", "")
+        val centerPreferences = getSharedPreferences("center", MODE_PRIVATE)
         val address = EditText(this).apply {
             hint = getString(R.string.center_url)
             inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_URI
             setSingleLine(true)
-            setText(savedUrl)
+            setText(centerPreferences.getString("url", ""))
+        }
+        val directIp = EditText(this).apply {
+            hint = getString(R.string.center_direct_ip)
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_URI
+            setSingleLine(true)
+            setText(centerPreferences.getString("directIp", ""))
         }
         val key = EditText(this).apply {
             hint = getString(R.string.center_key)
@@ -798,6 +805,7 @@ class PcView : ThemedActivity(), AdapterFragmentCallbacks, ShakeDetector.Listene
             orientation = LinearLayout.VERTICAL
             setPadding(dpToPx(24), dpToPx(8), dpToPx(24), 0)
             addView(address)
+            addView(directIp)
             addView(key)
         }
         AlertDialog.Builder(this)
@@ -805,8 +813,9 @@ class PcView : ThemedActivity(), AdapterFragmentCallbacks, ShakeDetector.Listene
             .setView(fields)
             .setNegativeButton(android.R.string.cancel, null)
             .setPositiveButton(R.string.center_sign_in) { _, _ ->
-                val directory = runCatching { CenterDirectory(address.text.toString(), key.text.toString().trim()) }
-                    .getOrNull()
+                val directory = runCatching {
+                    CenterDirectory(address.text.toString(), key.text.toString().trim(), directIp.text.toString())
+                }.getOrNull()
                 key.text.clear()
                 if (directory == null) showToast(getString(R.string.center_login_failed))
                 else loadCenterDevices(directory, signingIn = true)
@@ -821,7 +830,10 @@ class PcView : ThemedActivity(), AdapterFragmentCallbacks, ShakeDetector.Listene
                 registeredDevices = withContext(Dispatchers.IO) { directory.devices() }
                 centerDirectory = directory
                 if (signingIn) {
-                    getSharedPreferences("center", MODE_PRIVATE).edit { putString("url", directory.url.toString()) }
+                    getSharedPreferences("center", MODE_PRIVATE).edit {
+                        putString("url", directory.url.toString())
+                        putString("directIp", directory.directIp)
+                    }
                 }
             } catch (e: CancellationException) {
                 throw e

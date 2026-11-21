@@ -11,6 +11,7 @@ import java.security.MessageDigest
 import java.security.cert.CertificateFactory
 import java.security.cert.X509Certificate
 import java.util.concurrent.TimeUnit
+import okhttp3.Dns
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaType
@@ -20,7 +21,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 
-internal class CenterDirectory(url: String, private val key: String) {
+internal class CenterDirectory(url: String, private val key: String, directIp: String = "") {
     data class Device(val id: String, val name: String, val online: Boolean)
     data class Connection(val computer: ComputerDetails, val app: NvApp?)
 
@@ -29,11 +30,26 @@ internal class CenterDirectory(url: String, private val key: String) {
         require(it.isHttps || it.host in setOf("localhost", "127.0.0.1", "::1"))
         require(key.matches(Regex("[a-f0-9]{64}")))
     }
+    val directIp = directIp.trim()
+    private val directAddress = this.directIp.takeIf(String::isNotEmpty)?.let { ip ->
+        require(this.url.isHttps)
+        val address = requireNotNull(numericAddress(ip))
+        require(!address.isAnyLocalAddress && !address.isMulticastAddress)
+        numericAddress(this.url.host)?.let { require(it == address) }
+        address
+    }
     private val client = OkHttpClient.Builder()
         .followRedirects(false)
         .followSslRedirects(false)
         .callTimeout(5, TimeUnit.SECONDS)
-        .apply { if (!this@CenterDirectory.url.isHttps) proxy(Proxy.NO_PROXY) }
+        .apply {
+            val centerUrl = this@CenterDirectory.url
+            if (!centerUrl.isHttps || directAddress != null) proxy(Proxy.NO_PROXY)
+            directAddress?.let { address ->
+                // Keep the HTTPS URL's hostname for SNI and certificate validation.
+                dns { host -> if (host == centerUrl.host) listOf(address) else Dns.SYSTEM.lookup(host) }
+            }
+        }
         .build()
 
     fun devices(): List<Device> {
@@ -109,5 +125,22 @@ internal class CenterDirectory(url: String, private val key: String) {
 
     private companion object {
         const val MAX_RESPONSE = 2L * 1024 * 1024
+
+        fun numericAddress(value: String): InetAddress? {
+            if (':' in value) {
+                if (!value.matches(Regex("[0-9a-fA-F:.]+"))) return null
+                return runCatching { InetAddress.getByName(value) }.getOrNull()
+            }
+            val octets = value.split('.')
+            if (octets.size != 4) return null
+            val bytes = ByteArray(4)
+            for ((index, octet) in octets.withIndex()) {
+                if (octet.isEmpty() || octet.length > 3 || octet.any { it !in '0'..'9' }) return null
+                val number = octet.toInt()
+                if (number > 255) return null
+                bytes[index] = number.toByte()
+            }
+            return InetAddress.getByAddress(bytes)
+        }
     }
 }

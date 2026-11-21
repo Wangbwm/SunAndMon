@@ -1,0 +1,916 @@
+package com.limelight.utils
+
+import android.app.Activity
+import android.app.Dialog
+import android.content.Context
+import android.content.res.Configuration
+import android.graphics.Color
+import android.graphics.drawable.ColorDrawable
+import android.os.Build
+import android.util.TypedValue
+import android.view.Gravity
+import android.view.KeyEvent
+import android.view.ViewGroup
+import android.view.Window
+import android.view.WindowManager
+import android.widget.FrameLayout
+import androidx.activity.ComponentDialog
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.LocalIndication
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.lightColorScheme
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.input.InputMode
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.ComposeView
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalInputModeManager
+import androidx.compose.ui.platform.LocalWindowInfo
+import androidx.compose.ui.platform.ViewCompositionStrategy
+import androidx.compose.ui.res.colorResource
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
+import com.limelight.R
+import com.limelight.ui.ExpressiveMotion
+import com.limelight.ui.UiDismissKeyHandler
+import com.limelight.ui.expressivePressFeedback
+import com.limelight.ui.theme.AppShapes
+import com.limelight.ui.theme.AppOverlayWidths
+import kotlinx.coroutines.flow.first
+import kotlin.math.roundToInt
+
+object AppActionSheet {
+    private val horizontalInset = 10.dp
+
+    private fun windowWidth(context: Context): Int {
+        val resources = context.resources
+        val metrics = resources.displayMetrics
+        val maxWidth = TypedValue.applyDimension(
+            TypedValue.COMPLEX_UNIT_DIP,
+            (AppOverlayWidths.compact + horizontalInset * 2).value,
+            metrics
+        ).roundToInt()
+        val availableWidth = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val windowManager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+            windowManager.currentWindowMetrics.bounds.width()
+        } else {
+            (resources.configuration.screenWidthDp * metrics.density).roundToInt()
+        }
+        return minOf(availableWidth, maxWidth)
+    }
+
+    data class Action(
+        val id: Int,
+        val title: CharSequence,
+        val description: CharSequence? = null,
+        val destructive: Boolean = false,
+        val enabled: Boolean = true,
+        val checked: Boolean? = null,
+        val sectionStart: Boolean = false,
+        val opensSubmenu: Boolean = false,
+        val trailingText: CharSequence? = null,
+        val toggle: Boolean = false,
+        val iconRes: Int? = null,
+        val emphasized: Boolean = false
+    )
+
+    /** Hosts custom, live content in the same window, theme, and dismissal model as
+     * the standard action sheets. Custom content should be built from the shared
+     * action-sheet composables below so controller focus remains consistent. */
+    fun showCustom(context: Context, content: @Composable () -> Unit): Dialog {
+        val dialog = ComponentDialog(context, R.style.AppActionSheetStyle)
+        val composeView = ComposeView(context).apply {
+            setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnDetachedFromWindow)
+            setContent {
+                AppActionSheetTheme(content)
+            }
+        }
+        prepareDialog(dialog, composeView)
+        return dialog
+    }
+
+    fun show(
+        context: Context,
+        title: CharSequence,
+        subtitle: CharSequence? = null,
+        activeStatus: Boolean = false,
+        actions: List<Action>,
+        initialActionId: Int? = null,
+        singleChoice: Boolean = false,
+        onAction: (Action) -> Unit,
+        onDismiss: ((Action?) -> Unit)? = null
+    ): Dialog = show(
+        context = context,
+        title = title,
+        subtitle = subtitle,
+        activeStatus = activeStatus,
+        actions = actions,
+        initialActionId = initialActionId,
+        singleChoice = singleChoice,
+        supportingText = null,
+        onAction = onAction,
+        onDismiss = onDismiss
+    )
+
+    /** Supporting copy occupies its own line; subtitle remains the compact status badge. */
+    fun show(
+        context: Context,
+        title: CharSequence,
+        subtitle: CharSequence? = null,
+        activeStatus: Boolean = false,
+        actions: List<Action>,
+        initialActionId: Int? = null,
+        singleChoice: Boolean = false,
+        supportingText: CharSequence?,
+        onAction: (Action) -> Unit,
+        onDismiss: ((Action?) -> Unit)? = null
+    ): Dialog {
+        val dialog = ComponentDialog(context, R.style.AppActionSheetStyle)
+        var selectedAction: Action? = null
+        val focusRequestToken = mutableIntStateOf(0)
+        val composeView = ComposeView(context).apply {
+            setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnDetachedFromWindow)
+            setContent {
+                AppActionSheetTheme {
+                    ActionSheetContent(
+                        title = title.toString(),
+                        subtitle = subtitle?.toString(),
+                        supportingText = supportingText?.toString(),
+                        activeStatus = activeStatus,
+                        actions = actions,
+                        initialActionId = initialActionId,
+                        singleChoice = singleChoice,
+                        focusRequestToken = focusRequestToken.intValue,
+                        onAction = { action ->
+                            if (action.enabled && selectedAction == null) {
+                                selectedAction = action
+                                dialog.dismiss()
+                                onAction(action)
+                            }
+                        }
+                    )
+                }
+            }
+        }
+
+        dialog.setOnDismissListener { onDismiss?.invoke(selectedAction) }
+        prepareDialog(dialog, composeView)
+        composeView.post { focusRequestToken.intValue++ }
+        return dialog
+    }
+
+    internal data class InitialActionPosition(val scrollIndex: Int?, val focusIndex: Int?)
+
+    /** A saved, disabled choice should still be shown, while focus needs an actionable row. */
+    internal fun initialActionPosition(actions: List<Action>, initialActionId: Int?): InitialActionPosition {
+        if (actions.isEmpty()) return InitialActionPosition(null, null)
+        val selectedIndex = actions.indexOfFirst { it.id == initialActionId }.takeIf { it >= 0 }
+        val enabledIndices = actions.indices.filter { actions[it].enabled }
+        val focusIndex = if (selectedIndex == null) {
+            enabledIndices.firstOrNull()
+        } else {
+            // Prefer the following row when equally close, matching forward list navigation.
+            enabledIndices.minWithOrNull(
+                compareBy<Int> { kotlin.math.abs(it - selectedIndex) }
+                    .thenBy { if (it >= selectedIndex) 0 else 1 }
+            )
+        }
+        return InitialActionPosition(selectedIndex ?: focusIndex ?: 0, focusIndex)
+    }
+
+    internal fun initialMultiSelectPosition(actions: List<Action>): InitialActionPosition =
+        initialActionPosition(actions, actions.firstOrNull { it.checked == true }?.id)
+
+    fun showMultiSelect(
+        context: Context,
+        title: CharSequence,
+        actions: List<Action>,
+        confirmLabel: CharSequence,
+        cancelLabel: CharSequence,
+        resetLabel: CharSequence? = null,
+        minimumSelectionCount: Int = 0,
+        onConfirm: (Set<Int>) -> Unit,
+        onReset: (() -> Unit)? = null,
+        forceInitialFocus: Boolean = false,
+        onDismiss: (() -> Unit)? = null,
+        onSelectionChanged: ((Set<Int>) -> Unit)? = null
+    ): Dialog {
+        val dialog = ComponentDialog(context, R.style.AppActionSheetStyle)
+        var completed = false
+        val focusRequestToken = mutableIntStateOf(0)
+        val composeView = ComposeView(context).apply {
+            setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnDetachedFromWindow)
+            setContent {
+                AppActionSheetTheme {
+                    var selectedIds by remember(actions) {
+                        mutableStateOf<Set<Int>>(
+                            actions.filter { it.checked == true }
+                                .mapTo(linkedSetOf()) { it.id }
+                        )
+                    }
+                    MultiSelectActionSheetContent(
+                        title = title.toString(),
+                        actions = actions,
+                        selectedIds = selectedIds,
+                        minimumSelectionCount = minimumSelectionCount,
+                        confirmLabel = confirmLabel.toString(),
+                        cancelLabel = cancelLabel.toString(),
+                        resetLabel = resetLabel?.toString(),
+                        focusRequestToken = focusRequestToken.intValue,
+                        onToggle = { action ->
+                            val nextSelection = if (action.id in selectedIds) {
+                                if (selectedIds.size > minimumSelectionCount) selectedIds - action.id
+                                else selectedIds
+                            } else {
+                                selectedIds + action.id
+                            }
+                            if (nextSelection != selectedIds) {
+                                selectedIds = nextSelection
+                                onSelectionChanged?.invoke(nextSelection)
+                            }
+                        },
+                        onConfirm = {
+                            if (!completed && selectedIds.size >= minimumSelectionCount) {
+                                completed = true
+                                dialog.dismiss()
+                                onConfirm(selectedIds)
+                            }
+                        },
+                        onCancel = dialog::dismiss,
+                        onReset = onReset?.let { reset ->
+                            {
+                                if (!completed) {
+                                    completed = true
+                                    dialog.dismiss()
+                                    reset()
+                                }
+                            }
+                        },
+                        forceInitialFocus = forceInitialFocus
+                    )
+                }
+            }
+        }
+        dialog.setOnDismissListener {
+            completed = true
+            onDismiss?.invoke()
+        }
+        prepareDialog(dialog, composeView)
+        composeView.post { focusRequestToken.intValue++ }
+        return dialog
+    }
+
+    @Suppress("DEPRECATION")
+    internal fun prepareDialog(
+        dialog: ComponentDialog,
+        contentView: ComposeView,
+        fullScreen: Boolean = false,
+        hostWindow: Window? = null
+    ) {
+        val resolvedHostWindow = hostWindow ?: (contentView.context as? Activity)?.window
+
+        // Bound the window as well as the panel so taps beside it remain outside
+        // the dialog. Update its width when the host rotates or its window is resized.
+        val dialogContent = if (fullScreen) contentView else object : FrameLayout(contentView.context) {
+            override fun onConfigurationChanged(newConfig: Configuration) {
+                super.onConfigurationChanged(newConfig)
+                dialog.window?.let { window ->
+                    window.attributes = window.attributes.apply { width = windowWidth(context) }
+                }
+            }
+        }.apply {
+            addView(contentView, FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ))
+        }
+        dialog.setContentView(dialogContent)
+        dialog.setCanceledOnTouchOutside(true)
+        dialog.setOnKeyListener { _, keyCode, event ->
+            UiDismissKeyHandler.handle(event.action, keyCode, dialog::cancel)
+        }
+
+        dialog.window?.let { window ->
+            window.addFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE)
+            if (fullScreen) {
+                applyFullScreenWindow(window, resolvedHostWindow)
+                window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    window.attributes = window.attributes.apply {
+                        layoutInDisplayCutoutMode =
+                            WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+                    }
+                }
+            }
+            window.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            window.attributes = window.attributes.apply {
+                width = if (fullScreen) ViewGroup.LayoutParams.MATCH_PARENT
+                else windowWidth(contentView.context)
+                height = if (fullScreen) ViewGroup.LayoutParams.MATCH_PARENT
+                else ViewGroup.LayoutParams.WRAP_CONTENT
+                gravity = if (fullScreen) Gravity.FILL else Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+            }
+        }
+
+        dialog.show()
+        dialog.window?.let { window ->
+            window.clearFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE)
+            if (fullScreen) {
+                window.setLayout(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+                )
+                applyFullScreenWindow(window, resolvedHostWindow)
+                window.decorView.post {
+                    if (dialog.isShowing) applyFullScreenWindow(window, resolvedHostWindow)
+                }
+            }
+        }
+    }
+
+    /** Applies the same immersive contract used by the in-stream game menu. */
+    internal fun applyFullScreenWindow(window: Window, hostWindow: Window? = null) {
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        hostWindow?.let { host ->
+            window.decorView.systemUiVisibility = host.decorView.systemUiVisibility
+            if (host.attributes.flags and WindowManager.LayoutParams.FLAG_FULLSCREEN != 0) {
+                window.addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN)
+            }
+        }
+        WindowInsetsControllerCompat(window, window.decorView).apply {
+            systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            hide(WindowInsetsCompat.Type.systemBars())
+        }
+    }
+
+    @Composable
+    internal fun AppActionSheetTheme(content: @Composable () -> Unit) {
+        val accent = appAccentColor()
+        val surface = colorResource(R.color.app_dialog_surface)
+        val primary = colorResource(R.color.app_dialog_text_primary)
+        val secondary = colorResource(R.color.app_dialog_text_secondary)
+        val scheme = if (isSystemInDarkTheme()) {
+            darkColorScheme(
+                primary = accent,
+                surface = surface,
+                onSurface = primary,
+                onSurfaceVariant = secondary
+            )
+        } else {
+            lightColorScheme(
+                primary = accent,
+                surface = surface,
+                onSurface = primary,
+                onSurfaceVariant = secondary
+            )
+        }
+        MaterialTheme(colorScheme = scheme, content = content)
+    }
+
+    @Composable
+    private fun ActionSheetContent(
+        title: String,
+        subtitle: String?,
+        supportingText: String?,
+        activeStatus: Boolean,
+        actions: List<Action>,
+        initialActionId: Int?,
+        singleChoice: Boolean,
+        focusRequestToken: Int,
+        onAction: (Action) -> Unit
+    ) {
+        val initialPosition = remember(actions, initialActionId) {
+            initialActionPosition(actions, initialActionId)
+        }
+        val listState = rememberLazyListState(initialFirstVisibleItemIndex = initialPosition.scrollIndex ?: 0)
+        val focusRequesters = remember(actions) { actions.map { FocusRequester() } }
+        val shouldRequestFocus = isControllerFocusMode()
+        val inputModeManager = LocalInputModeManager.current
+        val windowFocused = LocalWindowInfo.current.isWindowFocused
+        var initialFocusRequested by remember { mutableStateOf(false) }
+        LaunchedEffect(
+            shouldRequestFocus,
+            windowFocused,
+            focusRequestToken
+        ) {
+            val focusIndex = initialPosition.focusIndex
+            // A posted show() token can precede window focus on older Android versions.
+            // Wait for both the focused window and target layout before acquiring focus once.
+            if (shouldRequestFocus && windowFocused && focusRequestToken > 0 && !initialFocusRequested && focusIndex != null) {
+                inputModeManager.requestInputMode(InputMode.Keyboard)
+                focusListAction(listState, focusIndex, focusRequesters[focusIndex])
+                initialFocusRequested = true
+            }
+        }
+        ActionSheetContainer {
+            ActionSheetHeader(title, subtitle, activeStatus)
+            if (!supportingText.isNullOrBlank()) {
+                Text(
+                    text = supportingText,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 12.sp,
+                    lineHeight = 17.sp,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 20.dp, end = 20.dp, bottom = 12.dp)
+                )
+            }
+            val maxListHeight = (LocalConfiguration.current.screenHeightDp * 0.62f).dp
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = maxListHeight)
+                    .then(if (singleChoice) Modifier.selectableGroup() else Modifier),
+                state = listState,
+                contentPadding = PaddingValues(horizontal = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(1.dp)
+            ) {
+                itemsIndexed(actions, key = { _, action -> action.id }) { index, action ->
+                    ActionSheetRow(
+                        action = action,
+                        onAction = onAction,
+                        modifier = Modifier.focusRequester(focusRequesters[index]),
+                        singleChoice = singleChoice
+                    )
+                }
+            }
+        }
+    }
+
+    @Composable
+    private fun MultiSelectActionSheetContent(
+        title: String,
+        actions: List<Action>,
+        selectedIds: Set<Int>,
+        minimumSelectionCount: Int,
+        confirmLabel: String,
+        cancelLabel: String,
+        resetLabel: String?,
+        focusRequestToken: Int,
+        onToggle: (Action) -> Unit,
+        onConfirm: () -> Unit,
+        onCancel: () -> Unit,
+        onReset: (() -> Unit)?,
+        forceInitialFocus: Boolean
+    ) {
+        val initialPosition = remember(actions) { initialMultiSelectPosition(actions) }
+        val listState = rememberLazyListState(initialFirstVisibleItemIndex = initialPosition.scrollIndex ?: 0)
+        val focusRequesters = remember(actions) { actions.map { FocusRequester() } }
+        val cancelFocusRequester = remember { FocusRequester() }
+        val shouldRequestFocus = forceInitialFocus || isControllerFocusMode()
+        val inputModeManager = LocalInputModeManager.current
+        val windowFocused = LocalWindowInfo.current.isWindowFocused
+        var cancelFocusPlaced by remember { mutableStateOf(false) }
+        var initialFocusRequested by remember { mutableStateOf(false) }
+        LaunchedEffect(
+            shouldRequestFocus,
+            windowFocused,
+            focusRequestToken,
+            cancelFocusPlaced
+        ) {
+            if (shouldRequestFocus && windowFocused && focusRequestToken > 0 && !initialFocusRequested) {
+                val focusIndex = initialPosition.focusIndex
+                if (focusIndex == null && !cancelFocusPlaced) return@LaunchedEffect
+                inputModeManager.requestInputMode(InputMode.Keyboard)
+                if (focusIndex == null) {
+                    cancelFocusRequester.requestFocus()
+                } else {
+                    focusListAction(listState, focusIndex, focusRequesters[focusIndex])
+                }
+                initialFocusRequested = true
+            }
+        }
+        ActionSheetContainer {
+            ActionSheetHeader(title, null, false)
+            val maxListHeight = (LocalConfiguration.current.screenHeightDp * 0.54f).dp
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = maxListHeight),
+                state = listState,
+                contentPadding = PaddingValues(horizontal = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(1.dp)
+            ) {
+                itemsIndexed(actions, key = { _, action -> action.id }) { index, action ->
+                    ActionSheetRow(
+                        action = action.copy(checked = action.id in selectedIds),
+                        onAction = onToggle,
+                        modifier = Modifier.focusRequester(focusRequesters[index]),
+                        multiChoice = true
+                    )
+                }
+            }
+            HorizontalDivider(
+                modifier = Modifier.padding(horizontal = 14.dp, vertical = 5.dp),
+                thickness = 1.dp,
+                color = colorResource(R.color.app_action_sheet_divider)
+            )
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 8.dp),
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                if (resetLabel != null && onReset != null) {
+                    ActionSheetFooterAction(resetLabel, onReset)
+                }
+                Spacer(Modifier.weight(1f))
+                ActionSheetFooterAction(
+                    cancelLabel,
+                    onCancel,
+                    modifier = Modifier
+                        .focusRequester(cancelFocusRequester)
+                        .onGloballyPositioned { cancelFocusPlaced = true }
+                )
+                ActionSheetFooterAction(
+                    label = confirmLabel,
+                    onClick = onConfirm,
+                    enabled = selectedIds.size >= minimumSelectionCount
+                )
+            }
+        }
+    }
+
+    private suspend fun focusListAction(
+        listState: LazyListState,
+        index: Int,
+        focusRequester: FocusRequester
+    ) {
+        snapshotFlow { listState.layoutInfo.totalItemsCount > 0 }.first { it }
+        if (listState.layoutInfo.visibleItemsInfo.none { it.index == index }) {
+            listState.scrollToItem(index)
+        }
+        snapshotFlow { listState.layoutInfo.visibleItemsInfo.any { it.index == index } }
+            .first { it }
+        focusRequester.requestFocus()
+    }
+
+    @Composable
+    internal fun ActionSheetContainer(
+        respectNavigationBars: Boolean = true,
+        shieldBackgroundTouches: Boolean = false,
+        outerPadding: PaddingValues = PaddingValues(start = horizontalInset, end = horizontalInset, bottom = 10.dp),
+        content: @Composable ColumnScope.() -> Unit
+    ) {
+        val shape = AppShapes.overlay
+        val outline = colorResource(R.color.app_dialog_outline)
+        val touchShield = if (shieldBackgroundTouches) remember { MutableInteractionSource() } else null
+        val gradient = Brush.verticalGradient(
+            listOf(
+                colorResource(R.color.app_dialog_surface_gradient_start),
+                colorResource(R.color.app_dialog_surface_gradient_center),
+                colorResource(R.color.app_dialog_surface_gradient_end)
+            )
+        )
+
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .then(if (respectNavigationBars) Modifier.navigationBarsPadding() else Modifier)
+                .then(touchShield?.let {
+                    Modifier.clickable(it, indication = null, onClick = {})
+                } ?: Modifier)
+                .padding(outerPadding),
+            contentAlignment = Alignment.BottomCenter
+        ) {
+            Column(
+                modifier = Modifier
+                    .widthIn(max = AppOverlayWidths.compact)
+                    .fillMaxWidth()
+                    .clip(shape)
+                    .background(gradient)
+                    .border(1.dp, outline, shape)
+                    .padding(bottom = 8.dp),
+                content = content
+            )
+        }
+    }
+
+    /** Shared A-button feedback; clickable/selectable still own touch and keyboard input. */
+    @Composable
+    private fun Modifier.actionSheetPressFeedback(
+        interactionSource: MutableInteractionSource,
+        enabled: Boolean,
+        onFocused: (Boolean) -> Unit,
+        onClick: () -> Unit,
+        pressedScale: Float = ExpressiveMotion.PRESS_SCALE,
+        focusedScale: Float = 1.02f
+    ): Modifier {
+        var confirmPressed by remember(interactionSource, enabled) { mutableStateOf(false) }
+        return expressivePressFeedback(
+            interactionSource, enabled, pressedScale, focusedScale, confirmPressed
+        )
+            .onFocusChanged {
+                onFocused(it.isFocused)
+                if (!it.isFocused) confirmPressed = false
+            }
+            .onPreviewKeyEvent { event ->
+                val nativeEvent = event.nativeKeyEvent
+                if (enabled && nativeEvent.keyCode == KeyEvent.KEYCODE_BUTTON_A) {
+                    confirmPressed = nativeEvent.action == KeyEvent.ACTION_DOWN && !nativeEvent.isCanceled
+                    if (nativeEvent.action == KeyEvent.ACTION_UP && !nativeEvent.isCanceled) onClick()
+                    true
+                } else {
+                    false
+                }
+            }
+    }
+
+    @Composable
+    internal fun ActionSheetFooterAction(
+        label: String,
+        onClick: () -> Unit,
+        modifier: Modifier = Modifier,
+        enabled: Boolean = true,
+        primary: Boolean = false,
+        compact: Boolean = false
+    ) {
+        var focused by remember { mutableStateOf(false) }
+        val interactionSource = remember { MutableInteractionSource() }
+        val shape = AppShapes.medium
+        Box(
+            modifier = modifier
+                .heightIn(min = if (compact) 32.dp else 42.dp)
+                .actionSheetPressFeedback(
+                    interactionSource, enabled,
+                    onFocused = { focused = it }, onClick = onClick
+                )
+                .clip(shape)
+                .then(
+                    when {
+                        primary -> Modifier.background(MaterialTheme.colorScheme.primary)
+                        focused -> Modifier.background(appAccentSoftColor())
+                        else -> Modifier
+                    }
+                )
+                .then(
+                    if (focused) {
+                        Modifier.border(
+                            2.dp,
+                            if (primary) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.primary,
+                            shape
+                        )
+                    } else {
+                        Modifier
+                    }
+                )
+                .clickable(
+                    interactionSource = interactionSource,
+                    indication = LocalIndication.current,
+                    enabled = enabled,
+                    onClick = onClick
+                )
+                .padding(
+                    horizontal = if (compact) 10.dp else 14.dp,
+                    vertical = if (compact) 6.dp else 10.dp
+                ),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = label,
+                color = if (primary) {
+                    MaterialTheme.colorScheme.onPrimary.copy(alpha = if (enabled) 1f else 0.38f)
+                } else {
+                    MaterialTheme.colorScheme.primary.copy(alpha = if (enabled) 1f else 0.38f)
+                },
+                fontSize = if (compact) 11.sp else 13.sp,
+                fontWeight = FontWeight.Medium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+
+    @Composable
+    internal fun ActionSheetHeader(title: String, subtitle: String?, activeStatus: Boolean) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(start = 20.dp, top = 15.dp, end = 20.dp, bottom = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = title,
+                modifier = Modifier.weight(1f),
+                color = MaterialTheme.colorScheme.onSurface,
+                fontSize = 17.sp,
+                fontWeight = FontWeight.Medium,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+            if (!subtitle.isNullOrEmpty()) {
+                Spacer(Modifier.width(10.dp))
+                Box(
+                    modifier = Modifier
+                        .size(6.dp)
+                        .background(
+                            if (activeStatus) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.onSurfaceVariant,
+                            CircleShape
+                        )
+                )
+                Spacer(Modifier.width(5.dp))
+                Text(
+                    text = subtitle,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 12.sp
+                )
+            }
+        }
+    }
+
+    @Composable
+    internal fun ActionSheetRow(
+        action: Action,
+        onAction: (Action) -> Unit,
+        modifier: Modifier = Modifier,
+        singleChoice: Boolean = false,
+        multiChoice: Boolean = false
+    ) {
+        val rowShape = AppShapes.medium
+        val emphasizedColor = if (action.emphasized && action.enabled) MaterialTheme.colorScheme.primary else null
+        var focused by remember(action.id) { mutableStateOf(false) }
+        val interactionSource = remember(action.id) { MutableInteractionSource() }
+        val activate = { if (action.enabled) onAction(action) }
+        Column {
+            if (action.sectionStart) {
+                HorizontalDivider(
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 5.dp),
+                    thickness = 1.dp,
+                    color = colorResource(R.color.app_action_sheet_divider)
+                )
+            }
+            Row(
+                modifier = modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 44.dp)
+                    .actionSheetPressFeedback(
+                        interactionSource, action.enabled,
+                        onFocused = { focused = it }, onClick = activate,
+                        pressedScale = 0.985f, focusedScale = 1f
+                    )
+                    .clip(rowShape)
+                    .then(
+                        if (focused) Modifier.background(appAccentSoftColor())
+                        else Modifier
+                    )
+                    .then(
+                        if (focused) {
+                            Modifier.border(1.dp, MaterialTheme.colorScheme.primary, rowShape)
+                        } else {
+                            Modifier
+                        }
+                    )
+                    .then(when {
+                        action.toggle -> Modifier.toggleable(
+                            interactionSource = interactionSource, indication = LocalIndication.current,
+                            value = action.checked == true, enabled = action.enabled,
+                            role = Role.Switch, onValueChange = { activate() }
+                        )
+                        multiChoice && action.checked != null -> Modifier.toggleable(
+                            interactionSource = interactionSource, indication = LocalIndication.current,
+                            value = action.checked, enabled = action.enabled,
+                            role = Role.Checkbox, onValueChange = { activate() }
+                        )
+                        singleChoice && action.checked != null -> Modifier.selectable(
+                            interactionSource = interactionSource, indication = LocalIndication.current,
+                            selected = action.checked, enabled = action.enabled,
+                            role = Role.RadioButton, onClick = activate
+                        )
+                        else -> Modifier.clickable(
+                            interactionSource = interactionSource, indication = LocalIndication.current,
+                            enabled = action.enabled, onClick = activate
+                        )
+                    })
+                    .padding(horizontal = 14.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                action.iconRes?.let { iconRes ->
+                    Icon(
+                        painter = painterResource(iconRes),
+                        contentDescription = null,
+                        tint = (emphasizedColor ?: MaterialTheme.colorScheme.onSurface)
+                            .copy(alpha = if (action.enabled) 1f else 0.38f),
+                        modifier = Modifier.size(24.dp)
+                    )
+                    Spacer(Modifier.width(12.dp))
+                }
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = action.title.toString(),
+                        color = when {
+                            !action.enabled -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+                            action.destructive -> colorResource(R.color.app_action_sheet_danger)
+                            else -> emphasizedColor ?: MaterialTheme.colorScheme.onSurface
+                        },
+                        fontSize = 14.sp,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    if (!action.description.isNullOrEmpty()) {
+                        Text(
+                            text = action.description.toString(),
+                            color = (emphasizedColor ?: MaterialTheme.colorScheme.onSurfaceVariant).copy(
+                                alpha = if (action.enabled) 1f else 0.38f
+                            ),
+                            fontSize = 12.sp,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+                if (action.toggle) {
+                    Spacer(Modifier.width(10.dp))
+                    AppSwitch(checked = action.checked == true, onCheckedChange = null, enabled = action.enabled)
+                } else if (!action.trailingText.isNullOrEmpty()) {
+                    Spacer(Modifier.width(10.dp))
+                    Text(
+                        text = action.trailingText.toString(),
+                        color = MaterialTheme.colorScheme.primary.copy(
+                            alpha = if (action.enabled) 1f else 0.38f
+                        ),
+                        fontSize = 11.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                } else if (action.checked == true) {
+                    Spacer(Modifier.width(10.dp))
+                    Text(
+                        text = "✓",
+                        color = MaterialTheme.colorScheme.primary,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                } else if (action.opensSubmenu) {
+                    Spacer(Modifier.width(10.dp))
+                    Text(
+                        text = "›",
+                        color = emphasizedColor ?: MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 20.sp
+                    )
+                }
+            }
+        }
+    }
+
+    @Composable
+    internal fun isControllerFocusMode(): Boolean {
+        val configuration = LocalConfiguration.current
+        val isTelevision = configuration.uiMode and android.content.res.Configuration.UI_MODE_TYPE_MASK ==
+            android.content.res.Configuration.UI_MODE_TYPE_TELEVISION
+        return isTelevision || LocalInputModeManager.current.inputMode == InputMode.Keyboard
+    }
+}

@@ -1,0 +1,12 @@
+/.build-*/
+/dist/
+/center/.deployment/
+/center/state/
+**/.env
+**/.env.*
+!**/.env.example
+*.pem
+*.key
+*.pfx
+*.p12
+__pycache__/

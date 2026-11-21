@@ -1,0 +1,39 @@
+<!-- TEMPLATE_HEADER - 开发环境版本 -->
+<meta charset="UTF-8" />
+<meta http-equiv="X-UA-Compatible" content="IE=edge" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta name="color-scheme" content="light dark" />
+<!-- the first frame of every page is the colour of the person's theme, not the browser's white canvas: the surface colour of the last appearance this browser kept (foundation-ui.boot), else the colour of the stored light or dark choice -->
+<script>
+  (function () {
+    try {
+      var root = document.documentElement, color = '', dark = false;
+      try { var r = JSON.parse(localStorage.getItem('foundation-ui.boot') || 'null'); var m = r && r.v === 1 && typeof r.css === 'string' && /--md-sys-color-surface:\s*(#[0-9a-fA-F]{3,8}|rgba?\([^)]*\))/.exec(r.css); if (m) color = m[1]; if (r && r.mode === 'dark') dark = true; } catch (e) { /* no record */ }
+      var t = null; try { t = localStorage.getItem('theme'); } catch (e) { /* no storage */ }
+      if (t === 'dark') dark = true; else if (t === 'light') dark = false; else if (!(r && (r.mode === 'light' || r.mode === 'dark'))) dark = !!(window.matchMedia && matchMedia('(prefers-color-scheme: dark)').matches);
+      if (!color) color = dark ? '#141218' : '#fef7ff';
+      root.style.backgroundColor = color;
+      root.style.colorScheme = dark ? 'dark' : 'light';
+    } catch (e) { /* the page starts as it did */ }
+  })();
+</script>
+<title>Sunshine - 开发环境</title>
+<link rel="icon" type="image/x-icon" href="/images/sunshine.ico">
+<link rel="apple-touch-icon" href="/images/logo-sunshine-256.png">
+<link href="/assets/css/sunshine.css" rel="stylesheet" />
+
+<!-- 开发环境标识 -->
+<style>
+body::before {
+    content: "🔧 开发环境";
+    position: fixed;
+    top: 0;
+    right: 0;
+    background: #ffc107;
+    color: #000;
+    padding: 4px 8px;
+    font-size: 12px;
+    z-index: 10000;
+    border-radius: 0 0 0 4px;
+}
+</style>

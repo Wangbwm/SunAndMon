@@ -1,0 +1,309 @@
+plugins {
+    alias(libs.plugins.android.application)
+    alias(libs.plugins.kotlin.android)
+    alias(libs.plugins.kotlin.compose)
+}
+
+def localProperties = new Properties()
+def localPropertiesFile = rootProject.file("local.properties")
+if (localPropertiesFile.exists()) {
+    localPropertiesFile.withInputStream { stream ->
+        localProperties.load(stream)
+    }
+}
+
+def githubOAuthClientId = (
+        project.findProperty("githubOAuthClientId")
+                ?: localProperties.getProperty("githubOAuthClientId")
+                ?: System.getenv("GITHUB_OAUTH_CLIENT_ID")
+                ?: ""
+).toString().trim()
+def escapeBuildConfigString = { value ->
+    value.replace("\\", "\\\\").replace("\"", "\\\"")
+}
+def enableX86TestAbi = (project.findProperty("enableX86TestAbi") ?: "false").toString().toBoolean()
+def audioHapticsAppLabel = "Moonlight V+"
+def audioHapticsSdkDir = (
+        project.findProperty("audioHapticsSdkDir")
+                ?: localProperties.getProperty("audioHapticsSdkDir")
+                ?: System.getenv("AUDIO_HAPTICS_SDK_DIR")
+                ?: ""
+).toString().trim()
+if (audioHapticsSdkDir.isEmpty()) {
+    throw new GradleException(
+            "audioHapticsSdkDir is required; point it at the Apache-2.0 audio-haptics-sdk checkout"
+    )
+}
+
+// 仅在存在 google-services.json 且满足条件时应用 Google Services 插件
+def hasGoogleServicesJson = file('google-services.json').exists()
+if (hasGoogleServicesJson && (project.hasProperty('enableAnalytics') || gradle.startParameter.taskNames.any { it.contains('Release') })) {
+    apply plugin: 'com.google.gms.google-services'
+    // Crashlytics requires google-services to be applied first.
+    apply plugin: 'com.google.firebase.crashlytics'
+} else if (!hasGoogleServicesJson) {
+    logger.lifecycle("google-services.json not found; skipping Google Services + Crashlytics plugins")
+}
+
+android {
+    ndkVersion "28.2.13676358"
+
+    compileSdkVersion 36
+
+    namespace 'com.limelight'
+
+    defaultConfig {
+        minSdk 22
+        targetSdk 35
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+
+        // minSdk 22 ≥ 21：系统原生支持 VectorDrawable，禁用为 API<21 设备生成位图
+        // 回退的老管线（其栅格化器无法解析矢量里的 ?attr 主题色，Material You
+        // 强调色会让它直接构建失败；这些 PNG 在 22+ 设备上本来也永远不会被用到）。
+        vectorDrawables.useSupportLibrary = true
+
+        // 记录最近一次发布的版本。发版时由 CI 依据 tag 和发布历史覆写
+        // （见 .github/release/version-code.sh）。
+        versionName "12.15.17"
+        versionCode = 121517001
+
+        // Optional GitHub OAuth App client ID. Enable Device Flow on the OAuth app,
+        // then set githubOAuthClientId in local.properties, pass -PgithubOAuthClientId=...,
+        // or set GITHUB_OAUTH_CLIENT_ID in the environment.
+        buildConfigField "String", "GITHUB_OAUTH_CLIENT_ID", "\"${escapeBuildConfigString(githubOAuthClientId)}\""
+
+        externalNativeBuild {
+            ndkBuild {
+                arguments "AUDIO_HAPTICS_SDK_DIR=${file(audioHapticsSdkDir).absolutePath.replace('\\', '/')}"
+            }
+        }
+
+        // Generate native debug symbols to allow Google Play to symbolicate our native crashes
+        ndk.debugSymbolLevel = 'FULL'
+
+        ndk {
+            def supportedAbis = ['arm64-v8a', 'armeabi-v7a']
+            if (enableX86TestAbi) {
+                supportedAbis += 'x86'
+            }
+            abiFilters(*supportedAbis)
+        }
+    }
+
+    flavorDimensions.add("root")
+
+    buildFeatures {
+        aidl = true
+        buildConfig = true
+        compose = true
+    }
+
+    productFlavors {
+        root {
+            // Android O has native mouse capture, so don't show the rooted
+            // version to devices running O on the Play Store.
+            maxSdk 25
+
+            externalNativeBuild {
+                ndkBuild {
+                    arguments "PRODUCT_FLAVOR=root"
+                }
+            }
+
+            applicationId "com.limelight.root"
+            dimension "root"
+            buildConfigField "boolean", "ROOT_BUILD", "true"
+        }
+
+        nonRoot {
+            externalNativeBuild {
+                ndkBuild {
+                    arguments "PRODUCT_FLAVOR=nonRoot"
+                }
+            }
+
+            applicationId "com.limelight"
+            dimension "root"
+            buildConfigField "boolean", "ROOT_BUILD", "false"
+        }
+    }
+
+    compileOptions {
+        encoding "UTF-8"
+        sourceCompatibility JavaVersion.VERSION_11
+        targetCompatibility JavaVersion.VERSION_11
+        // 启用 desugaring 以支持 Java 8+ API 在旧版 Android 上运行
+        coreLibraryDesugaringEnabled true
+    }
+
+    kotlinOptions {
+        jvmTarget = '11'
+    }
+
+    lint {
+        disable 'MissingTranslation'
+        lintConfig file('lint.xml')
+        baseline file('lint-baseline.xml')
+    }
+
+    bundle {
+        language {
+            // Avoid splitting by language, since we allow users
+            // to manually switch language in settings.
+            enableSplit = false
+        }
+        density {
+            // FIXME: This should not be necessary but we get
+            // weird crashes due to missing drawable resources
+            // when this split is enabled.
+            enableSplit = false
+        }
+    }
+
+    // 基于环境变量的可选签名配置（用于 CI 等环境）
+    def keystorePath = System.getenv("KEYSTORE_PATH")
+    def keystorePassword = System.getenv("KEYSTORE_PASSWORD")
+    def envKeyAlias = System.getenv("KEY_ALIAS")
+    def envKeyPassword = System.getenv("KEY_PASSWORD")
+    def hasSigningConfig = keystorePath != null && keystorePassword != null && envKeyAlias != null && envKeyPassword != null && new File(keystorePath).exists()
+
+    signingConfigs {
+        if (hasSigningConfig) {
+            release {
+                storeFile file(keystorePath)
+                storePassword keystorePassword
+                keyAlias envKeyAlias
+                keyPassword envKeyPassword
+            }
+        }
+    }
+
+    buildTypes {
+        debug {
+            applicationIdSuffix ".vplus_debug"
+            resValue "string", "app_label", audioHapticsAppLabel
+            resValue "string", "app_label_root", audioHapticsAppLabel
+
+            minifyEnabled true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'),
+                    'proguard-rules.pro', 'proguard-debug.pro'
+        }
+        release {
+            // To whomever is releasing/using an APK in release mode with
+            // Moonlight's official application ID, please stop. I see every
+            // single one of your crashes in my Play Console and it makes
+            // Moonlight's reliability look worse and makes it more difficult
+            // to distinguish real crashes from your crashy VR app. Seriously,
+            // 44 of the *same* native crash in 72 hours and a few each of
+            // several other crashes.
+            //
+            // This is technically not your fault. I would have hoped Google
+            // would validate the signature of the APK before attributing
+            // the crash to it. I asked their Play Store support about this
+            // and they said they don't and don't have plans to, so that sucks.
+            //
+            // In any case, it's bad form to release an APK using someone
+            // else's application ID. There is no legitimate reason, that
+            // anyone would need to comment out the following line, except me
+            // when I release an official signed Moonlight build. If you feel
+            // like doing so would solve something, I can tell you it will not.
+            // You can't upgrade an app while retaining data without having the
+            // same signature as the official version. Nor can you post it on
+            // the Play Store, since that application ID is already taken.
+            // Reputable APK hosting websites similarly validate the signature
+            // is consistent with the Play Store and won't allow an APK that
+            // isn't signed the same as the original.
+            //
+            // I wish any and all people using Moonlight as the basis of other
+            // cool projects the best of luck with their efforts. All I ask
+            // is to please change the applicationId before you publish.
+            //
+            // TL;DR: Leave the following line alone!
+            applicationIdSuffix ".qiin"
+            resValue "string", "app_label", audioHapticsAppLabel
+            resValue "string", "app_label_root", "Moonlight (Root)"
+
+            minifyEnabled true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            if (hasSigningConfig && signingConfigs.hasProperty('release')) {
+                signingConfig signingConfigs.release
+            }
+        }
+    }
+
+    externalNativeBuild {
+        ndkBuild {
+            path "src/main/jni/Android.mk"
+        }
+    }
+}
+
+dependencies {
+    implementation project(':pyrowave-runtime')
+    implementation project(':usbip-backend')
+    // Desugaring 支持，用于在旧版 Android 上使用 Java 8+ API
+    coreLibraryDesugaring libs.desugar.jdk.libs
+
+    // Lossless Scaling Frame Generation 桥接模块（仅 arm64-v8a 设备 + Android 10+ 实际可用）。
+    // 阶段 1：仅提供占位 API；阶段 2 起接入 MediaCodec 拦截路径。
+    implementation project(':framegen')
+    implementation project(':moonlight-haptics-android')
+
+    implementation libs.bouncycastle.prov
+    implementation libs.bouncycastle.pkix
+    implementation libs.jcodec
+    implementation libs.okhttp
+    implementation libs.jmdns
+    implementation libs.shield.controller
+    implementation libs.appcompat
+    implementation libs.dynamicanimation
+    implementation libs.core.splashscreen
+    implementation libs.preference
+    implementation libs.keyboard.header
+    implementation libs.constraintlayout
+    implementation libs.gson
+    implementation libs.glide
+    implementation libs.glide.transformations
+    implementation libs.cardview
+    implementation libs.recyclerview
+    annotationProcessor libs.glide.compiler
+    implementation libs.seismic
+    implementation libs.flexbox
+    implementation libs.tvprovider
+    implementation libs.zxing.embedded
+    implementation libs.shizuku.api
+    implementation libs.shizuku.provider
+    implementation libs.androidx.activity.compose
+    implementation platform(libs.androidx.compose.bom)
+    implementation libs.androidx.compose.foundation
+    implementation libs.androidx.compose.material3
+    implementation libs.androidx.compose.ui
+    implementation libs.androidx.compose.ui.tooling.preview
+    implementation libs.compose.showcase.sequence
+
+    // Firebase Analytics + Crashlytics
+    // BOM 版本说明: https://firebase.google.com/support/release-notes/android
+    // 注意: Firebase 33.0.0+ 需要 minSdk 23，我们使用 32.8.1 保持 API 22 兼容
+    // 没有 google-services.json 时 Crashlytics 仍能编译进 APK 但不会上报 (init 静默失败)
+    implementation platform(libs.firebase.bom)
+    implementation libs.firebase.analytics
+    implementation libs.firebase.crashlytics
+
+    // Kotlin
+    implementation libs.kotlin.stdlib
+    implementation libs.kotlinx.coroutines.android
+    implementation libs.androidx.lifecycle.runtime.ktx
+    implementation libs.hidden.api.bypass
+
+    testImplementation libs.junit
+    testImplementation libs.json
+    testImplementation libs.okhttp.tls
+    testImplementation libs.okhttp.mockwebserver
+    testImplementation libs.kxml2
+    androidTestImplementation platform(libs.androidx.compose.bom)
+    androidTestImplementation libs.androidx.compose.ui.test.junit4
+    androidTestImplementation libs.androidx.test.ext.junit
+    androidTestImplementation libs.androidx.test.runner
+    androidTestImplementation libs.androidx.test.espresso.core
+    debugImplementation libs.androidx.compose.ui.test.manifest
+}

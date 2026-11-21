@@ -1,0 +1,148 @@
+package com.limelight.preferences
+
+import androidx.preference.ListPreference
+import androidx.preference.MultiSelectListPreference
+import androidx.preference.Preference
+import androidx.preference.PreferenceCategory
+import androidx.preference.PreferenceGroup
+import androidx.preference.PreferenceScreen
+import java.util.IdentityHashMap
+import java.util.Locale
+
+/** Coordinates runtime eligibility with temporary search filtering. */
+internal class SettingsVisibilityController(
+    private val screenProvider: () -> PreferenceScreen?,
+    private val onCategoryEligibilityChanged: () -> Unit,
+) {
+    private var filtering = false
+    private val runtimeVisibility = IdentityHashMap<Preference, Boolean>()
+    private var activeQuery = ""
+
+    fun isRuntimeVisible(preference: Preference): Boolean =
+        runtimeVisibility[preference] ?: preference.isVisible
+
+    /** 搜索中看过滤结果，否则看运行时资格。侧栏分类用这个。 */
+    fun isListed(preference: Preference): Boolean =
+        if (isSearching()) preference.isVisible else isRuntimeVisible(preference)
+
+    fun isSearching(): Boolean = activeQuery.trim().isNotEmpty()
+
+    fun refreshSearch() = applySearch(activeQuery)
+
+    /** A nested screen stays a single search result and opens at its matching setting. */
+    fun matchingDescendant(screen: PreferenceScreen): Preference? {
+        val query = activeQuery.trim().lowercase(Locale.getDefault())
+        if (query.isEmpty()) return null
+        return matchingDescendant(screen, query)
+    }
+
+    private fun matchingDescendant(group: PreferenceGroup, query: String): Preference? {
+        for (index in 0 until group.preferenceCount) {
+            val child = group.getPreference(index)
+            if (!isRuntimeVisible(child)) continue
+            if (child is PreferenceGroup) {
+                if (containsQuery(child.title, query)) firstVisibleLeaf(child)?.let { return it }
+                matchingDescendant(child, query)?.let { return it }
+            } else if (matches(child, query)) {
+                return child
+            }
+        }
+        return null
+    }
+
+    /** 标题没命中、但下拉文案命中时，返回用户能看到的选项名。 */
+    fun matchedDropdownLabels(preference: Preference): List<String> {
+        val query = activeQuery.trim().lowercase(Locale.getDefault())
+        if (query.isEmpty() || containsQuery(preference.title, query)) return emptyList()
+        return dropdownLabels(preference)
+            .map { it.toString() }
+            .filter { containsQuery(it, query) }
+            .distinct()
+    }
+
+    fun setRuntimeVisible(preference: Preference?, visible: Boolean) {
+        preference ?: return
+        if (runtimeVisibility.containsKey(preference)) {
+            runtimeVisibility[preference] = visible
+            applySearch(activeQuery)
+        } else {
+            preference.isVisible = visible
+        }
+        if (preference is PreferenceCategory) onCategoryEligibilityChanged()
+    }
+
+    fun applySearch(query: String) {
+        val screen = screenProvider() ?: return
+        activeQuery = query
+        val normalizedQuery = query.trim().lowercase(Locale.getDefault())
+        val isSearching = normalizedQuery.isNotEmpty()
+
+        for (index in 0 until screen.preferenceCount) {
+            val category = screen.getPreference(index) as? PreferenceCategory ?: continue
+            if (isSearching && !filtering) {
+                runtimeVisibility[category] = category.isVisible
+                for (childIndex in 0 until category.preferenceCount) {
+                    val child = category.getPreference(childIndex)
+                    runtimeVisibility[child] = child.isVisible
+                }
+            }
+
+            if (!isSearching) {
+                category.isVisible = runtimeVisibility[category] ?: category.isVisible
+                for (childIndex in 0 until category.preferenceCount) {
+                    val child = category.getPreference(childIndex)
+                    child.isVisible = runtimeVisibility[child] ?: child.isVisible
+                }
+                continue
+            }
+
+            val categoryEligible = isRuntimeVisible(category)
+            val categoryMatches = categoryEligible && matches(category, normalizedQuery)
+            var anyChildMatches = false
+            for (childIndex in 0 until category.preferenceCount) {
+                val child = category.getPreference(childIndex)
+                val childVisible = categoryEligible &&
+                    isRuntimeVisible(child) &&
+                    (categoryMatches || matches(child, normalizedQuery))
+                child.isVisible = childVisible
+                anyChildMatches = anyChildMatches || childVisible
+            }
+            category.isVisible = categoryMatches || anyChildMatches
+        }
+
+        if (!isSearching) {
+            runtimeVisibility.clear()
+        }
+        filtering = isSearching
+        onCategoryEligibilityChanged()
+    }
+
+    private fun firstVisibleLeaf(group: PreferenceGroup): Preference? {
+        for (index in 0 until group.preferenceCount) {
+            val child = group.getPreference(index)
+            if (!isRuntimeVisible(child)) continue
+            if (child is PreferenceGroup) firstVisibleLeaf(child)?.let { return it }
+            else return child
+        }
+        return null
+    }
+
+    private fun matches(preference: Preference, query: String): Boolean =
+        containsQuery(preference.title, query) ||
+            containsQuery(preference.summary, query) ||
+            preference.key?.lowercase(Locale.getDefault())?.contains(query) == true ||
+            dropdownLabels(preference).any { containsQuery(it, query) } ||
+            (preference is PreferenceScreen && matchingDescendant(preference, query) != null)
+
+    /** 只匹配用户在下拉里看到的文案，不匹配内部 entryValues。 */
+    private fun dropdownLabels(preference: Preference): Array<out CharSequence> = when (preference) {
+        is DisplayChoicePreference -> preference.searchLabels.toTypedArray()
+        is ListPreference -> preference.entries
+        is MultiSelectListPreference -> preference.entries
+        else -> null
+    } ?: emptyArray()
+
+    private fun containsQuery(text: CharSequence?, query: String): Boolean =
+        text?.toString()?.lowercase(Locale.getDefault())?.replace('×', 'x')
+            ?.contains(query.replace('×', 'x')) == true
+}

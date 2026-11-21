@@ -1,0 +1,66 @@
+#!/bin/bash
+set -Eeuo pipefail
+shopt -s nullglob
+edid=/usr/local/share/sunandmon/virtual-1080p.edid
+owner=/run/sunandmon-virtual-display.connector
+
+find_connector() {
+    local entry card driver
+    for entry in /sys/class/drm/card*-HDMI-A-1; do
+        card="${entry##*/}"
+        card="${card%%-HDMI-A-1}"
+        driver=$(readlink -f "/sys/class/drm/$card/device/driver" || true)
+        [[ "${driver##*/}" == i915 ]] || continue
+        connector="$entry"
+        override="/sys/kernel/debug/dri/${card#card}/HDMI-A-1/edid_override"
+        [[ -w "$override" && -w "$connector/status" ]] && return 0
+    done
+    return 1
+}
+
+reset_display() {
+    printf '%s\n' reset > "$override"
+    printf '%s\n' detect > "$connector/status"
+}
+
+owns_override() {
+    cat "$override" | cmp -s "$edid" -
+}
+
+case "${1:-}" in
+    start)
+        for _ in $(seq 1 25); do
+            if find_connector; then break; fi
+            sleep 1
+        done
+        find_connector || { echo "Intel HDMI connector not available"; exit 1; }
+        if owns_override && [[ "$(cat "$connector/status")" == connected ]]; then
+            grep -Fxq 1920x1080 "$connector/modes"
+        else
+            if [[ "$(cat "$connector/status")" != disconnected ]]; then
+                echo "A physical monitor is already connected to HDMI."
+                exit 0
+            fi
+            if [[ "$(wc -c < "$override")" != 0 || "$(cat "${override%/*}/force")" != unspecified ]]; then
+                echo "HDMI already has a custom display configuration."
+                exit 0
+            fi
+            trap 'reset_display || true' ERR
+            cat "$edid" > "$override"
+            printf '%s\n' on-digital > "$connector/status"
+            grep -Fxq 1920x1080 "$connector/modes"
+        fi
+        (umask 077; printf '%s\n' "$connector" > "$owner")
+        trap - ERR
+        echo "Virtual HDMI configured at 1920x1080"
+        ;;
+    stop)
+        if [[ -f "$owner" ]] && find_connector && [[ "$(cat "$owner")" == "$connector" ]] && owns_override; then
+            reset_display
+        fi
+        rm -f -- "$owner"
+        ;;
+    *)
+        exit 2
+        ;;
+esac

@@ -1,0 +1,529 @@
+package com.limelight.preferences
+
+import java.io.IOException
+import java.net.Inet4Address
+import java.net.InetAddress
+import java.net.NetworkInterface
+import java.net.URI
+import java.net.URISyntaxException
+import java.util.Collections
+import java.util.concurrent.LinkedBlockingQueue
+
+import com.limelight.ui.ThemedActivity
+import com.limelight.R
+import com.limelight.computers.ComputerManagerService
+import com.limelight.nvstream.http.ComputerDetails
+import com.limelight.nvstream.http.NvHTTP
+import com.limelight.nvstream.jni.MoonBridge
+import com.limelight.utils.Dialog
+import com.limelight.utils.NetHelper
+import com.limelight.utils.ServerHelper
+import com.limelight.utils.SpinnerDialog
+import com.limelight.utils.UiHelper
+
+import android.app.Activity
+import android.app.Service
+import android.content.ComponentName
+import android.content.Context
+import android.content.Intent
+import android.content.ServiceConnection
+import android.content.res.Configuration
+import android.os.Bundle
+import android.os.IBinder
+import android.view.KeyEvent
+import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputMethodManager
+import android.widget.Button
+import android.widget.EditText
+import android.widget.Toast
+import androidx.core.view.WindowCompat
+
+internal class AddComputerWorkerGenerationGate {
+    private var generation = 0L
+
+    @Synchronized
+    fun nextGeneration(): Long {
+        generation++
+        return generation
+    }
+
+    @Synchronized
+    fun invalidate() {
+        generation++
+    }
+
+    @Synchronized
+    fun isCurrent(candidate: Long): Boolean = candidate == generation
+}
+
+class AddComputerManually : ThemedActivity() {
+    companion object {
+        const val EXTRA_ADDED_COMPUTER_UUID = "com.limelight.extra.ADDED_COMPUTER_UUID"
+        private const val CONNECTING_BUTTON_ALPHA = 0.55f
+    }
+
+    private lateinit var hostText: EditText
+    private lateinit var portText: EditText
+    private lateinit var addPcButton: Button
+    @Volatile private var managerBinder: ComputerManagerService.ComputerManagerBinder? = null
+    private val computersToAdd = LinkedBlockingQueue<String>()
+    private val addThreadLock = Any()
+    private val addWorkerGenerationGate = AddComputerWorkerGenerationGate()
+    private var addThread: Thread? = null
+    private var restartAddThreadWhenStopped = false
+    @Volatile private var shuttingDown = false
+    private var serviceBindingRequested = false
+    private var addingComputer = false
+
+    private val serviceConnection: ServiceConnection = object : ServiceConnection {
+        override fun onServiceConnected(className: ComponentName, binder: IBinder) {
+            if (shuttingDown) return
+            managerBinder = binder as ComputerManagerService.ComputerManagerBinder
+            startAddThread()
+        }
+
+        override fun onServiceDisconnected(className: ComponentName) {
+            managerBinder = null
+            cancelAddThread()
+            setAddingState(false)
+        }
+    }
+
+    private fun isIPv6Address(address: String): Boolean {
+        return try {
+            val inetAddress = InetAddress.getByName(address)
+            inetAddress.address.size == 16
+        } catch (e: Exception) {
+            address.count { it == ':' } >= 2
+        }
+    }
+
+    private fun isWrongSubnetSiteLocalAddress(address: String): Boolean {
+        try {
+            val targetAddress = InetAddress.getByName(address)
+            if (targetAddress !is Inet4Address || !targetAddress.isSiteLocalAddress) {
+                return false
+            }
+
+            for (iface in Collections.list(NetworkInterface.getNetworkInterfaces())) {
+                for (addr in iface.interfaceAddresses) {
+                    if (addr.address !is Inet4Address || !addr.address.isSiteLocalAddress) {
+                        continue
+                    }
+
+                    val targetAddrBytes = targetAddress.address
+                    val ifaceAddrBytes = addr.address.address
+
+                    var addressMatches = true
+                    for (i in 0 until addr.networkPrefixLength) {
+                        if ((ifaceAddrBytes[i / 8].toInt() and (1 shl (i % 8))) != (targetAddrBytes[i / 8].toInt() and (1 shl (i % 8)))) {
+                            addressMatches = false
+                            break
+                        }
+                    }
+
+                    if (addressMatches) {
+                        return false
+                    }
+                }
+            }
+
+            return true
+        } catch (e: Exception) {
+            e.printStackTrace()
+            return false
+        }
+    }
+
+    private fun parseRawUserInputToUri(rawUserInput: String): URI? {
+        val colonCount = rawUserInput.count { it == ':' }
+        val likelyIPv6 = colonCount >= 2
+
+        try {
+            val uri = URI("moonlight://$rawUserInput")
+            if (!uri.host.isNullOrEmpty()) {
+                return uri
+            }
+        } catch (ignored: URISyntaxException) {}
+
+        if (likelyIPv6 && !rawUserInput.startsWith("[")) {
+            try {
+                val lastColonIndex = rawUserInput.lastIndexOf(':')
+
+                var hasPort = false
+                if (lastColonIndex > 0 && lastColonIndex < rawUserInput.length - 1) {
+                    val possiblePort = rawUserInput.substring(lastColonIndex + 1)
+                    try {
+                        val port = possiblePort.toInt()
+                        if (port in 1..65535) {
+                            hasPort = true
+                        }
+                    } catch (e: NumberFormatException) {}
+                }
+
+                val addressWithBrackets = if (hasPort) {
+                    val address = rawUserInput.substring(0, lastColonIndex)
+                    val port = rawUserInput.substring(lastColonIndex + 1)
+                    "[$address]:$port"
+                } else {
+                    "[$rawUserInput]"
+                }
+
+                val uri = URI("moonlight://$addressWithBrackets")
+                if (!uri.host.isNullOrEmpty()) {
+                    return uri
+                }
+            } catch (ignored: URISyntaxException) {}
+        }
+
+        if (!rawUserInput.startsWith("[")) {
+            try {
+                val uri = URI("moonlight://[$rawUserInput]")
+                if (!uri.host.isNullOrEmpty()) {
+                    return uri
+                }
+            } catch (ignored: URISyntaxException) {}
+        }
+
+        return null
+    }
+
+    private fun isAddWorkerCurrent(generation: Long): Boolean {
+        return !shuttingDown && addWorkerGenerationGate.isCurrent(generation)
+    }
+
+    private fun ensureAddWorkerCurrent(generation: Long) {
+        if (!isAddWorkerCurrent(generation) || Thread.currentThread().isInterrupted) {
+            throw InterruptedException()
+        }
+    }
+
+    @Throws(InterruptedException::class)
+    private fun doAddPc(rawUserInput: String, generation: Long) {
+        ensureAddWorkerCurrent(generation)
+        var wrongSiteLocal = false
+        var activeNetworkIsVpn = false
+        var invalidInput = false
+        var success: Boolean
+        var portTestResult: Int
+        var hostAddress: String? = null
+        var isIPv6 = false
+        var addedComputerUuid: String? = null
+
+        val dialog = SpinnerDialog.displayDialog(this, resources.getString(R.string.title_add_pc),
+                resources.getString(R.string.msg_add_pc), false)
+
+        try {
+            val details = ComputerDetails()
+
+            val uri = parseRawUserInputToUri(rawUserInput)
+            if (uri != null && !uri.host.isNullOrEmpty()) {
+                val host = uri.host
+                var port = uri.port
+
+                hostAddress = host
+                isIPv6 = isIPv6Address(host)
+
+                if (port == -1) {
+                    port = NvHTTP.DEFAULT_HTTP_PORT
+                }
+
+                details.manualAddress = ComputerDetails.AddressTuple(host, port)
+                val binder = managerBinder ?: throw InterruptedException()
+                success = binder.addComputerBlocking(details)
+                ensureAddWorkerCurrent(generation)
+                if (success) {
+                    addedComputerUuid = details.uuid
+                }
+                if (!success) {
+                    activeNetworkIsVpn = NetHelper.isActiveNetworkVpn(this)
+                    // A VPN may route private subnets that don't match any local
+                    // interface address, so the LAN subnet heuristic is invalid.
+                    wrongSiteLocal = !activeNetworkIsVpn && isWrongSubnetSiteLocalAddress(host)
+                }
+            } else {
+                success = false
+                invalidInput = true
+            }
+        } catch (e: InterruptedException) {
+            dialog.dismiss()
+            throw e
+        } catch (e: IllegalArgumentException) {
+            e.printStackTrace()
+            success = false
+            invalidInput = true
+        }
+
+        try {
+            if (!success && !wrongSiteLocal && !invalidInput && !activeNetworkIsVpn) {
+                ensureAddWorkerCurrent(generation)
+                portTestResult = MoonBridge.testClientConnectivity(ServerHelper.CONNECTION_TEST_SERVER, 443,
+                        MoonBridge.ML_PORT_FLAG_TCP_47984 or MoonBridge.ML_PORT_FLAG_TCP_47989)
+            } else {
+                portTestResult = MoonBridge.ML_TEST_RESULT_INCONCLUSIVE
+            }
+            ensureAddWorkerCurrent(generation)
+        } finally {
+            dialog.dismiss()
+        }
+
+        if (invalidInput) {
+            showAddFailure(generation, resources.getString(R.string.addpc_unknown_host))
+        } else if (wrongSiteLocal) {
+            showAddFailure(generation, resources.getString(R.string.addpc_wrong_sitelocal))
+        } else if (!success) {
+            var dialogText = when {
+                activeNetworkIsVpn -> resources.getString(R.string.addpc_fail_vpn)
+                portTestResult != MoonBridge.ML_TEST_RESULT_INCONCLUSIVE && portTestResult != 0 ->
+                    resources.getString(R.string.nettest_text_blocked)
+                else -> resources.getString(R.string.addpc_fail)
+            }
+
+            if (isIPv6) {
+                dialogText += getString(R.string.addpc_ipv6_hint)
+            }
+
+            showAddFailure(generation, dialogText)
+        } else {
+            this@AddComputerManually.runOnUiThread {
+                if (!isAddWorkerCurrent(generation) || isDestroyed) return@runOnUiThread
+                Toast.makeText(this@AddComputerManually, resources.getString(R.string.addpc_success), Toast.LENGTH_LONG).show()
+
+                if (!isFinishing) {
+                    setResult(
+                        RESULT_OK,
+                        Intent().putExtra(EXTRA_ADDED_COMPUTER_UUID, addedComputerUuid)
+                    )
+                    this@AddComputerManually.finish()
+                }
+            }
+        }
+    }
+
+    private fun showAddFailure(generation: Long, message: String) {
+        runOnUiThread {
+            if (!isAddWorkerCurrent(generation) || isDestroyed) return@runOnUiThread
+            setAddingState(false)
+            Dialog.displayDialog(
+                this,
+                resources.getString(R.string.conn_error_title),
+                message,
+                false
+            )
+        }
+    }
+
+    private fun startAddThread() {
+        val worker: Thread
+        val generation: Long
+        synchronized(addThreadLock) {
+            if (shuttingDown) return
+            if (addThread?.isAlive == true) {
+                restartAddThreadWhenStopped = true
+                return
+            }
+
+            restartAddThreadWhenStopped = false
+            generation = addWorkerGenerationGate.nextGeneration()
+            worker = Thread {
+                try {
+                    while (!Thread.currentThread().isInterrupted &&
+                        isAddWorkerCurrent(generation)
+                    ) {
+                        val computer = computersToAdd.take()
+                        doAddPc(computer, generation)
+                    }
+                } catch (_: InterruptedException) {
+                    // Cancellation is expected during service disconnect or Activity teardown.
+                } finally {
+                    val shouldRestart = synchronized(addThreadLock) {
+                        if (addThread !== Thread.currentThread()) {
+                            false
+                        } else {
+                            addThread = null
+                            val restart = restartAddThreadWhenStopped &&
+                                !shuttingDown && managerBinder != null
+                            restartAddThreadWhenStopped = false
+                            restart
+                        }
+                    }
+                    if (shouldRestart) {
+                        startAddThread()
+                    }
+                }
+            }.apply {
+                name = "Network - AddComputerManually"
+                isDaemon = true
+            }
+            addThread = worker
+        }
+        worker.start()
+    }
+
+    private fun cancelAddThread() {
+        val worker = synchronized(addThreadLock) {
+            addWorkerGenerationGate.invalidate()
+            computersToAdd.clear()
+            if (shuttingDown || managerBinder == null) {
+                restartAddThreadWhenStopped = false
+            }
+            addThread
+        }
+        worker?.interrupt()
+    }
+
+    override fun onStop() {
+        super.onStop()
+
+        Dialog.closeDialogs()
+        SpinnerDialog.closeDialogs(this)
+    }
+
+    override fun onDestroy() {
+        shuttingDown = true
+        cancelAddThread()
+        managerBinder = null
+        if (serviceBindingRequested) {
+            runCatching { unbindService(serviceConnection) }
+            serviceBindingRequested = false
+        }
+        super.onDestroy()
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+
+        UiHelper.setLocale(this)
+
+        setContentView(R.layout.activity_add_computer_manually)
+        applySystemBarAppearance()
+
+        UiHelper.notifyNewRootView(this)
+
+        hostText = findViewById(R.id.hostTextView)
+        portText = findViewById(R.id.portTextView)
+        addPcButton = findViewById(R.id.addPcButton)
+        hostText.imeOptions = EditorInfo.IME_ACTION_NEXT
+        hostText.setOnEditorActionListener { _, actionId, keyEvent ->
+            if (actionId == EditorInfo.IME_ACTION_NEXT || isEnterKeyDown(keyEvent)) {
+                portText.requestFocus()
+                true
+            } else {
+                false
+            }
+        }
+        portText.imeOptions = EditorInfo.IME_ACTION_DONE
+        portText.setOnEditorActionListener { _, actionId, keyEvent ->
+            if (actionId == EditorInfo.IME_ACTION_DONE || isEnterKeyDown(keyEvent)) {
+                handleDoneEvent()
+            } else if (actionId == EditorInfo.IME_ACTION_PREVIOUS) {
+                val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+                imm.hideSoftInputFromWindow(portText.windowToken, 0)
+                false
+            } else {
+                false
+            }
+        }
+
+        findViewById<android.view.View>(R.id.backButton).setOnClickListener {
+            finish()
+        }
+
+        addPcButton.setOnClickListener {
+            if (!addingComputer) handleDoneEvent()
+        }
+
+        hostText.post {
+            hostText.requestFocus()
+        }
+
+        serviceBindingRequested = true
+        try {
+            bindService(Intent(this@AddComputerManually,
+                    ComputerManagerService::class.java), serviceConnection, Service.BIND_AUTO_CREATE)
+        } catch (e: RuntimeException) {
+            runCatching { unbindService(serviceConnection) }
+            serviceBindingRequested = false
+            throw e
+        }
+    }
+
+    private fun isNightMode(): Boolean {
+        return (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
+                Configuration.UI_MODE_NIGHT_YES
+    }
+
+    private fun applySystemBarAppearance() {
+        val useDarkSystemIcons = !isNightMode()
+        WindowCompat.getInsetsController(window, window.decorView).apply {
+            isAppearanceLightStatusBars = useDarkSystemIcons
+            isAppearanceLightNavigationBars = useDarkSystemIcons
+        }
+    }
+
+    private fun isEnterKeyDown(keyEvent: KeyEvent?): Boolean {
+        return keyEvent != null &&
+                keyEvent.action == KeyEvent.ACTION_DOWN &&
+                keyEvent.keyCode == KeyEvent.KEYCODE_ENTER
+    }
+
+    private fun showLongToast(messageResId: Int) {
+        Toast.makeText(this@AddComputerManually, resources.getString(messageResId), Toast.LENGTH_LONG).show()
+    }
+
+    private fun buildConnectionTarget(hostAddress: String, portTextValue: String): String {
+        return if (portTextValue.isEmpty()) {
+            hostAddress
+        } else if (hostAddress.startsWith("[") || hostAddress.count { it == ':' } < 2) {
+            "$hostAddress:$portTextValue"
+        } else {
+            "[$hostAddress]:$portTextValue"
+        }
+    }
+
+    private fun handleDoneEvent(): Boolean {
+        if (addingComputer) return true
+
+        val hostAddress = hostText.text.toString().trim()
+        val portTextValue = portText.text.toString().trim()
+
+        hostText.error = null
+        portText.error = null
+
+        if (hostAddress.isEmpty()) {
+            hostText.error = resources.getString(R.string.addpc_enter_ip)
+            showLongToast(R.string.addpc_enter_ip)
+            return true
+        }
+
+        if (portTextValue.isNotEmpty()) {
+            val port = portTextValue.toIntOrNull()
+            if (port == null || port !in 1..65535) {
+                portText.error = resources.getString(R.string.addpc_invalid_port)
+                showLongToast(R.string.addpc_invalid_port)
+                return true
+            }
+        }
+
+        setAddingState(true)
+        computersToAdd.add(buildConnectionTarget(hostAddress, portTextValue))
+        return false
+    }
+
+    internal fun setAddingState(adding: Boolean) {
+        runOnUiThread {
+            if (shuttingDown || isDestroyed || !::addPcButton.isInitialized) return@runOnUiThread
+            addingComputer = adding
+            // Explicit nextFocus targets still point here while a connection is pending.
+            // Keep the view focusable and reject duplicate activation in the click handler.
+            addPcButton.isEnabled = true
+            addPcButton.isFocusable = true
+            addPcButton.isFocusableInTouchMode = true
+            addPcButton.alpha = if (adding) CONNECTING_BUTTON_ALPHA else 1f
+            addPcButton.text = getString(
+                if (adding) R.string.addpc_action_connecting else R.string.addpc_action_connect
+            )
+        }
+    }
+
+}

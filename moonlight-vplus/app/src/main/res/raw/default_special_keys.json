@@ -1,0 +1,28 @@
+{
+  "data": [
+    {
+      "name": "Send F11 (toggle fullscreen)",
+      "data": ["0x7A"]
+    },
+    {
+      "name": "Send CTRL + V (paste clipboard)",
+      "data": ["0xA2", "0x56"]
+    },
+    {
+      "name": "Send WIN + D (show desktop)",
+      "data": ["0x5B", "0x44"]
+    },
+    {
+      "name": "Send WIN + G (open Xbox Game Bar)",
+      "data": ["0x5B", "0x47"]
+    },
+    {
+      "name": "Send ALT + HOME (toggle RTSS overlay)",
+      "data": ["0x12", "0x24"]
+    },
+    {
+      "name": "Send SHIFT + TAB (open Steam overlay)",
+      "data": ["0xA0", "0x09"]
+    }
+  ]
+}

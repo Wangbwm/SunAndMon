@@ -1,0 +1,483 @@
+import QtQuick 2.9
+import QtQuick.Controls
+import QtQuick.Window 2.2
+
+import StreamingPreferences 1.0
+import SdlGamepadKeyNavigation 1.0
+import SystemProperties 1.0
+
+import "settings"
+import "theme"
+
+// 设置页外壳：左侧分类 rail + 右侧卡片内容。
+// 「基本设置」「显示」使用独立页面；其余 6 组保留在 LegacySettingsPage.qml
+// 中以维持翻译上下文，但内部也已经迁移到卡片和设置行。
+// 根用 FocusScope 而不是 Item：工具栏的 Keys.onDownPressed 走的是
+// stackView.currentItem.forceActiveFocus()，落在普通 Item 上会停在一个看不见的
+// 死点上（PcView / AppView 是 GridView + activeFocusOnTab，所以没这问题）。
+// FocusScope 会把焦点转交给内部真正持焦的控件。
+FocusScope {
+    id: settingsPage
+    // 这一页自带壁纸，main.qml 不用再垫一层
+    readonly property bool usesOwnBackground: true
+    objectName: qsTr("Settings")
+
+    signal languageChanged()
+    signal searchFocusRequested()
+
+    // 窄窗口时 rail 折叠成顶部横向 tab 条
+    readonly property bool compact: width < (Theme.modern ? 760 : Theme.compactBreakpoint)
+
+    property string category: "basic"
+    property string searchQuery: ""
+    property bool searchExpanded: false
+    property var searchIndex: []
+    property var searchResults: []
+
+    // 图标取自 Microsoft Fluent UI System Icons（MIT），和 FluentWinUI3 是同一套设计语言。
+    // 之前用 emoji，各平台字体不同，渲染出来大小、粗细、配色都对不齐。
+    readonly property var rawCategories: [
+        { key: "basic",    icon: "qrc:/res/fluent/cat-basic.svg",    title: qsTr("Streaming") },
+        { key: "display",  icon: "qrc:/res/fluent/cat-display.svg",  title: qsTr("Display Settings") },
+        { key: "audio",    icon: "qrc:/res/fluent/cat-audio.svg",    title: qsTr("Audio Settings") },
+        { key: "host",     icon: "qrc:/res/fluent/cat-host.svg",     title: qsTr("Host Settings") },
+        { key: "input",    icon: "qrc:/res/fluent/cat-input.svg",    title: qsTr("Input Settings") },
+        { key: "gamepad",  icon: "qrc:/res/fluent/cat-gamepad.svg",  title: qsTr("Gamepad Settings") },
+        { key: "peripherals", icon: "qrc:/res/fluent/cat-peripherals.svg", title: qsTr("Peripherals Settings") },
+        { key: "advanced", icon: "qrc:/res/fluent/cat-advanced.svg", title: qsTr("Compatibility and diagnostics") },
+        { key: "ui",       icon: "qrc:/res/fluent/cat-ui.svg",       title: qsTr("Interface") },
+        { key: "ecosystem",icon: "qrc:/res/fluent/cat-ecosystem.svg",title: qsTr("AlkaidLab Ecosystem") },
+        { key: "about",    icon: "qrc:/res/fluent/cat-about.svg",    title: qsTr("About") }
+    ]
+
+    // USB 设备转发只在有本地 USB/IP 后端的平台提供（Windows/macOS）；
+    // 没有的平台连分类一起隐藏，避免出现空页。
+    readonly property var categories: rawCategories.filter(
+        function(c) {
+            return (!Theme.modern || (c.key !== "ecosystem" && c.key !== "about"))
+                && (c.key !== "peripherals" || SystemProperties.usbForwardingAvailable)
+        })
+
+    function categoryTitle(key) {
+        for (var i = 0; i < rawCategories.length; ++i) {
+            if (rawCategories[i].key === key) {
+                return rawCategories[i].title
+            }
+        }
+        return key
+    }
+
+    function fuzzyMatch(query, value) {
+        var q = query.toLocaleLowerCase()
+        var text = value.toLocaleLowerCase()
+        if (text.indexOf(q) >= 0) {
+            return true
+        }
+        var cursor = 0
+        for (var i = 0; i < text.length && cursor < q.length; ++i) {
+            if (text[i] === q[cursor]) {
+                ++cursor
+            }
+        }
+        return cursor === q.length
+    }
+
+    function rebuildSearchIndex() {
+        var entries = []
+
+        function walk(node, inheritedCategory) {
+            if (!node) {
+                return
+            }
+            var categoryKey = inheritedCategory
+            if (node.searchCategory !== undefined && node.searchCategory !== "") {
+                categoryKey = node.searchCategory
+            }
+            if (categoryKey === "peripherals" && !SystemProperties.usbForwardingAvailable) {
+                return
+            }
+            if (node.applicable !== undefined && !node.applicable) {
+                return
+            }
+            var hasRowSearchData = node.hoverable !== undefined
+            var hasExplicitSearchData = node.searchKeywords !== undefined &&
+                                        node.searchKeywords !== ""
+            if ((hasRowSearchData || hasExplicitSearchData) &&
+                    node.title !== undefined && node.title !== "") {
+                entries.push({
+                    title: node.title,
+                    description: node.description || "",
+                    searchKeywords: node.searchKeywords || "",
+                    category: categoryKey,
+                    categoryTitle: settingsPage.categoryTitle(categoryKey),
+                    row: node,
+                    target: node.searchTarget || node.searchFocusTarget || node
+                })
+            }
+            if (node.children) {
+                for (var i = 0; i < node.children.length; ++i) {
+                    walk(node.children[i], categoryKey)
+                }
+            }
+        }
+
+        walk(basicPage, "basic")
+        walk(displayPage, "display")
+        walk(legacyPage, "")
+        if (!Theme.modern) {
+            walk(ecosystemPage, "ecosystem")
+            walk(aboutPage, "about")
+        }
+        walk(peripheralsPage, "peripherals")
+        settingsPage.searchIndex = entries
+        updateSearchResults()
+    }
+
+    function updateSearchResults() {
+        var query = searchQuery.trim()
+        if (query === "") {
+            searchResults = []
+            return
+        }
+        var results = []
+        for (var i = 0; i < searchIndex.length && results.length < 30; ++i) {
+            var entry = searchIndex[i]
+            var title = entry.row && entry.row.title !== undefined
+                    ? entry.row.title : entry.title
+            var description = entry.row && entry.row.description !== undefined
+                    ? entry.row.description : entry.description
+            var haystack = title + " " + description + " " +
+                    entry.searchKeywords + " " + entry.categoryTitle
+            if (fuzzyMatch(query, haystack)) {
+                results.push(entry)
+            }
+        }
+        searchResults = results
+    }
+
+    function openSearch() {
+        searchExpanded = true
+        searchFocusRequested()
+    }
+
+    function closeSearch() {
+        searchExpanded = false
+        searchQuery = ""
+    }
+
+    function openSearchResult(result) {
+        category = result.category
+        searchExpanded = false
+        searchQuery = ""
+        Qt.callLater(function() {
+            var target = result.target || result.row
+            target = target.searchFocusTarget || target
+            scrollArea.scrollToItem(target)
+            if (target && target.forceActiveFocus) {
+                target.forceActiveFocus(Qt.TabFocusReason)
+            }
+        })
+    }
+
+    onSearchQueryChanged: updateSearchResults()
+
+    StackView.onActivated: {
+        // This enables Tab and BackTab based navigation rather than arrow keys.
+        // It is required to shift focus between controls on the settings page.
+        if (SdlGamepadKeyNavigation.gamepadUiNavigationEnabled()) {
+            SdlGamepadKeyNavigation.setUiNavMode(true)
+        }
+
+        // 手柄进来时把焦点放在分类栏的当前分类上，而不是内容区第一个控件。
+        //
+        // 以前是直接点基本设置页的分辨率下拉，于是用户进设置的第一下左右输入就把
+        // 分辨率改了（issue #144）。落在分类栏上就没这个问题：分类栏不吃左右键，
+        // 而且 category 是跨次保留的，从分类栏出发永远是可见、可用的那一项。
+        if (SdlGamepadKeyNavigation.gamepadUiNavigationEnabled() &&
+            SdlGamepadKeyNavigation.getConnectedGamepads() > 0) {
+            rail.focusCurrent()
+        }
+    }
+
+    Connections {
+        target: StreamingPreferences
+
+        function onEnableGamepadUiNavigationChanged() {
+            SdlGamepadKeyNavigation.setUiNavMode(StreamingPreferences.enableGamepadUiNavigation)
+        }
+    }
+
+    // 焦点在内容区时，B / Esc 先退回分类栏；已经在分类栏了才放行给 main.qml
+    // 去弹出整个设置页。之前不分级，手柄用户在内容区随手一个 B 就整页退出了。
+    Keys.onEscapePressed: function(event) {
+        event.accepted = !rail.railFocused
+        if (event.accepted) {
+            rail.focusCurrent()
+        }
+    }
+
+    // 把焦点交给内容区的第一个可聚焦控件。
+    //
+    // 不直接引用某个页面的首个控件：那只对基本设置页有效，其余六组还在
+    // LegacySettingsPage 里，而且随分类切换。scrollArea 在声明顺序上排在分类栏
+    // 之后，往后走一格 Tab 就是它内部第一个可聚焦控件 —— 焦点链本身会跳过
+    // 不可见的分类。
+    function focusContent() {
+        var first = scrollArea.nextItemInFocusChain(true)
+        if (first) {
+            first.forceActiveFocus(Qt.TabFocusReason)
+        }
+    }
+
+    StackView.onDeactivating: {
+        SdlGamepadKeyNavigation.setUiNavMode(false)
+
+        // Save the prefs so the Session can observe the changes
+        StreamingPreferences.save()
+    }
+
+    Component.onDestruction: {
+        // Also save preferences on destruction, since we won't get a
+        // deactivating callback if the user just closes Moonlight
+        StreamingPreferences.save()
+    }
+
+    // 焦点落到 FocusScope 壳自己身上时（工具栏按向下、或 StackView 切页回来），
+    // 转交给分类栏。停在壳上是个看不见的死点，用户得多按一次才有反应。
+    onActiveFocusChanged: {
+        if (activeFocus && Window.window && Window.window.activeFocusItem === settingsPage) {
+            rail.focusCurrent()
+        }
+    }
+
+    // 手柄 LB/RB 映射成 PageUp/PageDown，用来切分类
+    Keys.onPressed: function(event) {
+        if (event.key === Qt.Key_PageUp) {
+            rail.step(-1)
+            // 切完分类要把焦点收回分类栏：原来持焦的控件已经随着旧分类隐藏了，
+            // 焦点会凭空消失，手柄看起来就像失灵。
+            rail.focusCurrent()
+            event.accepted = true
+        }
+        else if (event.key === Qt.Key_PageDown) {
+            rail.step(1)
+            rail.focusCurrent()
+            event.accepted = true
+        }
+    }
+
+    // Reuse the background already owned by the application window. Creating a
+    // hidden PcView here duplicated its model, network work, and scene graph.
+    Image {
+        anchors.fill: parent
+        visible: !Theme.modern && StreamingPreferences.backgroundSource !== StreamingPreferences.BGS_NONE
+        source: Window.window && Window.window.backgroundImageUrl !== ""
+                ? Window.window.backgroundImageUrl
+                : "qrc:/res/gura.png"
+        fillMode: Image.PreserveAspectCrop
+        z: -2
+    }
+
+    Rectangle {
+        anchors.fill: parent
+        visible: !Theme.modern && StreamingPreferences.backgroundSource !== StreamingPreferences.BGS_NONE
+        color: Qt.rgba(Theme.ink.r, Theme.ink.g, Theme.ink.b,
+                       StreamingPreferences.backgroundOverlayOpacity / 100.0)
+        z: -1
+    }
+
+    Item {
+        id: body
+
+        anchors {
+            fill: parent
+            // 让出顶部工具栏（56）+ 一格间距
+            topMargin: Theme.modern ? 56 : 72
+            leftMargin: Theme.modern ? 0 : Theme.spaceLg
+            rightMargin: Theme.modern ? 0 : Theme.spaceLg
+            bottomMargin: Theme.modern ? 0 : Theme.spaceSm
+        }
+
+        Rectangle {
+            id: railBackground
+
+            anchors {
+                left: parent.left
+                top: parent.top
+            }
+            width: settingsPage.compact ? body.width : Theme.railWidth
+            height: settingsPage.compact ? 96 : body.height
+
+            color: Theme.modern ? Theme.railSurface : Theme.surfaceLayer
+            border.width: Theme.modern ? 0 : 1
+            border.color: Theme.line
+
+            Rectangle {
+                visible: Theme.modern
+                anchors.right: parent.right
+                anchors.bottom: parent.bottom
+                width: settingsPage.compact ? parent.width : 1
+                height: settingsPage.compact ? 1 : parent.height
+                color: Theme.line
+            }
+
+            Text {
+                id: railTitle
+                visible: Theme.modern && !settingsPage.compact
+                anchors.top: parent.top
+                anchors.left: parent.left
+                anchors.topMargin: 20
+                anchors.leftMargin: 20
+                height: visible ? implicitHeight : 0
+                text: qsTr("Settings")
+                color: Theme.text
+                font.family: Theme.fontSans
+                font.pixelSize: 15
+                font.bold: true
+            }
+
+            CategoryRail {
+                id: rail
+                anchors {
+                    left: parent.left
+                    right: parent.right
+                    bottom: parent.bottom
+                    leftMargin: Theme.modern ? 12 : Theme.spaceXs
+                    rightMargin: Theme.modern ? 12 : Theme.spaceXs
+                    bottomMargin: Theme.modern ? 12 : Theme.spaceXs
+                    top: sidebarSearch.bottom
+                    topMargin: Theme.spaceXs
+                }
+                compact: settingsPage.compact
+                categories: settingsPage.categories
+                currentCategory: settingsPage.category
+                onCategoryPicked: function(category) {
+                    settingsPage.category = category
+                    scrollArea.contentY = 0
+                }
+                onContentRequested: settingsPage.focusContent()
+            }
+
+            SettingsSearchControl {
+                id: sidebarSearch
+                anchors {
+                    top: railTitle.visible ? railTitle.bottom : parent.top
+                    left: parent.left
+                    topMargin: Theme.modern ? (settingsPage.compact ? 8 : 10) : Theme.spaceXs
+                    leftMargin: Theme.modern ? 12 : Theme.spaceXs
+                }
+                width: parent.width - anchors.leftMargin * 2
+                page: settingsPage
+                z: 10
+            }
+        }
+
+        Item {
+            id: contentArea
+            anchors {
+                top: settingsPage.compact ? railBackground.bottom : parent.top
+                left: settingsPage.compact ? parent.left : railBackground.right
+                right: parent.right
+                bottom: parent.bottom
+            }
+
+            SettingsScrollArea {
+                id: scrollArea
+                anchors {
+                    top: parent.top
+                    topMargin: Theme.modern ? 28 : (settingsPage.compact ? Theme.spaceMd : 0)
+                    bottom: parent.bottom
+                    horizontalCenter: parent.horizontalCenter
+                    horizontalCenterOffset: !Theme.modern && !settingsPage.compact ? Theme.spaceLg / 2 : 0
+                }
+                width: Theme.modern ? Math.max(0, Math.min(Theme.contentWidth, contentArea.width) -
+                                                              (contentArea.width >= 630 ? 64 : 32))
+                                    : Math.max(0, contentArea.width - (settingsPage.compact ? 0 : Theme.spaceLg))
+
+                Item {
+                    id: pageHeading
+                    width: parent.width
+                    height: Theme.modern ? pageTitle.implicitHeight + 18 : 0
+                    visible: Theme.modern
+
+                    Text {
+                        id: pageTitle
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        text: settingsPage.categoryTitle(settingsPage.category)
+                        color: Theme.text
+                        font.family: Theme.fontSans
+                        font.pixelSize: 30
+                        font.bold: true
+                        wrapMode: Text.WordWrap
+                    }
+                }
+
+                BasicSettingsPage {
+                    id: basicPage
+                    y: pageHeading.height
+                    width: parent.width
+                    visible: settingsPage.category === "basic"
+                    height: visible ? implicitHeight : 0
+                }
+
+                DisplaySettingsPage {
+                    id: displayPage
+                    y: pageHeading.height + basicPage.height
+                    width: parent.width
+                    visible: settingsPage.category === "display"
+                    height: visible ? implicitHeight : 0
+                }
+
+                LegacySettingsPage {
+                    id: legacyPage
+                    // 已迁移的新页面都在上面按顺序堆着，隐藏时高度为 0，所以这里累加即可
+                    y: pageHeading.height + basicPage.height + displayPage.height
+                    width: parent.width
+                    category: settingsPage.category
+
+                    onLanguageChanged: settingsPage.languageChanged()
+                }
+
+                EcosystemSettingsPage {
+                    id: ecosystemPage
+                    y: pageHeading.height + basicPage.height + displayPage.height + legacyPage.height
+                    width: parent.width
+                    visible: !Theme.modern && settingsPage.category === "ecosystem"
+                    height: visible ? implicitHeight : 0
+                    onAboutRequested: {
+                        settingsPage.category = "about"
+                        rail.focusCurrent()
+                        scrollArea.contentY = 0
+                    }
+                }
+
+                AboutSettingsPage {
+                    id: aboutPage
+                    y: pageHeading.height + basicPage.height + displayPage.height + legacyPage.height + ecosystemPage.height
+                    width: parent.width
+                    visible: !Theme.modern && settingsPage.category === "about"
+                    height: visible ? implicitHeight : 0
+                    onScrollToEndRequested: scrollArea.scrollToEnd()
+                }
+
+                PeripheralsSettingsPage {
+                    id: peripheralsPage
+                    y: pageHeading.height + basicPage.height + displayPage.height + legacyPage.height
+                       + ecosystemPage.height + aboutPage.height
+                    width: parent.width
+                    visible: settingsPage.category === "peripherals"
+                    height: visible ? implicitHeight : 0
+                }
+            }
+        }
+    }
+
+    Component.onCompleted: {
+        // 语言切换需要重建若干下拉的模型
+        settingsPage.languageChanged.connect(basicPage.languageChanged)
+        settingsPage.languageChanged.connect(displayPage.languageChanged)
+        settingsPage.languageChanged.connect(settingsPage.rebuildSearchIndex)
+        Qt.callLater(settingsPage.rebuildSearchIndex)
+    }
+}

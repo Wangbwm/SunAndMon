@@ -1,0 +1,298 @@
+package com.limelight
+
+import android.os.Handler
+import android.os.Looper
+import android.view.WindowManager
+import android.widget.Toast
+import com.limelight.binding.audio.MicrophoneManager
+import com.limelight.preferences.MicrophoneInitialState
+import com.limelight.nvstream.NvConnection
+import com.limelight.nvstream.http.ComputerDetails
+import com.limelight.nvstream.jni.MoonBridge
+import com.limelight.utils.Dialog
+import com.limelight.utils.ServerHelper
+import com.limelight.utils.ShortcutHelper
+import com.limelight.utils.UiHelper
+
+/**
+ * Handles connection notifications, errors, and network-quality presentation.
+ * Game owns connection-state changes and coordinates stopConnection() cleanup.
+ */
+class ConnectionCallbackHandler(private val game: Game) {
+
+    fun stageStarting(stage: String) {
+        game.runOnUiThread {
+            // NvConnection 在 app 协商前会把应用名当 stage 名发过来；月相只认协议阶段，
+            // 这里按字符串等于应用名直接跳过推进（stageIndexFor 的关键词匹配只是兜底，
+            // 应用名若恰好含 "stream establishment" 之类字样不能靠猜）。
+            if (stage != game.appName) {
+                game.progressOverlay?.setStageName(stage)
+            }
+            game.progressOverlay?.setMessage(
+                game.resources.getString(R.string.conn_starting) + " " + stage
+            )
+        }
+    }
+
+    fun stageComplete(stage: String) {
+        // no-op
+    }
+
+    fun stageFailed(stage: String, portFlags: Int, errorCode: Int, connection: NvConnection) {
+        // Perform a connection test if the failure could be due to a blocked port
+        // This does network I/O, so don't do it on the main thread.
+        val portTestResult = MoonBridge.testClientConnectivity(
+            ServerHelper.CONNECTION_TEST_SERVER, 443, portFlags
+        )
+
+        game.runOnUiThread {
+            if (game.conn !== connection || game.isFinishing || game.isDestroyed) return@runOnUiThread
+            game.progressOverlay?.dismiss()
+            game.progressOverlay = null
+
+            if (!game.displayedFailureDialog) {
+                game.displayedFailureDialog = true
+                LimeLog.severe("$stage failed: $errorCode")
+
+                // If video initialization failed and the surface is still valid, display extra information
+                if (stage.contains("video") && game.streamView?.holder?.surface?.isValid == true) {
+                    Toast.makeText(
+                        game, game.resources.getText(R.string.video_decoder_init_failed),
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+
+                var dialogText = game.resources.getString(R.string.conn_error_msg) +
+                        " " + stage + " (error " + errorCode + ")"
+
+                if (portFlags != 0) {
+                    dialogText += "\n\n" + game.resources.getString(R.string.check_ports_msg) + "\n" +
+                            MoonBridge.stringifyPortFlags(portFlags, "\n")
+                }
+
+                if (portTestResult != MoonBridge.ML_TEST_RESULT_INCONCLUSIVE && portTestResult != 0) {
+                    dialogText += "\n\n" + game.resources.getString(R.string.nettest_text_blocked)
+                }
+
+                Dialog.displayDialog(
+                    game, game.resources.getString(R.string.conn_error_title),
+                    dialogText, true
+                )
+            }
+        }
+    }
+
+    fun connectionTerminated(errorCode: Int, connection: NvConnection) {
+        // Perform a connection test if the failure could be due to a blocked port
+        // This does network I/O, so don't do it on the main thread.
+        val portFlags = MoonBridge.getPortFlagsFromTerminationErrorCode(errorCode)
+        val portTestResult = MoonBridge.testClientConnectivity(
+            ServerHelper.CONNECTION_TEST_SERVER, 443, portFlags
+        )
+
+        game.runOnUiThread {
+            if (game.conn !== connection || game.isFinishing || game.isDestroyed) return@runOnUiThread
+            // Let the display go to sleep now
+            game.window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+
+            // Release both SDK and system audio-coupled phone-motor ownership.
+            game.stopAudioHapticsForStream()
+
+            // Stop processing controller input
+            game.controllerHandler?.stop()
+
+            game.microphoneManager?.stopMicrophoneStream()
+
+            // Ungrab input
+            game.setInputGrabState(false)
+
+            if (!game.displayedFailureDialog) {
+                game.displayedFailureDialog = true
+                LimeLog.severe("Connection terminated: $errorCode")
+
+                // Display the error dialog if it was an unexpected termination.
+                // Otherwise, just finish the activity immediately.
+                if (errorCode != MoonBridge.ML_ERROR_GRACEFUL_TERMINATION) {
+                    val message: String = if (portTestResult != MoonBridge.ML_TEST_RESULT_INCONCLUSIVE && portTestResult != 0) {
+                        game.resources.getString(R.string.nettest_text_blocked)
+                    } else {
+                        when (errorCode) {
+                            MoonBridge.ML_ERROR_NO_VIDEO_TRAFFIC ->
+                                game.resources.getString(R.string.no_video_received_error)
+                            MoonBridge.ML_ERROR_NO_VIDEO_FRAME ->
+                                game.resources.getString(R.string.no_frame_received_error)
+                            MoonBridge.ML_ERROR_UNEXPECTED_EARLY_TERMINATION,
+                            MoonBridge.ML_ERROR_PROTECTED_CONTENT ->
+                                game.resources.getString(R.string.early_termination_error)
+                            MoonBridge.ML_ERROR_FRAME_CONVERSION ->
+                                game.resources.getString(R.string.frame_conversion_error)
+                            else -> {
+                                val errorCodeString = if (Math.abs(errorCode) > 1000) {
+                                    Integer.toHexString(errorCode)
+                                } else {
+                                    Integer.toString(errorCode)
+                                }
+                                game.resources.getString(R.string.conn_terminated_msg) + "\n\n" +
+                                        game.resources.getString(R.string.error_code_prefix) + " " + errorCodeString
+                            }
+                        }
+                    }
+
+                    var finalMessage = message
+                    if (portFlags != 0) {
+                        finalMessage += "\n\n" + game.resources.getString(R.string.check_ports_msg) + "\n" +
+                                MoonBridge.stringifyPortFlags(portFlags, "\n")
+                    }
+
+                    Dialog.displayDialog(
+                        game, game.resources.getString(R.string.conn_terminated_title),
+                        finalMessage, true
+                    )
+                } else {
+                    game.finish()
+                }
+            }
+        }
+    }
+
+    fun connectionStatusUpdate(connectionStatus: Int) {
+        game.runOnUiThread {
+            if (game.prefConfig.disableWarnings) {
+                return@runOnUiThread
+            }
+
+            if (connectionStatus == MoonBridge.CONN_STATUS_POOR) {
+                val message = if (game.prefConfig.bitrate > 5000) {
+                    game.resources.getString(R.string.slow_connection_msg)
+                } else {
+                    game.resources.getString(R.string.poor_connection_msg)
+                }
+                game.notificationOverlayManager.update(connectionStatus, message)
+                game.notificationOverlayManager.setRequestedVisible(true)
+            } else if (connectionStatus == MoonBridge.CONN_STATUS_OKAY) {
+                game.notificationOverlayManager.setRequestedVisible(false)
+            }
+
+            game.notificationOverlayManager.applyVisibility()
+        }
+    }
+
+    /** Called on the UI thread after Game accepts the current connection's startup. */
+    fun connectionStarted() {
+        game.runOnUiThread {
+            // 不在此处 dismiss progressOverlay：connectionStarted 是连接级回调，
+            // 视频首帧通常还没解码出来。dismiss 已交由 decoderRenderer.firstFrameCallback
+            // 在首帧到达瞬间触发，避免 "loading 消失 → 黑屏 → 闪出画面" 的割裂感。
+            // 这里只做 5 秒 fallback，防止首帧因异常迟迟不来导致 loading 卡死。
+            val overlay = game.progressOverlay
+            if (overlay != null) {
+                // 满月 = 链路已通，视频首帧马上到。
+                overlay.markReady()
+                Handler(Looper.getMainLooper()).postDelayed({
+                    if (game.progressOverlay === overlay) {
+                        overlay.dismiss()
+                        game.progressOverlay = null
+                    }
+                }, 5000)
+            }
+
+            // Hide the mouse cursor now after a short delay.
+            val h = Handler(Looper.getMainLooper())
+            val startedConnection = game.conn
+            h.postDelayed({
+                if (game.conn !== startedConnection || !game.connected) return@postDelayed
+                if (game.prefConfig.enableNativeMousePointer) {
+                    game.enableNativeMousePointer(true)
+                } else {
+                    game.setInputGrabState(true)
+                }
+            }, 500)
+
+            // Keep the display on
+            game.window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+
+            // Update GameManager state to indicate we're in game
+            UiHelper.notifyStreamConnected(game)
+
+            game.hideSystemUi(1000)
+
+            game.screenDs5Touchpad.onStreamStarted()
+
+            // Ask for permissions while visible; onStop() only starts the service.
+            game.prepareKeepAliveNotification()
+
+            // Cursor negotiation also updates Android views and main-thread timeout state.
+            game.cursorServiceManager.onConnectionStarted()
+        }
+
+        // Reporting shortcuts can perform binder/disk I/O; keep it off the UI thread.
+        Thread {
+            val computer = ComputerDetails()
+            computer.name = game.pcName
+            computer.uuid = game.intent.getStringExtra(Game.EXTRA_PC_UUID)
+            val shortcutHelper = ShortcutHelper(game)
+            shortcutHelper.reportComputerShortcutUsed(computer)
+            if (game.appName != null) {
+                shortcutHelper.reportGameLaunched(computer, game.app!!)
+            }
+        }.start()
+
+        // Prepare the output pipeline when HDR is expected. This is intentionally separate from
+        // the host setHdrMode callback so diagnostics don't claim HDR before the stream activates.
+        val appSupportsHdr = game.intent.getBooleanExtra(Game.EXTRA_APP_HDR, false)
+        if (appSupportsHdr && game.prefConfig.enableHdr && game.isNegotiatedHdrEnabled()) {
+            game.prepareInitialHdrOutput()
+        }
+
+        // 初始化麦克风管理器
+        val connection = game.conn
+        if (connection != null) {
+            val microphoneManager = MicrophoneManager(
+                game,
+                connection,
+                game.prefConfig.enableMic,
+                game.computerUuid,
+            )
+            game.microphoneManager = microphoneManager
+            microphoneManager.setStateListener(object : MicrophoneManager.MicrophoneStateListener {
+                override fun onMicrophoneStateChanged(isActive: Boolean) {
+                    LimeLog.info("麦克风状态改变: " + if (isActive) "激活" else "暂停")
+                }
+
+                override fun onPermissionRequested() {
+                    LimeLog.info("麦克风权限请求已发送")
+                }
+            })
+
+            // Apply the initial microphone state only after the handshake has negotiated the
+            // microphone port. The manager remains idle for the default-off path.
+            game.runOnUiThread {
+                if (!game.connected || game.conn !== connection || game.microphoneManager !== microphoneManager) {
+                    return@runOnUiThread
+                }
+
+                microphoneManager.setMicrophoneButton(game.micButton)
+                microphoneManager.applyInitialState(
+                    MicrophoneInitialState.fromPreferenceValue(game.prefConfig.micInitialState)
+                )
+            }
+        }
+
+        // 初始化串流时长统计
+        game.streamStartTime = System.currentTimeMillis()
+        game.accumulatedStreamTime = 0
+        game.lastActiveTime = game.streamStartTime
+        game.isStreamingActive = true
+
+        // 记录游戏流媒体开始事件
+        if (game.analyticsManager != null && game.pcName != null) {
+            game.analyticsManager?.logGameStreamStart(game.pcName!!, game.appName)
+        }
+
+        // 1. 获取并保存 IP (存到全局变量)
+        game.currentHostAddress = game.intent.getStringExtra(Game.EXTRA_HOST)
+
+        // 2. 启动智能码率（如设置已开启）
+        game.startAdaptiveBitrateIfEnabled()
+    }
+}

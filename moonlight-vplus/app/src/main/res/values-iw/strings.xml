@@ -1,0 +1,246 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="scut_deleted_pc">מחשב נמחק</string>
+    <string name="scut_not_paired">מחשב לא מצורף</string>
+    <string name="help_loading_msg">טוען עמוד עזרה…</string>
+    <string name="pcview_menu_header_online">פעיל</string>
+    <string name="pcview_menu_unpair_pc">הסר אימות</string>
+    <string name="pcview_menu_details">הראה פרטים</string>
+    <string name="nettest_text_waiting">מונלייט בודק את הרשת שלך ובודק אם ישנם פורטים הכרחיים חסומים
+\n
+\nהמתן כמה שניות…</string>
+    <string name="wol_no_mac">לא מצליח להעיר את המחשב, אין כתובת MAC</string>
+    <string name="scut_pc_not_found">מחשב לא נמצא</string>
+    <string name="help_loading_title">עזרה</string>
+    <string name="scut_invalid_uuid">המחשב אינו תואם</string>
+    <string name="scut_invalid_app_id">האפליקציה אינה מתאימה</string>
+    <string name="pcview_menu_header_offline">כבוי</string>
+    <string name="pcview_menu_header_unknown">מרענן</string>
+    <string name="pcview_menu_app_list">הראה את כל האפליקציות</string>
+    <string name="pcview_menu_pair_pc">אמת מחשב</string>
+    <string name="pcview_menu_send_wol">שלח פקודת \"Wake-On-LAN\"</string>
+    <string name="pcview_menu_delete_pc">מחק מחשב</string>
+    <string name="pcview_menu_test_network">בדוק חיבור רשת</string>
+    <string name="pcview_menu_eol">סוף פעילות שירות NVIDIA GameStream</string>
+    <string name="nettest_title_waiting">בודק חיבור רשת</string>
+    <string name="nettest_title_done">בדיקת רשת הושלמה</string>
+    <string name="nettest_text_inconclusive">בדיקת הרשת לא התבצעה בגלל שאין קישוריות לשרתי הבדיקה של מונלייט. בבקשה בדוק את החיבור לאינטרנט או נסה שוב מאוחר יותר.</string>
+    <string name="nettest_text_failure">גישה של מונלייט לרשת חסומה במכשיר הנוכחי. הזרמה על גבי האינטרנט לא יכוה לעבוד כל עוד מונלייט מחובר לרשת הנוכחית.
+\n
+\nהפורטים הבאים חסומים:
+\n</string>
+    <string name="nettest_text_blocked">חיבור הרשת הנוכחי חוסם את מונלייט. הזרמה על גבי האינטרנט אינה אפשרית כל עוד מונלייט מחובר לרשת הנוכחית.</string>
+    <string name="pair_pc_offline">מחשב לא פעיל</string>
+    <string name="pair_pairing_title">מחבר</string>
+    <string name="pair_pairing_msg">אנא הזן את הקוד PIN הבא במחשב המארח:</string>
+    <string name="pair_pairing_help">אם המחשב המארח פועל על Sunshine, נווט אל דף הניהול על מנת להזין קוד PIN.</string>
+    <string name="pair_incorrect_pin">קוד PIN שגוי</string>
+    <string name="pair_fail">חיבור נכשל</string>
+    <string name="wol_pc_online">מחשב פעיל</string>
+    <string name="wol_fail">נכשל לשלוח פקודת Wake-On-LAN</string>
+    <string name="unpairing">מנתק חיבור…</string>
+    <string name="unpair_success">ניתוק הושלם</string>
+    <string name="unpair_fail">ניתוק נכשל</string>
+    <string name="unpair_error">המחשב לא חובר</string>
+    <string name="error_pc_offline">המחשב לא פעיל</string>
+    <string name="error_unknown_host">נכשל לאתר את המארח</string>
+    <string name="title_decoding_error">מפענח וידיאו קרס</string>
+    <string name="unable_to_pin_shortcut">האפליקציה אינה מרשה יצירת קיצורי דרך נעוצים.</string>
+    <string name="no_video_received_error">לא התקבל אות וידיאו מהמארח.</string>
+    <string name="conn_client_latency">מהירות פיענוח פריים ממוצעת:</string>
+    <string name="conn_error_title">שגיאת חיבור</string>
+    <string name="conn_terminated_msg">החיבור הופסק</string>
+    <string name="ip_hint">כתובת IP של המחשב המארח</string>
+    <string name="title_details">פרטים</string>
+    <string name="poor_connection_msg">חיבור חלש למחשב</string>
+    <string name="perf_overlay_decoder">מפענח: %1$s</string>
+    <string name="perf_overlay_incomingfps">פריימים לשניה מהרשת: %1$.2f FPS</string>
+    <string name="perf_overlay_netdrops">פריימים שנפלו בחיבור רשת: %1$.2f%%</string>
+    <string name="perf_overlay_dectime">זמן פענוח ממוצע: %1$.2f ms</string>
+    <string name="applist_connect_msg">מתחבר למחשב…</string>
+    <string name="applist_menu_resume">חזור לשידור</string>
+    <string name="applist_menu_quit_and_start">סגור משחק נוכחי והתחל</string>
+    <string name="applist_menu_details">הראה פרטים</string>
+    <string name="applist_menu_scut">צור קיצור דרך</string>
+    <string name="applist_quit_app">יוצא</string>
+    <string name="applist_quit_success">יציאה הושלמה בהצלחה</string>
+    <string name="applist_details_id">מספר אפליקציה:</string>
+    <string name="title_add_pc">הוספת מחשב ידנית</string>
+    <string name="addpc_enter_ip">חייב להכניס כתובת IP</string>
+    <string name="category_basic_settings">הגדרות בסיסיות</string>
+    <string name="title_resolution_list">רזולוציית וידיאו</string>
+    <string name="title_native_res_dialog">אזהרת רזולוצייה טבעית</string>
+    <string name="title_fps_list">פריימים לשניה</string>
+    <string name="wol_waking_msg">ייקחו כמה שניות להפעיל את המחשב. אם הוא לא, אנא וודא שהוא מוגדר נכון לפונקציית Wake-On-LAN.</string>
+    <string name="nettest_text_success">הרשת שלך איננה חוסמת את מונלייט, בבקשה בדוק את הגדרות חומת האש במחשב המארח.
+\n
+\nאם אתה מנסה להזרים דרך האינטרנט, אנא התקן את הכל Moonlight Internet Hosting Tool על המחשב והפעל את כלי הבדיקה המצורף בכדי לבדוק את חיבור האינטרנט.</string>
+    <string name="pairing">מאמת…</string>
+    <string name="pair_pc_ingame">מחשב באמצע משחק. נא לצאת מהמשחק לפני ביצוע חיבור.</string>
+    <string name="pair_already_in_progress">פעולת החיבור מתבצעת</string>
+    <string name="wol_waking_pc">מעיר מחשב…</string>
+    <string name="error_manager_not_running">שירות \"ניהול-מחשב\" לא פעיל. אנא חכה כמה שניות להפעלה מחדש של האפליקציה.</string>
+    <string name="title_decoding_reset">הגדרות וידיאו אופסו</string>
+    <string name="error_404">GFE החזיר שגיאת 404. אנא וודא שהמחשב עם כרטיס מסך נתמך. שימוש בתוכנת חיבור מרוחק יכולה לגרום לשגיאה זו. נסה להפעיל מחדש את המחשב או להתקין GFE.</string>
+    <string name="error_usb_prohibited">גישה למכשירי USB נעולה על ידי מנהל המחשב. בדוק הגדרות knox או MDM.</string>
+    <string name="message_decoding_error">מונלייט קרס עקב אי-תאימות עם המפענח. נסה לשנות את הגדרות ההזרמה אם הקריסות נמשכות.</string>
+    <string name="message_decoding_reset">המפענח ממשיך לקרוס בהגדרות הנוכחיות. הגדרות ההזרמה אופסו לברירת המחדל.</string>
+    <string name="video_decoder_init_failed">נכשלה טעינת מפענח הוידיאו. המכשיר שלך כנראה אינו תומך ברזולוציה או פריימים לשניה שנבחרו.</string>
+    <string name="no_frame_received_error">חיבור הרשת של אינו מתפקד כראוי. הורד את הגדרות ה-Bitrate או נסה חיבור מהיר יותר.</string>
+    <string name="check_ports_msg">בדוק את חומת האש וניהול פורטים עבור הפורטים הבאים:</string>
+    <string name="conn_establishing_title">מתחיל חיבור</string>
+    <string name="addpc_success">מחשב נוסף בהצלחה</string>
+    <string name="early_termination_error">מששהו קרה במחשב המארח כשהחלה הזרמה.
+\n
+\nאנא וודא שאין תוכן מוגן DRM פתוח במחשב. אפשר לנסות להפעיל מחדש את המחשב.</string>
+    <string name="slow_connection_msg">חיבור איטי למחשב
+\nהורד Bitrate</string>
+    <string name="frame_conversion_error">המחשב המארח דיווח על שגיאת הצפנת וידיאו.
+\n
+\nנסה לבטל הגדרת HDR, החלפת רזולוציית הזרמה או לשנות את רזולוציית המחשב המארח.</string>
+    <string name="conn_establishing_msg">מתחבר</string>
+    <string name="conn_starting">מתחיל</string>
+    <string name="conn_metered">אזהרה: החיבור הנוכחי הוא נמדד!</string>
+    <string name="conn_terminated_title">החיבור הופסק</string>
+    <string name="lost_connection">נאבד החיבור למחשב</string>
+    <string name="delete_pc_msg">אתה בטוח שאתה רוצה להסיר מחשב זה\?</string>
+    <string name="conn_client_latency_hw">מהירות פענוח חומרתי:</string>
+    <string name="conn_error_msg">נכשל להפעיל</string>
+    <string name="searching_pc">מחפש מחשבים ברשת המקומית שלך...
+\n
+\nוודא שסאנשיין או GeForce Experience פועלים.</string>
+    <string name="yes">כן</string>
+    <string name="no">לא</string>
+    <string name="help">עזרה</string>
+    <string name="perf_overlay_streamdetails">הזרמת וידיאו: %1$s %2$.2f FPS</string>
+    <string name="perf_overlay_renderingfps">פריימים מרונדרים: %1$.2f FPS</string>
+    <string name="applist_menu_hide_app">הסתר אפליקציה</string>
+    <string name="perf_overlay_netlatency">מהירות תגובה ממוצעת: %1$d ms (שונות: %2$d ms)</string>
+    <string name="applist_menu_quit">הפסק שידור</string>
+    <string name="applist_menu_cancel">בטל</string>
+    <string name="applist_refresh_error_msg">נכשל להשיג רשימת אפליקציות</string>
+    <string name="applist_quit_fail">יציאה נכשלה</string>
+    <string name="applist_menu_tv_channel">הוסף לערוץ</string>
+    <string name="applist_refresh_title">רשימת אפליקציות</string>
+    <string name="applist_refresh_msg">מרענן אפליקציות…</string>
+    <string name="applist_refresh_error_title">שגיאה</string>
+    <string name="applist_quit_confirmation">אתה בטוח שאתה רוצה לסגור את האפליקציה הנוכחית\? מידע שלא נשמר ייאבד.</string>
+    <string name="msg_add_pc">מתחבר למחשב…</string>
+    <string name="addpc_unknown_host">נכשל לאתר כתובת מחשב. נא לוודא שאין שגיאה בכתובת.</string>
+    <string name="addpc_fail">לא ניתן להתחבר למחשב שנבחר. נא לבדוק שהפורטים הנחוצים פתוחים בחומת האש.</string>
+    <string name="addpc_wrong_sitelocal">הכתובת לא נראת נכונה. צריך להשתמש בכתובת IP הציבורית בכדי להתחבר דרך האינטרנט.</string>
+    <string name="summary_resolution_list">להגביר לשיפור איכות התמונה. להוריד לשיפור ביצועים על מערכות ישנות ורשתות איטיות.</string>
+    <string name="text_native_res_dialog">רזולוציות טבעיות אינן נתמכות רשמית דרך Geforce Expereience, הרזולוציה לא מוגדרת במסך המארח. יש להגדירה ידנית בזמן משחק.
+\n
+\nיש לקרוא ולהבין את ההנחיות של NVIDIA לגבי אי יציבות ונזקים אם מגדירים רזולוציה מותאמת אישית דרך פאנל הניהול.
+\n
+\nמונלייט אינו אחראי לבעיות או נזקים שנגרמים כתוצאה משימוש ברזולוציה מותאמת אישית.
+\n
+\nהמכשיר שלך כנראה ואינו תומך ברזולוציה טבעית.</string>
+    <string name="summary_seekbar_bitrate">קצב סיביות גבוה יותר משפר את איכות התמונה אך משתמש ברוחב פס רב יותר; קצב נמוך יותר מתאים לרשתות איטיות או לא יציבות. אם הזרמת הווידאו מקרטעת, הנמיכו תחילה את קצב הסיביות; אם הרשת יציבה אך התמונה אינה חדה, העלו אותו; עבור 1080p60 התחילו בערך ב־10–20 Mbps.</string>
+    <string name="summary_audio_config_list">הפעל קול היקפי בהגדרת 5.1 או 7.1 עבור מערכות קולנוע ביתי</string>
+    <string name="summary_checkbox_enable_audiofx">אפשר לאפקטי סאונד לפעול בזמן הזרמה, יגרום להשהיית אודיו</string>
+    <string name="conn_hardware_latency">זמן פענוח ממוצע:</string>
+    <string name="summary_fps_list">הגבר להזרמת וידיאו חלקה יותר. הנמך לביצועים ויציבות במכשירים חלשים.</string>
+    <string name="title_seekbar_bitrate">וידיאו ביטרייט</string>
+    <string name="suffix_seekbar_bitrate_mbps">מגהביט</string>
+    <string name="title_checkbox_stretch_video">מתחית וידיאו למסך מלא</string>
+    <string name="resolution_prefix_native">טבעי</string>
+    <string name="category_audio_settings">הגדרות אודיו</string>
+    <string name="title_audio_config_list">הגדרת קול היקפי (Surround sound)</string>
+    <string name="title_checkbox_enable_audiofx">הפעל תמיכה באקולייזר</string>
+    <string name="category_input_settings">הגדרות קלט</string>
+    <string name="title_checkbox_touchscreen_trackpad">השתמש במסך מגע כמשטח מגע</string>
+    <string name="title_config_sync_backup_password">סיסמת הצפנת גיבוי</string>
+    <string name="category_help">עזרה</string>
+    <string name="title_document_handbook">תיעוד</string>
+    <string name="summary_document_handbook">הצגת תיעוד קשור</string>
+    <string name="title_about_us">אודותינו</string>
+    <string name="title_checkbox_mic_volume_processing">עיבוד עוצמת המיקרופון</string>
+    <string name="summary_checkbox_mic_volume_processing">כוונון עוצמת המיקרופון לפני שליחתה למחשב המארח. הגבר קבוע ואיזון עוצמה אינם יכולים לפעול בו-זמנית.</string>
+    <string name="title_checkbox_mic_gain">הגברת עוצמה</string>
+    <string name="summary_checkbox_mic_gain">כוונון עוצמת המיקרופון בערך קבוע. ערכים חיוביים מגבירים אותה וערכים שליליים מחלישים אותה.</string>
+    <string name="title_seekbar_mic_gain">הגבר</string>
+    <string name="summary_seekbar_mic_gain">הגדרת ההגבר הקבוע. 0 dB שומר על העוצמה המקורית ונמצא במרכז המחוון.</string>
+    <string name="suffix_seekbar_mic_gain_db">dB</string>
+    <string name="title_checkbox_mic_balance">איזון עוצמה</string>
+    <string name="summary_checkbox_mic_balance">דחיסת קלט חזק כדי לצמצם תנודות בעוצמה ולהפחית את הסיכון לקיטום.</string>
+    <string name="title_seekbar_mic_balance">פיצוי פלט</string>
+    <string name="summary_seekbar_mic_balance" formatted="false">הגדרת הגבר הפיצוי לאחר איזון העוצמה. 50% הם +4 dB והערך המומלץ.</string>
+    <string name="suffix_seekbar_mic_balance_target" formatted="false">%</string>
+    <string name="title_checkbox_mic_voice_enhancement">שיפור קול</string>
+    <string name="summary_checkbox_mic_voice_enhancement">הפחתת רעש בתדר נמוך ושיפור בהירות הדיבור. זמין במצבי הגבר קבוע ואיזון עוצמה.</string>
+    <string name="summary_video_format">לא בטוחים במה לבחור? השתמשו באפשרות «אוטומטי». HEVC מומלץ לרוב המכשירים המודרניים ובדרך כלל מאזן בין איכות התמונה, רוחב הפס ו־HDR; AV1 יכול לחסוך רוחב פס אם שני הצדדים תומכים בו, אך בחלק מהמכשירים זמן הפענוח וההשהיה עשויים להיות גבוהים יותר; H.264 מציע את התאימות הטובה ביותר, אך דורש יותר רוחב פס ואינו תומך ב־HDR.</string>
+    <string name="title_pyrowave_capability_diagnostic">בדיקת יכולות PyroWave</string>
+    <string name="summary_pyrowave_capability_diagnostic">בדיקת יכולות Vulkan והדרישות של מפענח PyroWave הנוכחי.</string>
+    <string name="pyrowave_diag_loading">בודק יכולות PyroWave…</string>
+    <string name="pyrowave_diag_runtime">API של ספריית PyroWave המצורפת</string>
+    <string name="pyrowave_diag_gpu_frontend">מודול הצגה באמצעות GPU</string>
+    <string name="pyrowave_diag_gpu_gate">הצגה באמצעות GPU דורשת Android 10+, arm64-v8a ו-Vulkan 1.3. המסלול החלופי ל-SDR דורש Vulkan 1.2 ואת יכולות המפענח שלהלן; הוא אינו מפענח באמצעות CPU בלבד.</string>
+    <string name="pyrowave_diag_ready">הדרישות שנבדקו מתקיימות</string>
+    <string name="pyrowave_diag_missing">דרישות המימוש הנוכחי אינן מתקיימות</string>
+    <string name="pyrowave_diag_scope">דוח זה בודק רק יכולות שמנהל ההתקן מצהיר עליהן. הצגה בחלון, פורמטי תמונה, רזולוציית היעד, פלט HDR וביצועי הפענוח עדיין דורשים בדיקה בהזרמה.</string>
+    <string name="pyrowave_diag_loader_missing">אין טוען Vulkan נגיש</string>
+    <string name="pyrowave_diag_no_devices">לא נמצא התקן Vulkan פיזי</string>
+    <string name="pyrowave_diag_query_failed">לא ניתן לקרוא את יכולות Vulkan. אין בכך אישור שההתקן אינו נתמך.</string>
+    <string name="pyrowave_diag_storage_path">אחסון 8 סיביות או מאגרי טקסלים גדולים</string>
+    <string name="pyrowave_diag_gpu_backend">דרישות הצגה באמצעות GPU</string>
+    <string name="pyrowave_diag_staging_backend">דרישות המסלול החלופי ל-SDR</string>
+    <string name="pyrowave_diag_subgroup_range">תתי-קבוצות חישוב מלאות בטווח wave4–wave128</string>
+    <string name="pyrowave_diag_max_workgroup">מספר תהליכונים בקבוצת עבודה</string>
+    <string name="pyrowave_diag_shared_memory">זיכרון משותף של קבוצת העבודה</string>
+    <string name="pyrowave_diag_queue">תור משולב לגרפיקה ולחישוב</string>
+    <string name="pyrowave_diag_android_surface">הרחבות Vulkan Surface של Android</string>
+    <string name="pyrowave_diag_copy_failed">לא ניתן להעתיק את הדוח</string>
+    <string name="pyrowave_diag_present">קיים</string>
+    <string name="pyrowave_diag_absent">לא קיים</string>
+    <string name="pyrowave_diag_vulkan_loader">טוען Vulkan</string>
+    <string name="pyrowave_diag_subgroup_ops">פעולות של תתי-קבוצות</string>
+    <string name="pyrowave_diag_subgroup_size">גודל תת-קבוצה</string>
+    <string name="pyrowave_diag_subgroup_limits">גודל תת-קבוצה מינימלי / מרבי</string>
+    <string name="pyrowave_diag_required_subgroup">פעולות נדרשות של תתי-קבוצות</string>
+    <string name="pyrowave_diag_texel_limit">מספר מרבי של איברים במאגר טקסלים</string>
+    <string name="pyrowave_diag_back">חזרה</string>
+    <string name="pyrowave_diag_copy">העתקה</string>
+    <string name="pyrowave_diag_copy_success">הדוח הועתק ללוח</string>
+    <string name="pyrowave_diag_unavailable">לא זמין</string>
+    <string name="image_saved_successfully">התמונה נשמרה בהצלחה בנתיב: Pictures/vplus</string>
+    <string name="image_save_failed_with_error">שמירת התמונה נכשלה: %1$s</string>
+    <string name="tip_double_tap_mouse">טיפ: כדי לשמור את תמונת הרקע הנוכחית, לחצו לחיצה ארוכה על האזור הריק בראש רשימת המחשבים.</string>
+    <string name="pyrowave_negotiation_fallback">משא ומתן עם PyroWave נכשל. מעבר ל־%1$s.</string>
+    <string name="title_list_mouse_axis_correction">תיקון כיוון העכבר</string>
+    <string name="summary_list_mouse_axis_correction">סיבוב תנועת העכבר שנלכדה לפני שליחתה למארח. יש לשנות זאת רק אם מכשיר Android מדווח על צירי עכבר מסובבים.</string>
+    <string name="mouse_axis_correction_off">כבוי</string>
+    <string name="mouse_axis_correction_90">סיבוב של 90 מעלות</string>
+    <string name="mouse_axis_correction_180">סיבוב של 180 מעלות</string>
+    <string name="mouse_axis_correction_270">סיבוב של 270 מעלות</string>
+    <string name="summary_checkbox_reverse_resolution">הפעל רק כאשר כיוון התמונה או המידות שלה שגויים; עלול להתנגש עם סיבוב בהתאם למכשיר.</string>
+    <string name="summary_checkbox_rotable_screen">מסנכרן אוטומטית את פריסת הסטרימינג כאשר המכשיר עובר בין מצב לאורך למצב לרוחב.</string>
+    <string name="layout_page_device_text_1a70f">מתג מגע</string>
+    <string name="game_menu_perf_metrics">מדדים להצגה</string>
+    <string name="game_menu_perf_health">מחוון מצב השידור</string>
+    <string name="game_menu_perf_health_summary">הצגת המצב הכללי</string>
+    <string name="game_menu_perf_single_tap">הקשה אחת להחלפת הסגנון</string>
+    <string name="game_menu_perf_double_tap">הקשה כפולה להחלפת הפריסה</string>
+    <string name="game_menu_perf_long_press">לחיצה ארוכה להצגת הסברים על המדדים</string>
+    <string name="game_menu_perf_metric_summary">סגנון מיני מציג קבוצת מדדים קבועה.</string>
+    <string name="game_menu_perf_orientation_fixed">סגנון זה משתמש בפריסה קבועה. הכיוון שנבחר יחול לאחר מעבר לסגנון הרגיל.</string>
+    <string name="game_menu_perf_orientation_docked">הכיוון שנבחר יחול לאחר יציאה מהפריסה המעוגנת.</string>
+    <string name="game_menu_perf_fixed_layout">פריסה קבועה</string>
+    <string name="game_menu_perf_docked_layout">מעוגנת</string>
+    <string name="game_menu_perf_orientation_portrait">במצב לאורך, הפריסה תמיד אנכית.</string>
+    <string name="perf_sheet_previous_page">הדף הקודם</string>
+    <string name="perf_sheet_next_page">הדף הבא</string>
+    <string name="perf_sheet_settings">הגדרות</string>
+    <string name="game_menu_perf_position">מיקום מהיר</string>
+    <string name="game_menu_perf_position_reset">איפוס מיקום</string>
+    <string name="perf_overlay_anchor_top_left">למעלה משמאל</string>
+    <string name="perf_overlay_anchor_top_center">למעלה במרכז</string>
+    <string name="perf_overlay_anchor_top_right">למעלה מימין</string>
+    <string name="perf_overlay_anchor_center_left">באמצע משמאל</string>
+    <string name="perf_overlay_anchor_center">במרכז</string>
+    <string name="perf_overlay_anchor_center_right">באמצע מימין</string>
+    <string name="perf_overlay_anchor_bottom_left">למטה משמאל</string>
+    <string name="perf_overlay_anchor_bottom_center">למטה במרכז</string>
+    <string name="perf_overlay_anchor_bottom_right">למטה מימין</string>
+</resources>

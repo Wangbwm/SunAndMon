@@ -1,0 +1,48 @@
+Moonlight V+ is an enhanced version of the popular Moonlight game streaming app, featuring advanced capabilities and optimizations for the ultimate streaming experience.
+
+Pair Moonlight V+ with <a href="https://github.com/AlkaidLab/foundation-sunshine">Foundation Sunshine</a>, our recommended host, to stream games, programs, or your desktop over a local network or the Internet. Standard streaming also works with <a href="https://github.com/LizardByte/Sunshine">Sunshine</a>. Mouse, keyboard, and controller input is sent from your Android device to the PC.
+
+Streaming performance may vary based on your client device and network setup. HDR requires an HDR10-capable device, a GPU that can encode HEVC Main 10, and an HDR10-enabled game.
+
+'''Enhanced V+ Features'''
+* 🚀 **Ultra-High Refresh Rates**: Unlock 144/165Hz streaming for buttery smooth gameplay
+* 🎨 **HDR Support**: Complete HDR content streaming with automatic device calibration
+* 📱 **Custom Resolutions**: Support for custom resolutions, aspect ratios, and asymmetric resolutions
+* 🎮 **Advanced Touch Controls**: Enhanced multi-touch, stylus support, and touchpad mode
+* 🎯 **Gyro Assistant**: Built-in gyroscope support for motion controls and aiming
+* 📊 **Performance Monitoring**: Real-time FPS, bitrate, latency, and packet loss display
+* 🎛️ **Scene Presets**: Save and switch between different streaming configurations
+* 🎤 **Microphone Redirection**: Remote voice chat with Foundation Sunshine 2025.0720 or later
+* 🖥️ **Desktop Enhancement**: Beautiful app thumbnails and custom sorting
+* 🔧 **Smart Updates**: Automatic update checking with intelligent notifications
+
+'''Core Features'''
+* Open-source and completely free (no ads, IAPs, or "Pro")
+* Streams games purchased from any store
+* Works on your home network or over the Internet/LTE
+* Up to 4K 120 FPS HDR streaming with 7.1 surround sound
+* H.264, HEVC, and AV1 codec support (AV1 requires Sunshine and a supported host GPU)
+* Keyboard and mouse support (best with Android 8.0 or later)
+* Stylus/S-Pen support
+* Supports PS3/4/5, Xbox 360/One/Series, and Android gamepads
+* Local co-op with up to 16 connected controllers (max of 4 controllers with GFE)
+* Force feedback and gamepad motion sensor support
+* Mouse control via gamepad by long-pressing Start
+
+'''Quick Setup with Foundation Sunshine'''
+# Install Foundation Sunshine on your PC from https://github.com/AlkaidLab/foundation-sunshine/releases
+# Complete first-time setup in its web interface
+# Select the PC in Moonlight V+ and enter the displayed PIN in the host web interface
+# Start streaming!
+
+Foundation Sunshine is recommended for the full V+ experience, including supported extensions such as microphone redirection. Standard Sunshine remains available for standard streaming; older NVIDIA GameStream setups may still work.
+
+To have a good experience, you need a mid to high-end wireless router with a good wireless connection to your Android device (5 GHz highly recommended) and a good connection from your PC to your router (Ethernet highly recommended).
+
+'''Detailed Setup Instructions'''
+See https://github.com/qiin2333/moonlight-vplus/blob/master/README_EN.md and the linked Q&A for:
+* Adding a PC manually (if your PC is not detected)
+* Streaming over the Internet or LTE
+* Using a controller connected directly to your PC
+* Streaming your full desktop
+* Adding custom apps to stream

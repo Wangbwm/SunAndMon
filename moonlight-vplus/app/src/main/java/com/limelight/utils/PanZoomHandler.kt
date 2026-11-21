@@ -1,0 +1,201 @@
+package com.limelight.utils
+
+import android.content.Context
+import android.view.GestureDetector
+import android.view.MotionEvent
+import android.view.ScaleGestureDetector
+import android.view.View
+
+import com.limelight.Game
+import com.limelight.preferences.PreferenceConfiguration
+
+class PanZoomHandler(
+    context: Context,
+    private val game: Game,
+    private val streamView: View,
+    private val cursorOverlay: View,
+    private val prefConfig: PreferenceConfiguration
+) {
+    private val scaleGestureDetector: ScaleGestureDetector
+    private val gestureDetector: GestureDetector
+    private var parent: View? = null
+    private var scaleFactor = 1.0f
+    private var childX = 0f
+    private var childY = 0f
+    private var parentWidth = 0f
+    private var parentHeight = 0f
+    private var childWidth = 0f
+    private var childHeight = 0f
+    private var imeOffsetY = 0f
+    private var userTransformActive = false
+    var onUserTransform: (() -> Unit)? = null
+
+    init {
+        scaleGestureDetector = ScaleGestureDetector(context, ScaleListener())
+        gestureDetector = GestureDetector(context, GestureListener())
+
+        // Everything gets easier with 0,0 as the pivot point
+        streamView.pivotX = 0f
+        streamView.pivotY = 0f
+        cursorOverlay.pivotX = 0f
+        cursorOverlay.pivotY = 0f
+    }
+
+    fun handleTouchEvent(motionEvent: MotionEvent) {
+        scaleGestureDetector.onTouchEvent(motionEvent)
+        gestureDetector.onTouchEvent(motionEvent)
+    }
+
+    private fun updateDimensions(): Boolean {
+        if (parent == null) parent = streamView.parent as? View
+        val currentParent = parent ?: return false
+        childHeight = streamView.height * scaleFactor
+        childWidth = streamView.width * scaleFactor
+        parentWidth = currentParent.width.toFloat()
+        parentHeight = currentParent.height.toFloat()
+        return streamView.width > 0 && streamView.height > 0 &&
+            currentParent.width > 0 && currentParent.height > 0
+    }
+
+    private fun constrainToBounds() {
+        if (!updateDimensions()) return
+
+        if (parentWidth >= childWidth) {
+            childX = (parentWidth - childWidth) / 2
+        } else {
+            val boundaryX = parentWidth - childWidth
+            childX = maxOf(boundaryX, minOf(childX, 0f))
+        }
+
+        if (parentHeight >= childHeight) {
+            childY = (parentHeight - childHeight) / 2
+        } else {
+            val boundaryY = parentHeight - childHeight
+            childY = maxOf(boundaryY, minOf(childY, 0f))
+        }
+
+        applyTransform()
+    }
+
+    private fun applyTransform() {
+        streamView.scaleX = scaleFactor
+        streamView.scaleY = scaleFactor
+        streamView.x = childX
+        streamView.y = childY + imeOffsetY
+
+        cursorOverlay.scaleX = scaleFactor
+        cursorOverlay.scaleY = scaleFactor
+        cursorOverlay.x = childX
+        cursorOverlay.y = childY + imeOffsetY
+    }
+
+    fun setImeOffsetY(offsetY: Float) {
+        imeOffsetY = offsetY.coerceAtMost(0f)
+        if (childWidth == 0f || childHeight == 0f || parent == null) return
+        applyTransform()
+    }
+
+    fun captureYToParent(y: Int, captureHeight: Int): Float {
+        if (captureHeight <= 0) return childY
+        if (!updateDimensions()) return childY
+        return childY + y.coerceIn(0, captureHeight).toFloat() / captureHeight * childHeight
+    }
+
+    fun handleSurfaceChange() {
+        if (!userTransformActive) {
+            // DisplayPositionManager owns the base placement until the user pans or zooms.
+            // View.left/top exclude our temporary translation and therefore preserve every
+            // gravity, offset, stretch, rotation, and resolution-driven layout update.
+            parent = streamView.parent as? View
+            if (!updateDimensions()) return
+            childX = streamView.left.toFloat()
+            childY = streamView.top.toFloat()
+            applyTransform()
+            return
+        }
+
+        if (childWidth == 0f || parent == null) return
+
+        val prevChildWidth = childWidth
+        val prevChildHeight = childHeight
+        val prevParentWidth = parentWidth
+        val prevParentHeight = parentHeight
+
+        if (!updateDimensions()) return
+
+        val viewScaleX = childWidth / prevChildWidth
+        val viewScaleY = childHeight / prevChildHeight
+
+        val dPivotX1 = childX - prevParentWidth / 2
+        val dPivotY1 = childY - prevParentHeight / 2
+
+        val dPivotX2 = dPivotX1 * viewScaleX
+        val dPivotY2 = dPivotY1 * viewScaleY
+
+        childX = dPivotX2 + parentWidth / 2
+        childY = dPivotY2 + parentHeight / 2
+
+        constrainToBounds()
+    }
+
+    private inner class ScaleListener : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+        override fun onScale(detector: ScaleGestureDetector): Boolean {
+            val previousX = childX
+            val previousY = childY
+            val previousScale = scaleFactor
+            var newScaleFactor = scaleFactor * detector.scaleFactor
+            newScaleFactor = maxOf(1f, minOf(newScaleFactor, MAX_SCALE)) // Apply minimum scale
+
+            // Calculate pivot point
+            val focusX = detector.focusX
+            val focusY = detector.focusY
+
+            val dPivotX = (childX - focusX) / scaleFactor * newScaleFactor
+            val dPivotY = (childY + imeOffsetY - focusY) / scaleFactor * newScaleFactor
+
+            childX = focusX + dPivotX
+            childY = focusY + dPivotY - imeOffsetY
+
+            scaleFactor = newScaleFactor
+
+            constrainToBounds()
+            if (childX != previousX || childY != previousY || scaleFactor != previousScale) {
+                userTransformActive = true
+                onUserTransform?.invoke()
+            }
+            return true
+        }
+
+        override fun onScaleEnd(detector: ScaleGestureDetector) {
+            game.updatePipAutoEnter()
+        }
+    }
+
+    private inner class GestureListener : GestureDetector.SimpleOnGestureListener() {
+        override fun onScroll(
+            e1: MotionEvent?,
+            e2: MotionEvent,
+            distanceX: Float,
+            distanceY: Float
+        ): Boolean {
+            val previousX = childX
+            val previousY = childY
+            // View coordinates include the temporary IME offset. Gesture state
+            // must remain in the persistent base transform or the IME offset is
+            // folded into childY and applied twice on the next transform.
+            childX -= distanceX
+            childY -= distanceY
+
+            constrainToBounds()
+            if (childX != previousX || childY != previousY) {
+                userTransformActive = true
+                onUserTransform?.invoke()
+            }
+            return true
+        }
+    }
+
+    companion object {
+        private const val MAX_SCALE = 10.0f
+    }
+}

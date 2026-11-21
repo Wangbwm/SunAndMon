@@ -1,0 +1,1043 @@
+/**
+ * @file src/main.cpp
+ * @brief Definitions for the main entry point for Sunshine.
+ */
+// standard includes
+#include <atomic>
+#include <chrono>
+#include <codecvt>
+#include <csignal>
+#include <fstream>
+#include <future>
+#include <iostream>
+#include <limits>
+#include <optional>
+#include <thread>
+#include <utility>
+
+// lib includes
+#include <rs.h>
+
+// local includes
+#include "build_info.h"
+#include "client_fingerprint.h"
+#include "confighttp.h"
+#include "crash/crash.h"
+#include "crash/crash_context.h"
+#include "crash/crash_env.h"
+#include "default_apps.h"
+#include "display_device/session.h"
+#include "entry_handler.h"
+#include "file_handler.h"
+#include "globals.h"
+#include "gpu_driver_guard.h"
+#include "gpu_driver_text.h"
+#include "httpcommon.h"
+#include "image_enhancement/config.h"
+#include "logging.h"
+#include "main.h"
+#include "network.h"
+#include "nvhttp.h"
+#include "nvhttp/center_pairing.h"
+#include "process.h"
+#include "pyrowave/runtime.h"
+#include "background_probe.h"
+#include "rtsp.h"
+#include "startup_gate.h"
+#include "stream.h"
+#include "telemetry/hooks.h"
+#include "telemetry/telemetry.h"
+#include "tray/system_tray.h"
+#include "tray/tray_state.h"
+#include "upnp.h"
+#include "video.h"
+#include "webhook/webhook.h"
+#include "webhook/webhook_auth.h"
+
+#ifdef _WIN32
+  #include "platform/windows/misc.h"
+  #include "platform/windows/win_dark_mode.h"
+  #include "spatial_audio/mat_capture_process.h"
+#endif
+
+namespace {
+  constexpr int managed_ports_unavailable_exit_code = 86;
+
+  template<class Protocol>
+  bool
+  managed_port_available(boost::asio::io_context &io, const boost::asio::ip::address &address, std::uint16_t port) {
+    boost::system::error_code error;
+    const typename Protocol::endpoint endpoint { address, port };
+    typename Protocol::socket socket { io };
+    socket.open(endpoint.protocol(), error);
+    if (error) {
+      return false;
+    }
+#ifdef _WIN32
+    // A reusable bind can succeed even with another Sunshine listening on the
+    // same Windows port. Test with an exclusive bind to detect that conflict.
+    const int exclusive = 1;
+    if (setsockopt(socket.native_handle(), SOL_SOCKET, SO_EXCLUSIVEADDRUSE,
+                   reinterpret_cast<const char *>(&exclusive), sizeof(exclusive)) != 0) {
+      return false;
+    }
+#endif
+    if (address.is_v6()) {
+      socket.set_option(boost::asio::ip::v6_only(false), error);
+    }
+    if (!error) {
+      socket.bind(endpoint, error);
+    }
+    return !error;
+  }
+
+  bool
+  choose_managed_ports(bool allow_alternate_ports) {
+    namespace ip = boost::asio::ip;
+    const auto family = net::af_from_enum_string(config::sunshine.address_family);
+    boost::system::error_code error;
+    const auto address = ip::make_address(net::get_bind_address(family), error);
+    if (error) {
+      return false;
+    }
+    boost::asio::io_context io;
+    const auto busy_port = [&](int base) {
+      for (const int offset : { nvhttp::PORT_HTTPS, nvhttp::PORT_HTTP, confighttp::PORT_HTTPS, rtsp_stream::RTSP_SETUP_PORT }) {
+        if (!managed_port_available<ip::tcp>(io, address, base + offset)) {
+          return base + offset;
+        }
+      }
+      for (const int offset : { stream::VIDEO_STREAM_PORT, stream::CONTROL_PORT, stream::AUDIO_STREAM_PORT, stream::MIC_STREAM_PORT }) {
+        if (!managed_port_available<ip::udp>(io, address, base + offset)) {
+          return -(base + offset);
+        }
+      }
+      return 0;
+    };
+
+    const int conflict = busy_port(config::sunshine.port);
+    if (conflict == 0) {
+      return true;
+    }
+    if (!allow_alternate_ports) {
+      std::cout << "SUNANDMON_PORT_CONFLICT " << conflict << std::endl;
+      return false;
+    }
+    // Leave room between groups for each stream's relative port offsets.
+    for (int base = 48189; base < 48189 + 8 * 32; base += 32) {
+      if (busy_port(base) == 0) {
+        config::sunshine.port = base;
+        return true;
+      }
+    }
+    return false;
+  }
+}  // namespace
+
+#ifdef _WIN32
+  #ifndef WIN32_LEAN_AND_MEAN
+    #define WIN32_LEAN_AND_MEAN
+  #endif
+  #include <windows.h>
+  #include "../tools/sunshinesvc_state.h"
+
+namespace {
+  // Captures the value main() ends up returning so the atexit terminator can use it.
+  // Defaults to 0 (success) for the common case where main returns lifetime::desired_exit_code.
+  std::atomic<int> g_final_exit_code { 0 };
+  // Held for the life of the process. Closing it would drop the single-instance mutex.
+  HANDLE host_instance_mutex = nullptr;
+
+  bool
+  another_installation_instance() {
+    wchar_t module_path[32768];
+    const auto length = GetModuleFileNameW(nullptr, module_path, 32768);
+    if (length == 0 || length >= 32768) {
+      return false;
+    }
+    const auto name = sunshinesvc::instance_mutex_name(std::wstring_view { module_path, length });
+    SetLastError(ERROR_SUCCESS);
+    host_instance_mutex = CreateMutexW(nullptr, FALSE, name.c_str());
+    const auto claim = sunshinesvc::instance_claim(host_instance_mutex != nullptr, GetLastError());
+    if (claim != sunshinesvc::instance_claim_e::other_running) {
+      return false;
+    }
+    if (host_instance_mutex != nullptr) {
+      CloseHandle(host_instance_mutex);
+      host_instance_mutex = nullptr;
+    }
+    return true;
+  }
+}  // namespace
+#endif
+
+using namespace std::literals;
+
+std::map<int, std::function<void()>> signal_handlers;
+void
+on_signal_forwarder(int sig) {
+  signal_handlers.at(sig)();
+}
+
+template <class FN>
+void
+on_signal(int sig, FN &&fn) {
+  signal_handlers.emplace(sig, std::forward<FN>(fn));
+
+  std::signal(sig, on_signal_forwarder);
+}
+
+std::map<std::string_view, std::function<int(const char *name, int argc, char **argv)>> cmd_to_func {
+  { "creds"sv, [](const char *name, int argc, char **argv) { return args::creds(name, argc, argv); } },
+  { "help"sv, [](const char *name, int argc, char **argv) { return args::help(name); } },
+  { "version"sv, [](const char *name, int argc, char **argv) { return args::version(); } },
+#ifdef _WIN32
+  { "restore-nvprefs-undo"sv, [](const char *name, int argc, char **argv) { return args::restore_nvprefs_undo(); } },
+#endif
+};
+
+#ifdef _WIN32
+LRESULT CALLBACK
+SessionMonitorWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+  switch (uMsg) {
+    case WM_CLOSE:
+      DestroyWindow(hwnd);
+      return 0;
+    case WM_DESTROY:
+      PostQuitMessage(0);
+      return 0;
+    case WM_ENDSESSION: {
+      // Terminate ourselves with a blocking exit call
+      std::cout << "Received WM_ENDSESSION"sv << std::endl;
+      lifetime::exit_sunshine(0, false);
+      return 0;
+    }
+    default:
+      return DefWindowProc(hwnd, uMsg, wParam, lParam);
+  }
+}
+
+WINAPI BOOL
+ConsoleCtrlHandler(DWORD type) {
+  if (type == CTRL_CLOSE_EVENT) {
+    BOOST_LOG(info) << "Console closed handler called";
+    lifetime::exit_sunshine(0, false);
+  }
+  return FALSE;
+}
+#endif
+
+// Unused on Windows when the GUI agent owns the tray (SUNSHINE_TRAY=0): the
+// only remaining reader is the POSIX main-loop condition below.
+#if defined SUNSHINE_TRAY && SUNSHINE_TRAY >= 1
+[[maybe_unused]] constexpr bool tray_is_enabled = true;
+#else
+[[maybe_unused]] constexpr bool tray_is_enabled = false;
+#endif
+
+void
+mainThreadLoop(const std::shared_ptr<safe::event_t<bool>> &shutdown_event) {
+  bool run_loop = false;
+
+  // Conditions that would require the main thread event loop
+#ifndef _WIN32
+  run_loop = tray_is_enabled && config::sunshine.system_tray;  // On Windows, tray runs in separate thread, so no main loop needed for tray
+#endif
+
+  if (!run_loop) {
+    BOOST_LOG(info) << "No main thread features enabled, skipping event loop"sv;
+    // Wait for shutdown
+    shutdown_event->view();
+    return;
+  }
+
+  // Main thread event loop
+  BOOST_LOG(info) << "Starting main loop"sv;
+#if defined SUNSHINE_TRAY && SUNSHINE_TRAY >= 1
+  while (system_tray::process_tray_events() == 0);
+#else
+  // Only the in-process tray sets run_loop, so this build cannot reach here.
+  // Block on shutdown anyway: falling through would return to main() and tear
+  // the host down immediately if another main-thread feature is ever added.
+  shutdown_event->view();
+#endif
+  BOOST_LOG(info) << "Main loop has exited"sv;
+}
+
+/**
+ * @brief Run the encoder probe, reporting progress so a stall is diagnosable.
+ *
+ * The probe talks to the graphics driver and cannot be safely interrupted from
+ * the outside — a hung driver call owns its thread until it returns. So the
+ * watchdog does not try to cancel anything; it keeps writing to the log
+ * while the probe is outstanding, and after probe_hang_after it tells the start guard
+ * that this run hung in the driver (src/gpu_driver_guard.h), so a start that keeps
+ * ending there is taken to the safe mode. That turns "Sunshine started but streaming
+ * never works and nobody knows why" into a timestamped line naming the phase
+ * that is stuck.
+ *
+ * @return true when the probe found no working encoder.
+ */
+bool
+probe_encoders_with_watchdog() {
+  constexpr auto poll_interval = 5s;
+  constexpr auto report_interval = 30s;
+  constexpr auto probe_hang_after = 45s;
+
+  std::promise<void> probe_finished;
+  auto probe_finished_future = probe_finished.get_future();
+
+  BOOST_LOG(info) << "Probing for supported encoders..."sv;
+  // The time the machine sleeps is not time the probe was stuck: a probe that was running when the system went to sleep must not wake up as a driver hang
+  // (that would mark the driver and push the next starts toward the safe mode), so the elapsed time is read from the clock that stands still in sleep.
+  const auto probe_started_ms = crash::awake_ms();
+  const auto probe_elapsed = [probe_started_ms]() {
+    return std::chrono::milliseconds(crash::awake_ms() - probe_started_ms);
+  };
+
+  std::thread watchdog([&probe_finished_future, poll_interval, report_interval, probe_hang_after, probe_elapsed]() {
+    auto next_report = report_interval;
+    bool hang_noted = false;
+    while (probe_finished_future.wait_for(poll_interval) == std::future_status::timeout) {
+      const auto elapsed = probe_elapsed();
+      if (!hang_noted && elapsed >= probe_hang_after) {
+        hang_noted = true;
+        if (auto *guard = gpu_guard::g_guard.load()) guard->note_hang();
+      }
+      if (elapsed < next_report) continue;
+      next_report += report_interval;
+      BOOST_LOG(warning) << "Encoder probe has been running for "sv << std::chrono::duration_cast<std::chrono::seconds>(elapsed).count()
+                         << "s and has not returned. This usually means a graphics driver call "
+                            "is stuck. Streaming will not work until it completes; the web UI is "
+                            "already available so the configuration can be changed."sv;
+    }
+  });
+
+  bool probe_failed = true;
+  std::exception_ptr probe_error;
+  try {
+    probe_failed = video::probe_encoders();
+  }
+  catch (...) {
+    probe_error = std::current_exception();
+  }
+
+  probe_finished.set_value();
+  watchdog.join();
+  if (probe_error) std::rethrow_exception(probe_error);
+
+  const auto elapsed = probe_elapsed();
+
+  if (probe_failed) {
+    BOOST_LOG(error) << "Video failed to find working encoder (probe took "sv << elapsed.count() << "ms)"sv;
+  }
+  else {
+    BOOST_LOG(info) << "Encoder probe completed in "sv << elapsed.count() << "ms"sv;
+  }
+  return probe_failed;
+}
+
+/**
+ * @brief Tells the tray, once per driver version, that the last failure lay in a graphics driver, and once per entry that the safe mode is on.
+ * The Panel shows what the host puts into the tray state as a notification; the sentences are those of the home page (src/gpu_driver_text.h).
+ */
+void
+announce_gpu_guard_state() {
+  try {
+    auto *guard = gpu_guard::g_guard.load();
+    auto *store = gpu_guard::g_notices.load();
+    if (!guard || !store) return;
+    const bool zh = gpu_guard::text::is_chinese(config::sunshine.locale);
+    if (const auto mark = gpu_guard::read_mark(platf::appdata())) {
+      const std::string installed = crash::gpu_driver::driver_version_of(mark->vendor);
+      if (gpu_guard::notice_due(*mark, installed, *store) && !store->notified(mark->key())) {
+        store->mark_notified(mark->key());
+        const auto note = gpu_guard::text::driver_notification(*mark, zh);
+        tray_state::set_notification(note.title, note.message);
+        return;
+      }
+    }
+    if (const auto state = guard->snapshot(); state.safe) {
+      const auto key = "safe:" + std::to_string(state.safe_since);
+      if (!store->notified(key)) {
+        store->mark_notified(key);
+        const auto note = gpu_guard::text::safe_mode_notification(guard->policy().safe_clear_after_s, zh);
+        tray_state::set_notification(note.title, note.message);
+      }
+    }
+  }
+  catch (...) {
+  }
+}
+
+/**
+ * @brief The encoder probe of the start, on a thread of its own (src/background_probe.h).
+ *
+ * The start no longer waits for it: the tray and the ready state come first, a request that needs the result waits on startup::probe_gate() for a bounded time,
+ * and the Web UI and the Panel say "checking the encoders" while gpu_guard::get_probe() is not final. The thread is watched like the main one (a stop inside the
+ * driver is a hang report and a driver mark). At the end of the process a probe that is still inside the driver does not hold the exit: it waits a short bound and lets go.
+ */
+class probe_task_t {
+public:
+  using log_fn = std::function<void(const std::string &)>;
+
+  void
+  start(log_fn log_phase) {
+    crash::gpu_driver::set_phase(crash::gpu_driver::phase_e::probe);
+    crash::context::begin_encoder_probe();
+    gpu_guard::set_probe(gpu_guard::probe_e::running);
+    thread_.start([log_phase = std::move(log_phase)]() {
+      {
+        crash::watched_thread_t watch("encoder-probe", 120000);
+        crash::busy_scope_t busy(watch.slot);
+        startup::run_probe(
+          [&log_phase]() {
+            startup::phase_t phase("encoder probe", log_phase);
+            return probe_encoders_with_watchdog();
+          },
+          startup::probe_gate(),
+          [](gpu_guard::probe_e state) { gpu_guard::set_probe(state); });
+      }
+      crash::context::end_encoder_probe();
+      crash::gpu_driver::set_phase(crash::gpu_driver::phase_e::idle);
+    });
+  }
+
+  /// Waits up to `bound` for the probe, then lets go of it (a thread stuck in a driver call cannot be joined).
+  void
+  finish(std::chrono::seconds bound) {
+    if (thread_.running() && !thread_.finish(bound)) {
+      BOOST_LOG(warning) << "The encoder probe is still inside the graphics driver; the host does not wait for it"sv;
+    }
+  }
+
+  ~probe_task_t() {
+    finish(3s);
+  }
+
+private:
+  startup::bounded_thread_t thread_ { 3s };
+};
+
+int
+main(int argc, char *argv[]) {
+  lifetime::argv = argv;
+
+  const auto alternate_ports_env = std::getenv("SUNANDMON_ALLOW_ALTERNATE_PORTS");
+  const bool allow_alternate_ports = alternate_ports_env && alternate_ports_env == "1"sv;
+#ifdef _WIN32
+  _putenv_s("SUNANDMON_ALLOW_ALTERNATE_PORTS", "");
+  SetEnvironmentVariableW(L"SUNANDMON_ALLOW_ALTERNATE_PORTS", nullptr);
+#else
+  unsetenv("SUNANDMON_ALLOW_ALTERNATE_PORTS");
+#endif
+
+  using namespace nvhttp::center_pairing;
+  if (const auto token = std::getenv("SUNANDMON_MANAGED_TOKEN"); token && lower_hex(token, 64)) {
+    managed_token = token;
+    if (const auto key = std::getenv("SUNANDMON_HOST_KEY"); key && lower_hex(key, 64)) {
+      host_key = key;
+    }
+  #ifdef _WIN32
+    _putenv_s("SUNANDMON_MANAGED_TOKEN", "");
+    _putenv_s("SUNANDMON_HOST_KEY", "");
+    SetEnvironmentVariableW(L"SUNANDMON_MANAGED_TOKEN", nullptr);
+    SetEnvironmentVariableW(L"SUNANDMON_HOST_KEY", nullptr);
+  #else
+    unsetenv("SUNANDMON_MANAGED_TOKEN");
+    unsetenv("SUNANDMON_HOST_KEY");
+  #endif
+  }
+
+#ifdef _WIN32
+  // Note: this only fires on a normal `return` from main. If the program
+  // crashes mid-run (uncaught exception, AV, abort/terminate), atexit is
+  // not invoked, so the service supervisor still observes a non-zero exit
+  // code and can restart Sunshine as usual.
+  std::atexit([]() {
+    TerminateProcess(GetCurrentProcess(),
+      static_cast<UINT>(g_final_exit_code.load(std::memory_order_acquire)));
+  });
+
+  // WCS uses HKCU internally. Disable its per-process cache before any Windows
+  // component can pin it to SYSTEM, so later impersonation sees the user's ICCs.
+  if (!platf::initialize_user_registry()) {
+    std::cerr << "Failed to initialize per-user registry access" << std::endl;
+    return 1;
+  }
+
+  // Avoid searching the PATH in case a user has configured their system insecurely
+  // by placing a user-writable directory in the system-wide PATH variable.
+  SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_APPLICATION_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
+
+  // Enable dark mode for the entire process before creating any windows
+  // This must be called early, before any windows or system tray icons are created
+  win_dark_mode::enable_process_dark_mode();
+
+  // Set locale to UTF-8 instead of C locale
+  setlocale(LC_ALL, ".UTF-8");
+#endif
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+  // Use UTF-8 conversion for the default C++ locale (used by boost::log)
+  std::locale::global(std::locale(std::locale(), new std::codecvt_utf8<wchar_t>));
+#pragma GCC diagnostic pop
+
+  mail::man = std::make_shared<safe::mail_raw_t>();
+  for (int i = 1; i < argc; ++i) {
+    if (std::string_view(argv[i]) == "--version"sv) {
+      // `--version --json`: the build identity (build_info.h), one JSON object on stdout
+      for (int j = 1; j < argc; ++j) {
+        if (std::string_view(argv[j]) == "--json"sv) {
+          std::cout << build_info::to_json(build_info::current()).dump() << std::endl;
+          return 0;
+        }
+      }
+      std::cout << build_info::product_name() << " version: " << build_info::version() << std::endl;
+      return 0;
+    }
+  }
+
+  // Crash, abort and hang reports (crash/crash.h): installed before anything else can fail, pointed at the real config file once it is known.
+  {
+    crash::options_t crash_options;
+    crash_options.version = build_info::version();
+    crash_options.config_dir = platf::appdata();
+  #ifdef _WIN32
+    crash_options.os_version = platf::windows_version();
+  #else
+    crash_options.os_version = "linux";
+  #endif
+    crash::install(crash_options);
+    crash::set_environment_provider(crash::env::describe_machine);  // read when a report is uploaded, on the computer that crashed
+  }
+
+  // parse config file
+  if (config::parse(argc, argv)) {
+    return 0;
+  }
+  crash::set_config_file(file_handler::path_from_utf8(config::sunshine.config_file));
+
+#ifdef _WIN32
+  // A second process of this installation exits before it binds a port or probes an encoder.
+  // Session 0 (the service) and a console session share the global namespace, so one mutex
+  // covers both [dr-ms-kernel-namespaces-20261109] [dr-ms-createmutexw-20261109].
+  // It also exits before it opens the log: the running process has sunshine.log open, and a start keeps the previous log as sunshine.log.1 and writes a fresh
+  // one, so a second process that got that far would push the real previous log out of the kept set and truncate the log of the running one.
+  // A command (--creds, --help ...) runs next to the running host and returns before the host starts, so it does not claim the instance.
+  if (config::sunshine.cmd.name.empty() && another_installation_instance()) {
+    std::cerr << "Another Sunshine from this installation is already running; this process exits without opening ports or probing encoders." << std::endl;
+    return 0;
+  }
+  // The service adopts a running core only when this says it is ready and not stopping.
+  if (config::sunshine.cmd.name.empty()) {
+    lifetime::core_state_open();
+  }
+#endif
+
+  if (!managed_token.empty()) {
+    if (!choose_managed_ports(allow_alternate_ports)) {
+#ifdef _WIN32
+      g_final_exit_code.store(managed_ports_unavailable_exit_code);
+#endif
+      return managed_ports_unavailable_exit_code;
+    }
+    std::cout << "SUNANDMON_PORTS " << net::map_port(nvhttp::PORT_HTTP) << ' '
+              << net::map_port(confighttp::PORT_HTTPS) << std::endl;
+  }
+
+  auto log_deinit_guard = logging::init(config::sunshine.min_log_level, config::sunshine.log_file, config::sunshine.restore_log);
+  if (!log_deinit_guard) {
+    BOOST_LOG(error) << "Logging failed to initialize"sv;
+  }
+
+  // logging can begin at this point
+  // if anything is logged prior to this point, it will appear in stdout, but not in the log viewer in the UI
+  // the version should be printed to the log before anything else
+  BOOST_LOG(info) << build_info::product_name() << " version: " << build_info::version();
+
+  // Usage statistics, error counts and stream quality (docs/privacy_telemetry.md). Each kind is sent only while its own choice is on; nothing here can fail the start.
+  telemetry::start();
+  // a stream that began while the encoder probe was running learns its encoder later
+  telemetry::set_encoder_resolver([] { return video::session_encoder_name(); });
+  telemetry::set_session_probe([] {
+    std::vector<telemetry::session_probe_t> probes;
+    for (const auto &info : stream::session::get_all_sessions_info()) {
+      telemetry::session_probe_t probe;
+      probe.session_id = info.session_id;
+      if (info.rtt_ms) probe.rtt_ms = *info.rtt_ms;
+      probe.loss_pct = info.packet_loss;
+      probe.dropped_frames = info.dropped_frames;
+      probe.measured_kbps = info.measured_bitrate_kbps;
+      probe.target_kbps = info.bitrate;
+      probes.push_back(probe);
+    }
+    return probes;
+  });
+
+#ifdef _WIN32
+  // Cache the result of is_running_as_system() check once at startup
+  is_running_as_system_user = platf::is_running_as_system();
+  if (is_running_as_system_user) {
+    BOOST_LOG(info) << "Running as SYSTEM user (service mode)";
+  }
+  BOOST_LOG(info) << "Running with " << platf::windows_version();
+#endif
+
+  // Log publisher metadata
+  log_publisher_data();
+
+  // Log modified_config_settings as JSON
+  if (!config::modified_config_settings.empty()) {
+    std::ostringstream config_json;
+    config_json << "Modified config settings: {";
+    bool first = true;
+    for (auto &[name, val] : config::modified_config_settings) {
+      if (!first) config_json << ", ";
+      // 凭证类配置只记录键名,不回显明文
+      const auto logged_val = name == "widget_token" ? "<redacted>"s : val;
+      config_json << "\"" << name << "\": \"" << logged_val << "\"";
+      first = false;
+    }
+    config_json << "}";
+    BOOST_LOG(info) << config_json.str();
+  }
+  config::modified_config_settings.clear();
+
+  if (!config::sunshine.cmd.name.empty()) {
+    auto fn = cmd_to_func.find(config::sunshine.cmd.name);
+    if (fn == std::end(cmd_to_func)) {
+      BOOST_LOG(fatal) << "Unknown command: "sv << config::sunshine.cmd.name;
+
+      BOOST_LOG(info) << "Possible commands:"sv;
+      for (auto &[key, _] : cmd_to_func) {
+        BOOST_LOG(info) << '\t' << key;
+      }
+
+      return 7;
+    }
+
+    return fn->second(argv[0], config::sunshine.cmd.argc, config::sunshine.cmd.argv);
+  }
+
+  // Crash-loop protection (src/gpu_driver_guard.h): how the last runs ended decides whether this start is in the safe mode. It comes before the test switch below so
+  // a crash that is made on purpose counts like a real one. The versions of the graphics drivers go to the crash handlers from a thread of its own (the system inventory).
+  // both live for the whole process: the thread below may be let go while it still reads them
+  auto &startup_guard = *new gpu_guard::guard_t { platf::appdata() };
+  auto &notice_store = *new gpu_guard::notice_store_t { platf::appdata() };
+  const bool safe_mode = startup_guard.begin();
+  gpu_guard::g_guard.store(&startup_guard);
+  gpu_guard::g_notices.store(&notice_store);
+  auto guard_reset = util::fail_guard([]() {
+    crash::context::g_stream_end_hook.store(nullptr);
+    gpu_guard::g_guard.store(nullptr);
+    gpu_guard::g_notices.store(nullptr);
+  });
+  gpu_guard::ticker_t startup_guard_ticker { startup_guard };
+  startup::bounded_thread_t gpu_facts;
+  gpu_facts.start([]() {
+    crash::env::publish_gpu_driver_versions();
+    announce_gpu_guard_state();
+  });
+  crash::context::g_stream_end_hook.store([]() noexcept {
+    if (auto *guard = gpu_guard::g_guard.load()) guard->note_stream_finished();
+  });
+  if (safe_mode) {
+    BOOST_LOG(warning) << "Safe mode: the previous starts ended within "sv << startup_guard.policy().stable_after_s << " s or hung in the graphics driver "sv
+                       << startup_guard.policy().loop_threshold << " times in a row; the encoder check and the display recovery of the start are skipped"sv;
+  }
+
+  // The second and later passes of the uploader find what a crash left; the first waits out the start. SUNSHINE_TEST_CRASH makes this process
+  // fail on purpose (tests only), after the handlers and the consent are in place.
+  crash::start_uploader();
+  crash::run_test_switch();
+  // The start is one busy stretch of the main thread: a driver call that never returns here shows up as a "hang" report.
+  crash::watched_thread_t crash_main_watch("main-startup", 300000);
+  std::optional<crash::busy_scope_t> crash_startup_busy;
+  crash_startup_busy.emplace(crash_main_watch.slot);
+
+  // Adding this guard here first as it also performs recovery after crash,
+  // otherwise people could theoretically end up without display output.
+  // It also should be run be destroyed before forced shutdown.
+  // the recovery is left out in the safe mode: the phase word names only what runs
+  if (!safe_mode) crash::context::set_phase(crash::context::phase_e::display_restore);
+  auto display_device_deinit_guard = display_device::session_t::init(safe_mode);
+  if (!display_device_deinit_guard) {
+    BOOST_LOG(error) << "Display device session failed to initialize"sv;
+  }
+
+#ifdef WIN32
+  // Modify relevant NVIDIA control panel settings if the system has corresponding gpu
+  crash::context::set_phase(crash::context::phase_e::nvprefs);
+  nvprefs_instance.configure();
+
+  // Wait as long as possible to terminate Sunshine.exe during logoff/shutdown
+  SetProcessShutdownParameters(0x100, SHUTDOWN_NORETRY);
+
+  // We must create a hidden window to receive shutdown notifications since we load gdi32.dll
+  std::promise<HWND> session_monitor_hwnd_promise;
+  auto session_monitor_hwnd_future = session_monitor_hwnd_promise.get_future();
+  std::promise<void> session_monitor_join_thread_promise;
+  auto session_monitor_join_thread_future = session_monitor_join_thread_promise.get_future();
+
+  std::thread session_monitor_thread([&]() {
+    session_monitor_join_thread_promise.set_value_at_thread_exit();
+
+    WNDCLASSA wnd_class {};
+    wnd_class.lpszClassName = "SunshineSessionMonitorClass";
+    wnd_class.lpfnWndProc = SessionMonitorWindowProc;
+    if (!RegisterClassA(&wnd_class)) {
+      session_monitor_hwnd_promise.set_value(NULL);
+      BOOST_LOG(error) << "Failed to register session monitor window class"sv << std::endl;
+      return;
+    }
+
+    auto wnd = CreateWindowExA(
+      0,
+      wnd_class.lpszClassName,
+      "Sunshine Session Monitor Window",
+      0,
+      CW_USEDEFAULT,
+      CW_USEDEFAULT,
+      CW_USEDEFAULT,
+      CW_USEDEFAULT,
+      nullptr,
+      nullptr,
+      nullptr,
+      nullptr);
+
+    session_monitor_hwnd_promise.set_value(wnd);
+
+    if (!wnd) {
+      BOOST_LOG(error) << "Failed to create session monitor window"sv << std::endl;
+      return;
+    }
+
+    ShowWindow(wnd, SW_HIDE);
+
+    // Run the message loop for our window
+    MSG msg {};
+    while (GetMessage(&msg, nullptr, 0, 0) > 0) {
+      TranslateMessage(&msg);
+      DispatchMessage(&msg);
+    }
+  });
+
+  auto session_monitor_join_thread_guard = util::fail_guard([&]() {
+    if (session_monitor_hwnd_future.wait_for(1s) == std::future_status::ready) {
+      if (HWND session_monitor_hwnd = session_monitor_hwnd_future.get()) {
+        PostMessage(session_monitor_hwnd, WM_CLOSE, 0, 0);
+      }
+
+      if (session_monitor_join_thread_future.wait_for(1s) == std::future_status::ready) {
+        session_monitor_thread.join();
+        return;
+      }
+      else {
+        BOOST_LOG(warning) << "session_monitor_join_thread_future reached timeout";
+      }
+    }
+    else {
+      BOOST_LOG(warning) << "session_monitor_hwnd_future reached timeout";
+    }
+
+    session_monitor_thread.detach();
+  });
+
+#endif
+
+  task_pool.start(1);
+
+  // Create signal handler after logging has been initialized
+  auto shutdown_event = mail::man->event<bool>(mail::shutdown);
+  if (!managed_token.empty()) {
+    // The desktop controller owns the pipe. EOF also stops the host if the controller crashes.
+    std::thread([shutdown_event] {
+      std::cin.ignore(std::numeric_limits<std::streamsize>::max());
+      shutdown_event->raise(true);
+    }).detach();
+  }
+  on_signal(SIGINT, [shutdown_event]() {
+    shutdown_event->raise(true);
+  });
+
+  on_signal(SIGTERM, [shutdown_event]() {
+    shutdown_event->raise(true);
+  });
+
+#ifdef _WIN32
+  // Terminate gracefully on Windows when console window is closed
+  SetConsoleCtrlHandler(ConsoleCtrlHandler, TRUE);
+#endif
+
+  crash::context::set_phase(crash::context::phase_e::apps);
+#ifdef _WIN32
+  // The Windows host offers Big Screen once to an apps.json that is older than the entry (default_apps.h); Foundation Desktop is a Windows component.
+  default_apps::migrate_file(config::stream.file_apps, config::sunshine.locale);
+#endif
+
+  proc::refresh(config::stream.file_apps);
+
+  crash::context::set_phase(crash::context::phase_e::enhancement);
+  if (!image_enhancement::manager().initialize()) {
+    BOOST_LOG(warning) << "HDR enhancement configuration or selected component is unavailable; optional processing is disabled";
+  }
+
+  // If any of the following fail, we log an error and continue event though sunshine will not function correctly.
+  // This allows access to the UI to fix configuration problems or view the logs.
+
+  // Every phase of the start writes its duration (`[startup] <phase> <ms> ms (at +<ms> ms)`): the first second and a half after nvprefs used to log nothing.
+  const auto log_phase = [](const std::string &line) { BOOST_LOG(info) << line; };
+
+  std::unique_ptr<platf::deinit_t> platf_deinit_guard;
+  {
+    crash::context::set_phase(crash::context::phase_e::platform_init);
+    startup::phase_t phase("platf::init", log_phase);
+    platf_deinit_guard = platf::init();
+  }
+  if (!platf_deinit_guard) {
+    BOOST_LOG(error) << "Platform failed to initialize"sv;
+  }
+
+  std::unique_ptr<platf::deinit_t> proc_deinit_guard;
+  {
+    crash::context::set_phase(crash::context::phase_e::proc_init);
+    startup::phase_t phase("proc::init", log_phase);
+    proc_deinit_guard = proc::init();
+  }
+  if (!proc_deinit_guard) {
+    BOOST_LOG(error) << "Proc failed to initialize"sv;
+  }
+
+  reed_solomon_init();
+
+  // The PyroWave runtime probe creates a Vulkan device; run it now beside the other start-up work instead of inside the
+  // first RTSP DESCRIBE (which also serves every other RTSP request on the same thread).
+  crash::context::set_phase(crash::context::phase_e::pyrowave);
+  pyrowave::prewarm_server_runtime();
+
+  // The input devices (the HID enumeration of the virtual mouse, the gamepad back ends) are opened beside the encoder probe, not before it: neither needs the other,
+  // and a stream waits for both (startup::await_stream_ready). The guard keeps the place it had, so the order of the tear-down is the one it was.
+  std::unique_ptr<platf::deinit_t> input_deinit_guard;
+  auto input_init = std::async(std::launch::async, [&log_phase]() {
+    startup::phase_t phase("input::init", log_phase);
+    auto guard = input::init();
+    if (input::probe_gamepads()) {
+      BOOST_LOG(warning) << "No gamepad input is available"sv;
+    }
+    startup::input_gate().open();
+    return guard;
+  });
+
+  crash::context::set_phase(crash::context::phase_e::network);
+  if (http::init()) {
+    BOOST_LOG(fatal) << "HTTP interface failed to initialize"sv;
+
+#ifdef _WIN32
+    BOOST_LOG(fatal) << "To relaunch Sunshine successfully, use the shortcut in the Start Menu. Do not run Sunshine.exe manually."sv;
+    std::this_thread::sleep_for(10s);
+#endif
+
+    return -1;
+  }
+
+  auto client_fingerprint_deinit_guard = client_fingerprint::init({
+    .remote_rules_enabled = config::nvhttp.client_fingerprint_remote_rules,
+    .signing_certificate = file_handler::path_from_utf8(config::nvhttp.client_fingerprint_rules_certificate),
+    .cache_file = platf::appdata() / "client-fingerprint-rules.json",
+  });
+  if (!client_fingerprint_deinit_guard) {
+    BOOST_LOG(warning) << "Client fingerprint rules are unavailable; using built-in rules";
+  }
+
+  std::unique_ptr<platf::deinit_t> mDNS;
+  std::future<void> sync_mDNS;
+  if (config::sunshine.flags[config::flag::MDNS_BROADCAST]) {
+    BOOST_LOG(info) << "mDNS broadcast enabled"sv;
+    sync_mDNS = std::async(std::launch::async, [&mDNS]() {
+      mDNS = platf::publish::start();
+    });
+  }
+
+  std::unique_ptr<platf::deinit_t> upnp_unmap;
+  auto sync_upnp = std::async(std::launch::async, [&upnp_unmap]() {
+    upnp_unmap = upnp::start();
+  });
+
+  // Do not start network services after shutdown has already been requested.
+  if (shutdown_event->peek()) {
+    startup_guard.note_clean_exit();
+    return lifetime::desired_exit_code;
+  }
+
+  crash::context::set_phase(crash::context::phase_e::webhook);
+  webhook::auth::load_result_t webhook_auth_result {
+    webhook::auth::load_status_t::INVALID,
+    {}
+  };
+  try {
+    webhook_auth_result = webhook::auth::load(
+      webhook::auth::path_for(config::sunshine.config_file));
+  }
+  catch (...) {
+    // Treat path construction failures exactly like an invalid Webhook file.
+    // Webhook configuration must never abort Sunshine startup.
+  }
+  const bool webhook_configured = webhook::configure(std::move(webhook_auth_result.settings));
+  if (webhook_auth_result.status == webhook::auth::load_status_t::INVALID ||
+      !webhook_configured) {
+    BOOST_LOG(error) << "Webhook configuration is invalid; Webhook delivery is disabled"sv;
+  }
+
+  auto webhook_deinit_guard = webhook::init();
+  if (!webhook_deinit_guard || !webhook::runtime_active()) {
+    BOOST_LOG(warning) << "Webhook runtime is unavailable; Sunshine will continue without Webhook delivery"sv;
+  }
+
+  // Start the configuration web UI before probing encoders.
+  //
+  // probe_encoders() drives the graphics driver directly, and a bad driver or a
+  // bad encoder option can make it block for a very long time or forever. When
+  // the probe ran on the main thread ahead of every server, such a stall meant
+  // the web UI never bound its port: the service looked healthy, but the user
+  // had no way to read the logs or undo the option that caused the stall.
+  //
+  // confighttp does not consume probe results. It reads the active encoder name
+  // through an atomic (empty until the probe lands) and HDR pipeline status
+  // under its own mutex, so bringing it up early races with nothing. nvhttp and
+  // rtsp_stream do depend on the probe (codec support flags, YUV444 support),
+  // so they stay behind it.
+#ifdef _WIN32
+  if (config::audio.mat_live && config::audio.stream) spatial_audio::mat_capture_process.start();
+#endif
+  crash::context::set_phase(crash::context::phase_e::listeners);
+  std::thread configThread { confighttp::start };
+
+  // The servers of the clients open before the probe: a client that asks while the probe runs waits for it (startup::probe_gate) and is told that the host is
+  // starting when a stuck driver call outlasts the bound. rtsp only answers a session that /launch made, and /launch waits for the probe and the input devices.
+  std::thread httpThread { nvhttp::start };
+  std::thread rtspThread { rtsp_stream::start };
+
+  // The probe runs on a thread of its own: the tray and the ready state do not wait for the driver. In the safe mode it is left out, and a stream checks the encoders
+  // when it is asked for (the launch path does it every time). The phase word "encoder-probe" stays on the reports while the probe runs, whatever phase the main thread is in.
+  probe_task_t probe_task;
+  if (safe_mode) {
+    gpu_guard::set_probe(gpu_guard::probe_e::skipped);
+    crash::gpu_driver::set_phase(crash::gpu_driver::phase_e::idle);
+    startup::probe_gate().open();
+  }
+  else {
+    probe_task.start(log_phase);
+  }
+  crash::context::set_phase(crash::context::phase_e::input_wait);
+  input_deinit_guard = input_init.get();
+  crash::context::set_phase(crash::context::phase_e::tray);
+
+#if defined(_WIN32) && defined(SUNSHINE_GUI_TRAY) && SUNSHINE_GUI_TRAY >= 1
+  // The service wrapper owns user-session agent startup in service mode, and
+  // it restarts the agent when the process is killed. Standalone and portable
+  // runs are not SYSTEM, so Core watches the agent itself.
+  if (managed_token.empty() && !platf::is_running_as_system()) {
+    platf::supervise_gui_agent();
+  }
+#endif
+
+#ifdef _WIN32
+  // If we're using the default port and GameStream is enabled, warn the user
+  if (config::sunshine.port == 47989 && is_gamestream_enabled()) {
+    BOOST_LOG(fatal) << "GameStream is still enabled in GeForce Experience! This *will* cause streaming problems with Sunshine!"sv;
+    BOOST_LOG(fatal) << "GeForce Experience 中仍然启用了 GameStream！这将导致流媒体问题与 Sunshine！"sv;
+    BOOST_LOG(fatal) << "Disable GameStream on the SHIELD tab in GeForce Experience or change the Port setting on the Advanced tab in the Sunshine Web UI."sv;
+    BOOST_LOG(fatal) << "在 GeForce Experience 的 SHIELD 标签中禁用 GameStream，或在 Sunshine Web UI 的 Advanced 标签中更改端口设置。"sv;
+  }
+#endif
+
+#if defined SUNSHINE_TRAY && SUNSHINE_TRAY >= 1
+  if (tray_is_enabled && config::sunshine.system_tray && managed_token.empty()) {
+    BOOST_LOG(info) << "Starting system tray"sv;
+  #ifdef _WIN32
+    // TODO: Windows has a weird bug where when running as a service and on the first Windows boot,
+    // he tray icon would not appear even though Sunshine is running correctly otherwise.
+    // Restarting the service would allow the icon to appear normally.
+    // For now we will keep the Windows tray icon on a separate thread.
+    // Ideally, we would run the system tray on the main thread for all platforms.
+    system_tray::init_tray_threaded();
+  #else
+    system_tray::init_tray();
+  #endif
+  }
+#endif
+
+  telemetry::host_ready();
+  // An exit that was already asked for (a required listener failed during the probe sets the event directly) must not look ready.
+  if (!shutdown_event->peek()) {
+    lifetime::core_state_ready();
+  }
+  crash_startup_busy.reset();
+  crash::context::set_phase(crash::context::phase_e::none);
+  mainThreadLoop(shutdown_event);
+  // Every way out of the loop is an exit: the service must not adopt this process from here on, whichever path raised the event.
+  lifetime::core_state_stopping();
+  // The run ended because it was asked to: it is not a failed start, whatever the clean-up below meets.
+  startup_guard.note_clean_exit();
+  // A probe still inside the graphics driver does not hold the exit; one that is finishing gets a moment so the tear-down does not run under it.
+  probe_task.finish(3s);
+
+#ifdef _WIN32
+  spatial_audio::mat_capture_process.stop();
+#endif
+
+  // Cover tray/HTTP requests and signals before any cleanup can block.
+  lifetime::start_shutdown_watchdog();
+  BOOST_LOG(info) << "Shutdown requested; allowing up to 10 seconds for cleanup"sv;
+
+#if defined(_WIN32) && defined(SUNSHINE_GUI_TRAY) && SUNSHINE_GUI_TRAY >= 1
+  platf::stop_gui_agent_supervisor();
+#endif
+
+  client_fingerprint_deinit_guard.reset();
+
+  // Stop outbound callbacks before joining inbound servers. This cancels
+  // queued tests while their response objects are still valid.
+  webhook_deinit_guard.reset();
+
+#if defined SUNSHINE_TRAY && SUNSHINE_TRAY >= 1
+  system_tray::end_tray();
+#endif
+  try {
+    display_device::session_t::get().restore_state();
+  }
+  catch (...) {
+  }
+  display_device_deinit_guard = nullptr;
+
+  httpThread.join();
+  configThread.join();
+  rtspThread.join();
+
+  // the sessions have ended: the last events go to the disk queue (no wait for the network) and the sender stops
+  telemetry::stop();
+
+  task_pool.stop();
+  task_pool.join();
+
+  // stop system tray
+#if defined SUNSHINE_TRAY && SUNSHINE_TRAY >= 1
+  system_tray::end_tray();
+#endif
+
+#ifdef WIN32
+  // Restore global NVIDIA control panel settings
+  nvprefs_instance.restore();
+#endif
+
+#ifdef _WIN32
+  // Hand the chosen exit code over to the atexit terminator so it can pass it
+  // straight to TerminateProcess. Without this the terminator would always
+  // exit with 0 even when lifetime::desired_exit_code was set non-zero by a
+  // failure path that still chose to return cleanly from main.
+  g_final_exit_code.store(lifetime::desired_exit_code, std::memory_order_release);
+#endif
+  return lifetime::desired_exit_code;
+}

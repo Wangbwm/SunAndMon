@@ -1,0 +1,378 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- PC view menu entries -->
+    <string name="pcview_menu_app_list">Подивитися перелік застосунків</string>
+    <string name="pcview_menu_pair_pc">Створити пару з пристроєм</string>
+    <string name="pcview_menu_unpair_pc">Розірвати пару</string>
+    <string name="pcview_menu_send_wol">Надіслати запит Wake-On-LAN</string>
+    <string name="pcview_menu_delete_pc">Видалити пристрій</string>
+    <!-- Pair messages -->
+    <string name="pairing">Створення пари…</string>
+    <string name="pair_pc_offline">Пристрій вимкнений або знаходиться поза мережею</string>
+    <string name="pair_pc_ingame">Пристрій на даний момент знаходиться у грі. Ви повинні закрити гру перед створенням пари.</string>
+    <string name="pair_pairing_title">Створення пари</string>
+    <string name="pair_pairing_msg">Будь ласка, введіть цей код на пристрої:</string>
+    <string name="pair_incorrect_pin">Неправильний код</string>
+    <string name="pair_fail">Створення пари не вдалося</string>
+    <!-- WOL messages -->
+    <string name="wol_pc_online">Пристрій у мережі</string>
+    <string name="wol_no_mac">Не вдається розбудити ПК, оскільки немає збереженої MAC-адреси</string>
+    <string name="wol_waking_pc">Пробудження пристрою…</string>
+    <string name="wol_waking_msg">Пробудження пристрою може зайняти кілька секунд. Якщо цього не відбувається, упевніться що Wake-On-LAN налаштований правильно.</string>
+    <string name="wol_fail">Помилка при відправці Wake-On-LAN пакетів</string>
+    <!-- Unpair messages -->
+    <string name="unpairing">Розрив пари…</string>
+    <string name="unpair_success">Розрив пари закінчився успішно</string>
+    <string name="unpair_fail">Розрив пари не вдався</string>
+    <string name="unpair_error">Пристрій не було спарено</string>
+    <!-- Errors -->
+    <string name="error_pc_offline">Пристрій вимкнено чи знаходиться поза мережею</string>
+    <string name="error_manager_not_running">Сервіс ComputerManager не запущено. Будь ласка, зачекайте кілька секунд або перезапустіть застосунок.</string>
+    <string name="error_unknown_host">Неможливо знайти хоста</string>
+    <string name="error_404">GFE повернув помилку HTTP 404. Переконайтеся що ваш пристрій використовує підтримуваний GPU. Використання програм для віддаленого доступу також може викликати цю помилку. Спробуйте перезавантажити пристрій або перевстановити GFE.</string>
+    <!-- Start application messages -->
+    <string name="conn_establishing_title">Створення з\'єднання</string>
+    <string name="conn_establishing_msg">Підключення</string>
+    <string name="conn_metered">Увага: Ваше мережеве з\'єднання вимірюється оператором!</string>
+    <string name="conn_client_latency">Середня затримка розцифрування кадру:</string>
+    <string name="conn_client_latency_hw">затримка апаратного розцифрування:</string>
+    <string name="conn_hardware_latency">Середня затримка апаратного розцифрування:</string>
+    <string name="conn_starting">Запуск</string>
+    <string name="conn_error_title">Помилка з\'єднання</string>
+    <string name="conn_error_msg">Запуск не вдався</string>
+    <string name="conn_terminated_title">З\'єднання припинено</string>
+    <string name="conn_terminated_msg">З’єднання було розірване.</string>
+    <!-- General strings -->
+    <string name="ip_hint">IP-адреса головного ПК</string>
+    <string name="searching_pc">Пошук головного ПК у локальній мережі…
+\n
+\nПереконайтеся, що Sunshine запущено на вашому головному ПК або GameStream увімкнено в налаштуваннях GeForce Experience SHIELD.</string>
+    <string name="yes">Так</string>
+    <string name="no">Ні</string>
+    <string name="lost_connection">З\'єднання з пристроєм втрачено</string>
+    <!-- AppList activity -->
+    <string name="applist_menu_resume">Відновити сесію</string>
+    <string name="applist_menu_quit">Вийти з сесії</string>
+    <string name="applist_menu_quit_and_start">Вийти з поточної гри і запустити</string>
+    <string name="applist_menu_cancel">Скасувати</string>
+    <string name="applist_menu_tv_channel">Додати на канал</string>
+    <string name="applist_refresh_title">Перелік застосунків</string>
+    <string name="applist_refresh_msg">Оновлення застосунків…</string>
+    <string name="applist_refresh_error_title">Помилка</string>
+    <string name="applist_refresh_error_msg">Помилка отримання переліку застосунків</string>
+    <string name="applist_quit_app">Виходимо з</string>
+    <string name="applist_quit_success">Успішний вихід з</string>
+    <string name="applist_quit_fail">Помилка при виході</string>
+    <string name="applist_quit_confirmation">Ви впевнені, що хочете вийти з запущеного застосунку\? Усі незбережені дані будуть втрачені.</string>
+    <!-- Add computer manually activity -->
+    <string name="title_add_pc">Додати пристрій вручну</string>
+    <string name="msg_add_pc">З\'єднання з пристроєм…</string>
+    <string name="addpc_fail">Неможливо під\'єднатися до вибраного пристрою. Переконайтеся, що необхідні порти дозволені в налаштуваннях брандмауера.</string>
+    <string name="addpc_success">Пристрій додано успішно</string>
+    <string name="addpc_unknown_host">Неможливо знайти пристрій за вказаною адресою. Переконайтеся, що ви не зробили помилок під час його написання.</string>
+    <string name="addpc_enter_ip">Ви повинні ввести IP адресу</string>
+    <!-- Preferences -->
+    <string name="category_basic_settings">Загальні налаштування</string>
+    <string name="title_resolution_list">Роздільна здатність</string>
+    <string name="summary_resolution_list">Вибір надто високого значення для свого пристрою може викликати сповільнення на нешвидких мережах, або вильоти на менш потужних пристроях.</string>
+    <string name="title_seekbar_bitrate">Швидкість потоку відео</string>
+    <string name="summary_seekbar_bitrate">Вищий бітрейт покращує якість зображення, але використовує більше пропускної здатності; нижчий краще підходить для повільних або нестабільних мереж. Якщо трансляція смикається, спочатку зменште бітрейт, а збільшуйте його, коли мережа стабільна, але зображення недостатньо чітке; для 1080p60 почніть приблизно з 10–20 Mbps.</string>
+    <string name="title_checkbox_stretch_video">Розтягнути відео на весь екран</string>
+    <string name="title_checkbox_disable_warnings">Вимкнути попередження</string>
+    <string name="summary_checkbox_disable_warnings">Вимкнути мережні попередження під час трансляції</string>
+    <string name="category_audio_settings">Налаштування авдіо</string>
+    <string name="title_audio_config_list">Конфігурація об\'ємного звуку</string>
+    <string name="summary_audio_config_list">Увімкнути 5.1 або 7.1 об\'ємний звук для систем домашнього кінотеатру</string>
+    <string name="title_checkbox_multi_controller">Підтримка декількох контролерів</string>
+    <string name="summary_checkbox_multi_controller">Коли вимкнено, усі контролери працюють як один</string>
+    <string name="title_seekbar_deadzone">Змінити мертву зону аналогового соску</string>
+    <string name="suffix_seekbar_deadzone">%</string>
+    <string name="title_checkbox_xb1_driver">Драйвер для контролерів Xbox 360/One</string>
+    <string name="summary_checkbox_xb1_driver">Вмикає вбудований USB драйвер для пристроїв без власної підтримки контролерів Xbox</string>
+    <string name="category_ui_settings">Налаштування інтерфейсу</string>
+    <string name="title_language_list">Мова</string>
+    <string name="summary_language_list">Мова, яка буде використовуватися в Moonlight</string>
+    <string name="title_checkbox_small_icon_mode">Використовувати маленькі іконки</string>
+    <string name="summary_checkbox_small_icon_mode">Використовувати маленькі іконки в сітці застосунків, для відображення більшої кількості елементів на екрані</string>
+    <string name="category_host_settings">Налаштування хоста</string>
+    <string name="title_checkbox_enable_sops">Оптимізувати ігрові налаштування</string>
+    <string name="summary_checkbox_enable_sops">Дозволити GFE змінювати налаштування ігор для оптимальної трансляції</string>
+    <string name="title_checkbox_host_audio">Програвати звук на пристрої хоста</string>
+    <string name="summary_checkbox_host_audio">Програвати звук на пристроях хоста та клієнта</string>
+    <string name="category_advanced_settings">Розширені налаштування</string>
+    <string name="title_video_format">Змінити налаштування кодека</string>
+    <string name="summary_video_format">Не знаєте, що вибрати? Використовуйте автоматичний вибір. HEVC рекомендовано для більшості сучасних пристроїв: він зазвичай добре поєднує якість зображення, пропускну здатність і HDR. AV1 може заощадити пропускну здатність, якщо його підтримують обидві сторони, але на деяких пристроях може мати більшу затримку декодування. H.264 має найкращу сумісність, але потребує більшої пропускної здатності й не підтримує HDR.</string>
+    <string name="category_on_screen_controls_settings">Налаштування екранних ґудзиків</string>
+    <string name="title_checkbox_show_onscreen_controls">Показувати екранні ґудзики</string>
+    <string name="summary_checkbox_show_onscreen_controls">Відображати віртуальні ґудзики контролера на екрані</string>
+    <string name="title_only_l3r3">Показувати тільки L3 та R3</string>
+    <string name="summary_only_l3r3">Приховувати всі віртуальні ґудзики окрім L3 та R3</string>
+    <string name="scut_deleted_pc">Пристрій видалено</string>
+    <string name="scut_not_paired">Пристрій не сполучений</string>
+    <string name="help_loading_title">Перегляд допомоги</string>
+    <string name="help_loading_msg">Завантаження сторінки допомоги…</string>
+    <string name="pair_already_in_progress">Сполучення вже в процесі</string>
+    <string name="help">Допомога</string>
+    <string name="applist_connect_msg">Підключення до пристрою…</string>
+    <string name="title_decoding_error">Збій відео розцифрувача</string>
+    <string name="message_decoding_error">Moonlight аварійно завершив роботу через несумісність із відеодекодером цього пристрою. Спробуйте налаштувати параметри потокового передавання, якщо збої триватимуть.</string>
+    <string name="title_decoding_reset">Налаштування відео скинуті</string>
+    <string name="message_decoding_reset">Відео розцифрувач вашого пристрою продовжує давати збої з поточними налаштуваннями трансляції. Налаштування трансляції були скинуті до значень за замовчуванням.</string>
+    <string name="error_usb_prohibited">USB доступ заборонений адміністратором пристрою. Перевірте налаштування Knox або MDM.</string>
+    <string name="addpc_wrong_sitelocal">Вказана адреса неправильна. Ви повинні ввести публічну IP-адресу вашого мережника (роутера) для передачі через інтернет.</string>
+    <string name="title_checkbox_enable_pip">Увімкнути режим перегляду \"Картинка в картинці\"</string>
+    <string name="summary_checkbox_enable_pip">Дозволяє переглядати стрім (але не контролювати) під час багатозадачності</string>
+    <string name="title_checkbox_usb_bind_all">Вимкнути рідну підтримку Xbox контролерів від Андроїда</string>
+    <string name="summary_checkbox_usb_bind_all">Використовувати USB драйвер Moonlight для усіх підтриманих контролерів, навіть якщо існує рідна підтримка</string>
+    <string name="title_checkbox_mouse_emulation">Емуляція миші через контролер</string>
+    <string name="summary_checkbox_mouse_emulation">Довге натиснення ґудзика Start, перемкне контролер в режим миші</string>
+    <string name="title_reset_osc">Скинути власне розташування ґудзиків на екрані</string>
+    <string name="summary_reset_osc">Повертає всі екранні елементи керування до їх розташуванням за замовчуванням</string>
+    <string name="dialog_title_reset_osc">Скинути розташування</string>
+    <string name="dialog_text_reset_osc">Ви впевнені що хочете видалити збережене розташування ґудзиків\?</string>
+    <string name="toast_reset_osc_success">Екранні елементи керування повернуті до положень за замовчуванням</string>
+    <string name="title_disable_frame_drop">Ніколи не пропускати кадри</string>
+    <string name="summary_disable_frame_drop">Може зменшити мікрозависання на деяких пристроях але, також збільшити затримку</string>
+    <string name="title_enable_hdr">Увімкнути HDR (Експериментально)</string>
+    <string name="summary_enable_hdr">Транслювати в HDR, якщо це підтримується грою та графічним процесором ПК. Для HDR потрібен графічний процесор із підтримкою кодування HEVC Main 10.</string>
+    <string name="title_checkbox_vibrate_osc">Увімкнути вібрацію</string>
+    <string name="title_fps_list">Частота кадрів</string>
+    <string name="applist_menu_details">Переглянути деталі</string>
+    <string name="applist_menu_scut">Створити ярлик</string>
+    <string name="category_input_settings">Налаштування введення</string>
+    <string name="title_checkbox_touchscreen_trackpad">Використовувати сенсорний екран як пальцевід</string>
+    <string name="summary_checkbox_touchscreen_trackpad">Якщо увімкнено, сенсорний екран працює як ноутбуковий пальцевід. Якщо вимкнено, безпосередньо керує вказівником миші.</string>
+    <string name="delete_pc_msg">Ви впевнені що хочете видалити цей пристрій\?</string>
+    <string name="pcview_menu_details">Переглянути деталі</string>
+    <string name="poor_connection_msg">Слабке з\'єднання з пристроєм</string>
+    <string name="title_details">Деталі</string>
+    <string name="applist_details_id">ID застосунку:</string>
+    <string name="summary_checkbox_vibrate_osc">Вібрація пристрою для емуляції вібровіддачі при екранному управлінні</string>
+    <string name="summary_checkbox_mouse_nav_buttons">Вмикання цієї опції може привести до неправильної роботи правої клавіші миші на деяких пристроях</string>
+    <string name="title_checkbox_flip_face_buttons">Перевернути ґудзики</string>
+    <string name="summary_checkbox_flip_face_buttons">Перемикає ґудзики A/B та X/Y для контролерів та екранних елементів керування</string>
+    <string name="scut_pc_not_found">Пристрій не знайдено</string>
+    <string name="unable_to_pin_shortcut">Поточний запускач не дозволяє створювати закріплені ярлики.</string>
+    <string name="title_checkbox_mouse_nav_buttons">Увімкнути ґудзики «вперед» та «назад» для миші</string>
+    <string name="slow_connection_msg">Повільне підключення
+\nЗменшіть швидкість потоку</string>
+    <string name="perf_overlay_decoder">Розцифрувач: %1$s</string>
+    <string name="perf_overlay_incomingfps">Вхідна частота кадрів з мережі: %1$.2f FPS</string>
+    <string name="perf_overlay_renderingfps">Частота кадрів при відтворенні: %1$.2f FPS</string>
+    <string name="perf_overlay_netdrops">Кадри втрачені вашою мережею: %1$.2f%%</string>
+    <string name="perf_overlay_dectime">Середній час розцифрування: %1$.2f мс</string>
+    <string name="summary_fps_list">Збільшіть для плавнішого відео потоку. Зменшіть для кращої продуктивності на повільних пристроях.</string>
+    <string name="scut_invalid_uuid">Зазначений пристрій недійсний</string>
+    <string name="scut_invalid_app_id">Зазначений застосунок недійсний</string>
+    <string name="summary_osc_opacity">Зробити екранні елементи керування більш/менш прозорими</string>
+    <string name="dialog_title_osc_opacity">Зміна прозорості</string>
+    <string name="suffix_osc_opacity">%</string>
+    <string name="title_enable_post_stream_toast">Статистика затримки після трансляції</string>
+    <string name="summary_enable_post_stream_toast">Показувати статистику затримки після закінчення трансляції</string>
+    <string name="early_termination_error">Щось пішло не так на вашому головному ПК під час запуску потоку.
+\n
+\nПереконайтеся, що на головному ПК немає відкритого вмісту, захищеного DRM. Ви також можете спробувати перезавантажити головний ПК.</string>
+    <string name="nettest_text_success">Схоже що ваша мережа не блокує Moonlight. Якщо у вас й надалі проблеми з підключенням, перевірте налаштування брандмауера.
+\n
+\nЯкщо ви намагаєтеся транслювати через Інтернет, встановіть на своєму пристрої Moonlight Internet Hosting Tool, та запустіть випробування мережі щоб перевірити ваше з\'єднання до Інтернету.</string>
+    <string name="resolution_prefix_native">Рідна</string>
+    <string name="suffix_seekbar_bitrate_mbps">Мб/с</string>
+    <string name="text_native_res_dialog">Власна роздільна здатність і/або FPS можуть не підтримуватися потоковим сервером. Ймовірно, вам доведеться вручну налаштувати відповідний спеціальний режим відображення для головного ПК.
+\n
+\nЯкщо ви вирішили вказати спеціальну роздільну здатність на панелі керування NVIDIA відповідно до налаштувань екрана, переконайтеся, що ви прочитали та зрозуміли попередження NVIDIA щодо можливого пошкодження монітора, нестабільної роботи ПК та інших потенційних проблем.
+\n
+\nМи не несемо відповідальності за будь-які проблеми, що виникли в результаті встановлення власної роздільної здатності на вашому ПК.
+\n
+\nМожливо, ваш монітор не підтримує необхідну конфігурацію дисплея. Якщо так, ви можете спробувати налаштувати віртуальний монітор. Врешті-решт, якщо ваш пристрій або хост-комп’ютер не підтримує потокове передавання з певною роздільною здатністю чи частотою оновлення, вам, на жаль, не пощастило.</string>
+    <string name="title_native_res_dialog">Застереження про рідну роздільну здатність</string>
+    <string name="applist_menu_hide_app">Сховати застосунок</string>
+    <string name="perf_overlay_netlatency">Середня затримка мережі: %1$d мс (розбіжність %2$d мс)</string>
+    <string name="perf_overlay_streamdetails">Відео трансл: %1$s %2$.2f FPS</string>
+    <string name="check_ports_msg">Перевірте правила брандмауера та переадресації для наступних портів:</string>
+    <string name="no_frame_received_error">Здається, ваше мережеве з\'єднання човпає. Спробуйте зменшити швидкість потоку (бітрейт) чи переключіть пристрій на швидшу мережу.</string>
+    <string name="no_video_received_error">Не отримано відео від хоста.</string>
+    <string name="video_decoder_init_failed">Не вдалося запустити відео розцифрувач. Ваш пристрій може не підтримувати розмір екрану чи частоту кадрів.</string>
+    <string name="nettest_text_blocked">Поточне мережеве з’єднання вашого пристрою блокує Moonlight. Трансляції через Інтернет можуть не працювати на цієї мережі.</string>
+    <string name="nettest_text_failure">Поточне мережеве з’єднання вашого пристрою блокує Moonlight. Трансляції через Інтернет можуть не працювати на цієї мережі.
+\n
+\nНаступні мережеві порти були заблоковані:
+\n</string>
+    <string name="nettest_text_inconclusive">Не вдалося перевірити мережу, тому що усі мережо-перевірочні сервери Moonlight недосяжні. Перевірте ваше з\'єднання з інтернетом та спробуйте знову.</string>
+    <string name="nettest_title_done">Перевірка мережі завершена</string>
+    <string name="nettest_text_waiting">Moonlight перевіряє ваше мережеве з’єднання, щоб визначити, чи заблоковані необхідні порти.
+\n
+\nЦе може зайняти кілька секунд…</string>
+    <string name="nettest_title_waiting">Перевіряємо з\'єднання</string>
+    <string name="pcview_menu_test_network">Перевірити мережеве з\'єднання</string>
+    <string name="pcview_menu_header_unknown">Оновлення</string>
+    <string name="pcview_menu_header_offline">Поза мережею</string>
+    <string name="pcview_menu_header_online">В мережі</string>
+    <!-- Array strings -->
+    <string name="videoformat_auto">Автоматичний (рекомендовано)</string>
+    <string name="videoformat_hevcalways">Використовувати HEVC</string>
+    <string name="title_frame_pacing">Швидкість кадрів відео</string>
+    <string name="summary_frame_pacing">Виберіть ритм відеокадрів. Точний ритм може використовувати часові мітки відео (PTS) і рекомендований для більшості пристроїв.</string>
+    <string name="pacing_latency">Низька затримка (швидша реакція)</string>
+    <string name="pacing_precise_sync">Точний ритм кадрів (рекомендовано)</string>
+    <string name="pacing_experimental_low_latency">Наднизька затримка (експериментально)</string>
+    <string name="pacing_smoothness">Плавність понад усе (більша затримка)</string>
+    <string name="pacing_balanced">Збалансовано (затримка й плавність)</string>
+    <string name="resolution_360p">360p</string>
+    <string name="resolution_480p">480p</string>
+    <string name="resolution_720p">720p</string>
+    <string name="resolution_1080p">1080p</string>
+    <string name="resolution_1440p">1440p</string>
+    <string name="resolution_4k">4K</string>
+    <string name="audioconf_stereo">Стерео</string>
+    <string name="audioconf_51surround">5.1 Об\'ємний Звук</string>
+    <string name="audioconf_71surround">7.1 Об\'ємний Звук</string>
+    <string name="summary_checkbox_enable_audiofx">Дозволяє аудіоефектам функціонувати під час потокового передавання, але може збільшити затримку звуку</string>
+    <string name="title_troubleshooting">Гайд з усунення несправностей</string>
+    <string name="title_privacy_policy">Політика конфіденційності</string>
+    <string name="summary_troubleshooting">Переглянути поради щодо діагностики та усунення поширених проблем з потоковою передачею</string>
+    <string name="summary_checkbox_reduce_refresh_rate">Більш низька частота оновлення дисплея може заощадити енергію за рахунок деякої додаткової затримки відео</string>
+    <string name="summary_seekbar_deadzone">Примітка: Деякі ігри можуть встановлювати більшу мертву зону, ніж та, на яку налаштовано Moonlight.</string>
+    <string name="title_checkbox_absolute_mouse_mode">Режим миші віддаленого робочого столу</string>
+    <string name="title_setup_guide">Гайд по налаштуванню</string>
+    <string name="summary_setup_guide">Переглянути інструкцію, як налаштувати ігровий ПК для стрімінгу</string>
+    <string name="pacing_balanced_alt">Обмежити вихідний FPS (до частоти оновлення екрана)</string>
+    <string name="title_checkbox_enable_audiofx">Увімкнення підтримки системного еквалайзера</string>
+    <string name="summary_checkbox_absolute_mouse_mode">Це може зробити прискорення миші більш природним під час використання віддаленого робочого столу, але воно несумісне з багатьма іграми.</string>
+    <string name="title_checkbox_reduce_refresh_rate">Дозволити зниження частоти оновлення</string>
+    <string name="category_help">Допомога</string>
+    <string name="summary_privacy_policy">Переглянути політику конфіденційності Moonlight</string>
+    <string name="frame_conversion_error">Головний комп\'ютер повідомив про фатальну помилку кодування відео.
+\n
+\nСпробуйте вимкнути режим HDR, змінити роздільну здатність потокового відео або змінити роздільну здатність дисплея головного комп\'ютера.</string>
+    <string name="title_full_range">Сила повного спектру відео (експериментальна)</string>
+    <string name="summary_full_range">Це може призвести до втрати деталей у світлих і темних областях, якщо пристрій не відображає належним чином весь діапазон відеоконтенту.</string>
+    <string name="pair_pairing_help">Якщо на вашому комп’ютері встановлений Sunshine, перейдіть до веб-інтерфейсу користувача Sunshine, щоб ввести PIN-код.</string>
+    <string name="error_code_prefix">Код помилки:</string>
+    <string name="title_seekbar_vibrate_fallback_strength">Налаштування інтенсивності вібро</string>
+    <string name="summary_seekbar_vibrate_fallback_strength">Посилюйте або зменшуйте інтенсивність вібрації пристрою</string>
+    <string name="title_checkbox_gamepad_motion_fallback">Емуляція підтримки датчика руху геймпада</string>
+    <string name="videoformat_av1always">Використовувати AV1 (експериментальний)</string>
+    <string name="videoformat_h264always">Використовувати H.264</string>
+    <string name="fps_suffix_fps">FPS</string>
+    <string name="category_gamepad_settings">Налаштування геймпада</string>
+    <string name="title_analog_scrolling">Використовувати аналоговий стік для прокручування</string>
+    <string name="summary_analog_scrolling">Виберіть аналоговий стік для прокручування під час режиму емуляції миші</string>
+    <string name="analogscroll_none">Немає (обидва стіка пересувають мишу)</string>
+    <string name="analogscroll_right">Аналоговий стік праворуч</string>
+    <string name="analogscroll_left">Аналоговий стік ліворуч</string>
+    <string name="suffix_seekbar_vibrate_fallback_strength">%</string>
+    <string name="title_checkbox_gamepad_touchpad_as_mouse">Завжди керувати мишею за допомогою сенсорної панелі</string>
+    <string name="summary_checkbox_gamepad_touchpad_as_mouse">Примусове використання сенсорної панелі геймпада для керування основною мишею, навіть якщо емулюється геймпад із сенсорною панеллю.</string>
+    <string name="title_checkbox_gamepad_motion_sensors">Дозволити використовувати датчики руху геймпада</string>
+    <string name="summary_checkbox_gamepad_motion_sensors">Дозволяє підтримуваним хостам запитувати дані датчиків руху під час емуляції геймпада з датчиками руху. Якщо в грі не використовуються датчики руху, вимкнення може дещо зменшити енергоспоживання та використання мережі.</string>
+    <string name="summary_checkbox_gamepad_motion_fallback">Використовує вбудовані датчики руху вашого пристрою, якщо датчики геймпада не підтримуються підключеним геймпадом або вашою версією Android.
+\nПримітка. Якщо ввімкнути цей параметр, ваш геймпад може відображатися як контролер PlayStation на хості.</string>
+    <string name="toast_controller_type_changed">Тип геймпада може бути змінений через емуляцію датчика руху</string>
+    <string name="pcview_menu_eol">Закриття сервісів NVIDIA GameStream</string>
+    <string name="perf_overlay_hostprocessinglatency">Затримка обробки хостом мін./макс./середня: %1$.1f/%2$.1f/%3$.1f мс</string>
+    <string name="title_screen_combination_mode">Комбінація екранів</string>
+    <string name="summary_screen_combination_mode">Керування дисплеями Foundation Sunshine</string>
+    <string name="screen_combination_mode_dialog_subtitle">Застосовується до керування дисплеями Foundation Sunshine</string>
+    <string name="screen_mode_host_default">Слідувати хосту</string>
+    <string name="screen_mode_no_operation">Режим без операції</string>
+    <string name="screen_mode_auto_activate">Режим активації</string>
+    <string name="screen_mode_primary_streaming">Режим стримінгу з основного дисплея</string>
+    <string name="screen_mode_secondary_streaming">Режим стримінгу з вторинного дисплея</string>
+    <string name="screen_mode_exclusive_streaming">Режим ексклюзивного стримінгу дисплея</string>
+    <string name="screen_mode_host_default_desc">Використовує налаштування хоста Sunshine без його перевизначення.</string>
+    <string name="screen_mode_no_operation_desc">Зберігає поточну конфігурацію дисплеїв.</string>
+    <string name="screen_mode_auto_activate_desc">Активує вибраний дисплей для стримінгу.</string>
+    <string name="screen_mode_primary_streaming_desc">Активує вибраний дисплей і робить його основним.</string>
+    <string name="screen_mode_secondary_streaming_desc">Залишає фізичний дисплей основним і використовує дисплей Foundation як вторинний.</string>
+    <string name="screen_mode_exclusive_streaming_desc">Використовує лише вибраний дисплей і вимикає інші дисплеї.</string>
+    <string name="title_config_sync_backup_password">Пароль шифрування резервної копії</string>
+    <string name="title_document_handbook">Документація</string>
+    <string name="summary_document_handbook">Переглянути пов’язану документацію</string>
+    <string name="title_about_us">Про нас</string>
+    <string name="title_checkbox_mic_volume_processing">Обробка гучності мікрофона</string>
+    <string name="summary_checkbox_mic_volume_processing">Налаштуйте гучність мікрофона перед надсиланням на хост. Фіксоване підсилення й балансування гучності взаємовиключні.</string>
+    <string name="title_checkbox_mic_gain">Підсилення гучності</string>
+    <string name="summary_checkbox_mic_gain">Змінюйте гучність мікрофона на фіксовану величину. Додатні значення підсилюють звук, а від’ємні послаблюють його.</string>
+    <string name="title_seekbar_mic_gain">Підсилення</string>
+    <string name="summary_seekbar_mic_gain">Установіть фіксоване підсилення. 0 dB зберігає початкову гучність і розташоване посередині повзунка.</string>
+    <string name="suffix_seekbar_mic_gain_db">dB</string>
+    <string name="title_checkbox_mic_balance">Балансування гучності</string>
+    <string name="summary_checkbox_mic_balance">Стискає гучний вхідний сигнал, щоб зменшити коливання гучності та ризик перевантаження.</string>
+    <string name="title_seekbar_mic_balance">Компенсація виходу</string>
+    <string name="summary_seekbar_mic_balance" formatted="false">Установіть компенсаційне підсилення після балансування гучності. 50% відповідає +4 dB і є рекомендованим значенням.</string>
+    <string name="suffix_seekbar_mic_balance_target" formatted="false">%</string>
+    <string name="title_checkbox_mic_voice_enhancement">Покращення голосу</string>
+    <string name="summary_checkbox_mic_voice_enhancement">Зменшує низькочастотний шум і покращує чіткість мовлення. Доступне з фіксованим підсиленням і балансуванням гучності.</string>
+    <string name="title_pyrowave_capability_diagnostic">Перевірка можливостей PyroWave</string>
+    <string name="summary_pyrowave_capability_diagnostic">Перегляд можливостей Vulkan і вимог поточного декодера PyroWave.</string>
+    <string name="pyrowave_diag_loading">Перевірка можливостей PyroWave…</string>
+    <string name="pyrowave_diag_runtime">API вбудованої бібліотеки PyroWave</string>
+    <string name="pyrowave_diag_gpu_frontend">Модуль виведення через GPU</string>
+    <string name="pyrowave_diag_gpu_gate">Виведення через GPU потребує Android 10+, arm64-v8a та Vulkan 1.3. Резервний шлях SDR потребує Vulkan 1.2 і наведених нижче функцій декодера; це не декодування лише на CPU.</string>
+    <string name="pyrowave_diag_ready">Перевірені базові вимоги виконано</string>
+    <string name="pyrowave_diag_missing">Базові вимоги поточної реалізації не виконано</string>
+    <string name="pyrowave_diag_scope">Цей звіт перевіряє лише можливості, заявлені драйвером. Виведення у вікно, формати зображень, цільова роздільна здатність, вихід HDR і продуктивність декодування ще потребують перевірки під час трансляції.</string>
+    <string name="pyrowave_diag_loader_missing">Завантажувач Vulkan недоступний</string>
+    <string name="pyrowave_diag_no_devices">Фізичний пристрій Vulkan не знайдено</string>
+    <string name="pyrowave_diag_query_failed">Не вдалося прочитати можливості Vulkan. Це не підтверджує відсутність підтримки.</string>
+    <string name="pyrowave_diag_storage_path">8-бітне сховище або великі тексельні буфери</string>
+    <string name="pyrowave_diag_gpu_backend">Базові вимоги виведення через GPU</string>
+    <string name="pyrowave_diag_staging_backend">Базові вимоги резервного шляху SDR</string>
+    <string name="pyrowave_diag_subgroup_range">Повні обчислювальні підгрупи в межах wave4–wave128</string>
+    <string name="pyrowave_diag_max_workgroup">Потоків у робочій групі</string>
+    <string name="pyrowave_diag_shared_memory">Спільна пам’ять робочої групи</string>
+    <string name="pyrowave_diag_queue">Спільна черга графіки та обчислень</string>
+    <string name="pyrowave_diag_android_surface">Розширення Vulkan Surface для Android</string>
+    <string name="pyrowave_diag_copy_failed">Не вдалося скопіювати звіт</string>
+    <string name="pyrowave_diag_present">Є</string>
+    <string name="pyrowave_diag_absent">Немає</string>
+    <string name="pyrowave_diag_vulkan_loader">Завантажувач Vulkan</string>
+    <string name="pyrowave_diag_subgroup_ops">Операції підгруп</string>
+    <string name="pyrowave_diag_subgroup_size">Розмір підгрупи</string>
+    <string name="pyrowave_diag_subgroup_limits">Мін. / макс. розмір підгрупи</string>
+    <string name="pyrowave_diag_required_subgroup">Потрібні операції підгруп</string>
+    <string name="pyrowave_diag_texel_limit">Максимум елементів тексельного буфера</string>
+    <string name="pyrowave_diag_back">Назад</string>
+    <string name="pyrowave_diag_copy">Копіювати</string>
+    <string name="pyrowave_diag_copy_success">Звіт скопійовано до буфера обміну</string>
+    <string name="pyrowave_diag_unavailable">Не вдалося отримати</string>
+    <string name="image_saved_successfully">Зображення успішно збережено в: Pictures/vplus</string>
+    <string name="image_save_failed_with_error">Не вдалося зберегти зображення: %1$s</string>
+    <string name="tip_double_tap_mouse">Порада: натисніть і утримуйте порожню область угорі списку комп\'ютерів, щоб зберегти поточне фонове зображення.</string>
+    <string name="pyrowave_negotiation_fallback">Не вдалося узгодити PyroWave. Перехід на %1$s.</string>
+    <string name="title_list_mouse_axis_correction">Корекція напрямку миші</string>
+    <string name="summary_list_mouse_axis_correction">Повертати зафіксований рух миші перед надсиланням на хост. Змінюйте це лише якщо пристрій Android повідомляє про повернуті осі миші.</string>
+    <string name="mouse_axis_correction_off">Вимкнено</string>
+    <string name="mouse_axis_correction_90">Повернути на 90 градусів</string>
+    <string name="mouse_axis_correction_180">Повернути на 180 градусів</string>
+    <string name="mouse_axis_correction_270">Повернути на 270 градусів</string>
+    <string name="summary_checkbox_reverse_resolution">Вмикайте лише якщо орієнтація або розміри зображення неправильні; може конфліктувати з поворотом відповідно до орієнтації пристрою.</string>
+    <string name="summary_checkbox_rotable_screen">Автоматично синхронізує макет трансляції, коли пристрій перемикається між книжковою та альбомною орієнтацією.</string>
+    <string name="layout_page_device_text_1a70f">Перемикач дотиків</string>
+    <string name="game_menu_perf_metrics">Показники для відображення</string>
+    <string name="game_menu_perf_health">Індикатор стану трансляції</string>
+    <string name="game_menu_perf_health_summary">Показувати загальний стан</string>
+    <string name="game_menu_perf_single_tap">Один дотик для зміни стилю</string>
+    <string name="game_menu_perf_double_tap">Подвійний дотик для зміни компонування</string>
+    <string name="game_menu_perf_long_press">Утримуйте, щоб переглянути пояснення показників</string>
+    <string name="game_menu_perf_metric_summary">Стиль «Міні» показує фіксований набір показників.</string>
+    <string name="game_menu_perf_orientation_fixed">Цей стиль використовує фіксоване компонування. Вибрана орієнтація застосовується після переходу на стандартний стиль.</string>
+    <string name="game_menu_perf_orientation_docked">Вибрана орієнтація застосовується після виходу із закріпленого компонування.</string>
+    <string name="game_menu_perf_fixed_layout">Фіксоване компонування</string>
+    <string name="game_menu_perf_docked_layout">Закріплено</string>
+    <string name="game_menu_perf_orientation_portrait">У книжковій орієнтації компонування завжди вертикальне.</string>
+    <string name="perf_sheet_previous_page">Попередня сторінка</string>
+    <string name="perf_sheet_next_page">Наступна сторінка</string>
+    <string name="perf_sheet_settings">Налаштування</string>
+    <string name="game_menu_perf_position">Швидке розміщення</string>
+    <string name="game_menu_perf_position_reset">Скинути положення</string>
+    <string name="perf_overlay_anchor_top_left">Згори ліворуч</string>
+    <string name="perf_overlay_anchor_top_center">Згори по центру</string>
+    <string name="perf_overlay_anchor_top_right">Згори праворуч</string>
+    <string name="perf_overlay_anchor_center_left">Зліва по центру</string>
+    <string name="perf_overlay_anchor_center">По центру</string>
+    <string name="perf_overlay_anchor_center_right">Справа по центру</string>
+    <string name="perf_overlay_anchor_bottom_left">Знизу ліворуч</string>
+    <string name="perf_overlay_anchor_bottom_center">Знизу по центру</string>
+    <string name="perf_overlay_anchor_bottom_right">Знизу праворуч</string>
+</resources>

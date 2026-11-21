@@ -1,0 +1,15 @@
+[Unit]
+Description=SunAndMon virtual 1080p display on unused Intel HDMI
+Wants=sys-kernel-debug.mount
+After=sys-kernel-debug.mount
+Before=display-manager.service sunandmon-desktop.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/libexec/sunandmon-virtual-display start
+ExecStop=/usr/local/libexec/sunandmon-virtual-display stop
+TimeoutStartSec=35
+
+[Install]
+WantedBy=graphical.target

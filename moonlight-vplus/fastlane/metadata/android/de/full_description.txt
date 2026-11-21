@@ -1,0 +1,20 @@
+Moonlight V+ ist ein erweiterter Android-Client für Spiele- und Desktop-Streaming. Als Host empfehlen wir Foundation Sunshine, das zu Moonlight V+ passt. Standard-Streaming funktioniert auch mit Sunshine. Bild und Ton werden auf dein Android-Gerät übertragen; Eingaben von Touchscreen, Tastatur, Maus oder Controller gehen an den PC.
+
+Funktionen:
+* Benutzerdefinierte Auflösungen und hohe Bildwiederholraten, sofern Host und Gerät sie unterstützen
+* H.264, HEVC und AV1 je nach Hardware und Host
+* HDR auf geeigneten Geräten
+* Bildschirmtasten, Touchpad-Modus und Controller-Unterstützung
+* Leistungsanzeige mit Bildrate, Bitrate und Latenz
+* Profile für verschiedene Streaming-Situationen
+* Mikrofonweiterleitung mit Foundation Sunshine 2025.0720 oder neuer
+
+Schnellstart:
+1. Foundation Sunshine auf dem PC installieren und die Einrichtung in der Weboberfläche abschließen.
+2. PC und Android-Gerät möglichst mit demselben lokalen Netzwerk verbinden.
+3. Den PC in Moonlight V+ auswählen und die angezeigte PIN in der Weboberfläche des Hosts eingeben.
+4. Zuerst 1080p bei 60 FPS mit H.264 und ohne HDR testen. Danach Auflösung, Bildrate und weitere Funktionen schrittweise erhöhen.
+
+Foundation Sunshine wird für neue Einrichtungen empfohlen. Standard-Sunshine und bestehende NVIDIA-GameStream-Installationen können für Standard-Streaming weiterhin funktionieren. Erweiterte V+-Funktionen benötigen einen Host, der das jeweilige Protokoll unterstützt.
+
+Hilfe und aktuelle Anforderungen: https://github.com/qiin2333/moonlight-vplus/blob/master/README_EN.md

@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>节点管理 · SunAndMon</title>
+  <link rel="stylesheet" href="./app.css">
+  <script src="./app.js" defer></script>
+</head>
+<body>
+  <header class="masthead">
+    <div class="wrap topbar">
+      <span class="wordmark"><span class="mark" aria-hidden="true"></span>SunAndMon</span>
+      <button type="button" id="sign-out" class="quiet" hidden>退出管理</button>
+    </div>
+  </header>
+  <main class="wrap">
+    <header class="page-title">
+      <h1>节点管理</h1>
+      <button type="button" id="refresh" hidden>刷新</button>
+    </header>
+    <p id="status" class="status" role="status" hidden></p>
+    <section id="gate" aria-label="管理员登录">
+      <form id="login" class="surface gate">
+        <label for="key">管理员密钥</label>
+        <div class="login-row">
+          <input id="key" type="password" required maxlength="64" minlength="64"
+                 pattern="[0-9a-f]{64}" spellcheck="false" autocomplete="off">
+          <button type="submit" class="primary">进入管理</button>
+        </div>
+      </form>
+    </section>
+    <section id="directory" aria-label="中心节点" hidden>
+      <div class="directory-bar">
+        <div class="filters" aria-label="筛选节点">
+          <button type="button" id="active-filter" aria-pressed="true">已登记 <span id="active-count">0</span></button>
+          <button type="button" id="deleted-filter" aria-pressed="false">已删除 <span id="deleted-count">0</span></button>
+        </div>
+        <input id="query" type="search" placeholder="查找名称、IP 或 ID" aria-label="查找节点">
+      </div>
+      <div class="surface node-list">
+        <table>
+          <thead><tr><th scope="col">节点</th><th scope="col">连接地址</th><th scope="col">状态</th><th scope="col">操作</th></tr></thead>
+          <tbody id="nodes"></tbody>
+        </table>
+        <p id="empty" class="empty" hidden></p>
+      </div>
+    </section>
+  </main>
+  <dialog id="edit" aria-labelledby="edit-title">
+    <form id="edit-form">
+      <div class="dialog-body">
+        <h2 id="edit-title">编辑节点</h2>
+        <p id="edit-id" class="id"></p>
+        <p class="hint">留空的项目使用主机上报的值。</p>
+        <label>显示名称 <input name="name" maxlength="100"></label>
+        <label>连接 IP <textarea name="addresses" rows="3" spellcheck="false"></textarea></label>
+        <small class="hint">每行一个 IPv4 或 IPv6 地址。</small>
+        <div class="ports">
+          <label>HTTP 端口 <input name="port" type="number" min="1" max="65535" step="1"></label>
+          <label>HTTPS 端口 <input name="httpsPort" type="number" min="1" max="65535" step="1"></label>
+        </div>
+        <p class="error" role="alert" hidden></p>
+      </div>
+      <div class="dialog-actions">
+        <button type="button" data-close>取消</button>
+        <button type="submit" class="primary">保存</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="remove" aria-labelledby="remove-title">
+    <form id="remove-form">
+      <div class="dialog-body">
+        <h2 id="remove-title">删除节点</h2>
+        <p id="remove-name"></p>
+        <p class="hint">节点将从中心列表移除。允许重新登记前，中心会拒绝该节点的登记请求。</p>
+        <p class="error" role="alert" hidden></p>
+      </div>
+      <div class="dialog-actions">
+        <button type="button" data-close autofocus>取消</button>
+        <button type="submit" class="danger">删除节点</button>
+      </div>
+    </form>
+  </dialog>
+</body>
+</html>

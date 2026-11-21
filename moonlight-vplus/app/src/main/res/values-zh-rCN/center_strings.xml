@@ -1,0 +1,37 @@
+<resources>
+    <string name="center_devices">中心设备</string>
+    <string name="center_url">中心服务器网址</string>
+    <string name="center_key">访问密钥</string>
+    <string name="center_sign_in">登录</string>
+    <string name="center_sign_out">退出登录</string>
+    <string name="center_login_failed">登录失败，请检查 HTTPS 网址和访问密钥。</string>
+    <string name="center_list_failed">无法获取中心设备列表。</string>
+    <string name="center_empty">请在已登录此中心的电脑上开启被控。</string>
+    <string name="center_device_online">%1$s · 在线</string>
+    <string name="center_device_offline">%1$s · 离线</string>
+    <string name="center_offline">此设备已离线。</string>
+    <string name="center_connecting">正在连接主机…</string>
+    <string name="center_connect_failed">无法连接，请检查主机网络和对此控制端的授权。</string>
+    <string name="center_my_devices">我的设备</string>
+    <string name="center_refresh">刷新</string>
+    <string name="center_server">中心服务器</string>
+    <string name="center_connected">已连接</string>
+    <string name="center_loading">正在获取设备…</string>
+    <string name="center_sign_in_hint">登录中心后即可查看已登记的设备。</string>
+    <string name="center_all_devices">全部设备</string>
+    <string name="center_online">在线</string>
+    <string name="center_offline_short">离线</string>
+    <string name="center_local_network">局域网设备</string>
+    <string name="center_nav_devices">设备</string>
+    <string name="center_nav_center">中心</string>
+    <string name="center_settings">设置</string>
+    <string name="center_remote_desktop">远程桌面</string>
+    <string name="center_connect_desktop">连接桌面</string>
+    <string name="center_common_actions">常用操作</string>
+    <string name="center_app_list">应用列表</string>
+    <string name="center_stream_settings">串流设置</string>
+    <string name="center_device_options">设备操作</string>
+    <plurals name="center_online_count">
+        <item quantity="other">%d 台在线</item>
+    </plurals>
+</resources>

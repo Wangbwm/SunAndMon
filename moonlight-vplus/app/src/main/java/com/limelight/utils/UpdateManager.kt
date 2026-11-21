@@ -1,0 +1,1583 @@
+@file:Suppress("DEPRECATION")
+package com.limelight.utils
+
+import android.annotation.SuppressLint
+import android.app.Activity
+import android.app.AlertDialog
+import android.app.DownloadManager
+import android.content.Context
+import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
+import android.net.Proxy
+import android.net.Uri
+import android.os.Build
+import android.os.Environment
+import android.os.Handler
+import android.os.Looper
+import android.provider.Settings
+import android.text.method.LinkMovementMethod
+import android.util.Log
+import android.view.LayoutInflater
+import android.view.View
+import android.view.ViewGroup
+import android.view.WindowManager
+import android.widget.ProgressBar
+import android.widget.ScrollView
+import android.widget.TextView
+import android.widget.Toast
+
+import androidx.annotation.RequiresApi
+import androidx.core.os.ConfigurationCompat
+
+import com.limelight.R
+import com.limelight.handbook.HandbookLauncher
+
+import java.io.BufferedReader
+import java.io.File
+import java.lang.ref.WeakReference
+import java.io.InputStreamReader
+import java.net.HttpURLConnection
+import java.net.URL
+import java.security.MessageDigest
+import java.util.Locale
+import java.util.regex.Pattern
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
+import androidx.core.content.edit
+import androidx.core.net.toUri
+import com.limelight.utils.UiHelper
+
+object UpdateManager {
+    private const val TAG = "UpdateManager"
+    private const val UPDATE_CHECK_INTERVAL = 4 * 60 * 60 * 1000L
+
+    // 仅用于设置页远程背景图，不参与版本检查或 APK 下载。
+    private const val PROXY_DISCOVERY_URL = "https://ghproxy.link/js/src_views_home_HomeView_vue.js"
+
+    // 远程背景图的备用代理前缀。版本更新按语言选择 CNB 或 GitHub，不走这里。
+    @Volatile
+    private var PROXY_PREFIXES: Array<String> = emptyArray()
+
+    private val isChecking = AtomicBoolean(false)
+    private val executor: ExecutorService = Executors.newSingleThreadExecutor()
+    private val downloadExecutor: ExecutorService = Executors.newSingleThreadExecutor()
+    private val mainHandler by lazy { Handler(Looper.getMainLooper()) }
+    private val downloadCompletionLock = Any()
+
+    // 代理缓存相关
+    private const val PROXY_CACHE_DURATION = 24 * 60 * 60 * 1000L // 24小时
+    private const val PREF_LAST_PROXY_UPDATE_TIME = "last_proxy_update_time"
+
+    // SharedPreferences 中存储下载信息的 key
+    private const val PREF_DOWNLOAD_ID = "update_download_id"
+    private const val PREF_DOWNLOAD_APK_NAME = "update_download_apk_name"
+    private const val PREF_DOWNLOAD_CANDIDATES = "update_download_candidates"
+    private const val PREF_DOWNLOAD_CANDIDATE_INDEX = "update_download_candidate_index"
+    // 预期 SHA256（来自 metadata 或 release body），下载完成后用于完整性校验
+    private const val PREF_DOWNLOAD_SHA256 = "update_download_sha256"
+    private const val PREF_DOWNLOAD_EXPECTED_SIZE = "update_download_expected_size"
+    // 用户主动跳过的版本：同名版本下次启动检查不弹对话框（手动检查仍会弹）
+    private const val PREF_SKIPPED_VERSION = "update_skipped_version"
+
+    // 安装权限请求码（供 Activity 的 onActivityResult 使用）
+    const val INSTALL_PERMISSION_REQUEST_CODE = 9527
+
+    // 等待安装权限授予后再执行下载的暂存信息
+    @Volatile
+    private var pendingUpdateInfo: UpdateInfo? = null
+
+    // 下载进度轮询间隔
+    private const val PROGRESS_POLL_INTERVAL_MS = 300L
+
+    // 当前进度对话框与 handler（用于在 Activity 销毁时清理）
+    private var currentProgressDialog: AlertDialog? = null
+    private var progressHandler: Handler? = null
+    private var progressRunnable: Runnable? = null
+
+    // ------------------------------------------------------------------
+    // 公开 API
+    // ------------------------------------------------------------------
+
+    fun checkForUpdates(context: Context, showToast: Boolean) {
+        enqueueUpdateCheck(context, showToast, enforceStartupInterval = false)
+    }
+
+    private fun enqueueUpdateCheck(
+        context: Context,
+        showToast: Boolean,
+        enforceStartupInterval: Boolean
+    ) {
+        if (isChecking.getAndSet(true)) {
+            // 连点防抖：手动检查时反馈 toast，避免用户以为点了没反应
+            if (showToast) {
+                Toast.makeText(context, context.getString(R.string.toast_check_update_in_progress), Toast.LENGTH_SHORT).show()
+            }
+            return
+        }
+        val activityReference = (context as? Activity)?.let(::WeakReference)
+        try {
+            executor.execute(
+                UpdateCheckTask(
+                    appContext = context.applicationContext,
+                    activityReference = activityReference,
+                    showToast = showToast,
+                    enforceStartupInterval = enforceStartupInterval
+                )
+            )
+        } catch (e: RuntimeException) {
+            isChecking.set(false)
+            Log.e(TAG, "无法启动更新检查", e)
+            if (showToast) {
+                Toast.makeText(context, context.getString(R.string.toast_check_update_failed), Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    fun checkForUpdatesOnStartup(context: Context) {
+        enqueueUpdateCheck(context, showToast = false, enforceStartupInterval = true)
+    }
+
+    /**
+     * 当用户在系统设置中授予安装权限后由 Activity.onActivityResult 调用。
+     * 如果之前有暂存的更新信息且权限已授予，则自动开始下载。
+     */
+    fun onInstallPermissionResult(context: Context) {
+        if (pendingUpdateInfo != null && canInstallApk(context)) {
+            val info = pendingUpdateInfo
+            pendingUpdateInfo = null
+            startDirectDownload(context, info!!)
+        } else if (pendingUpdateInfo != null) {
+            pendingUpdateInfo = null
+            Toast.makeText(context, context.getString(R.string.toast_install_permission_denied), Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    /**
+     * 由 [UpdateDownloadReceiver] 在下载完成时调用。
+     * 也会由应用内进度轮询在检测到完成时调用。
+     */
+    fun onDownloadComplete(
+        context: Context,
+        completedDownloadId: Long,
+        onFinished: (() -> Unit)? = null
+    ) {
+        val appContext = context.applicationContext
+        val completion = synchronized(downloadCompletionLock) {
+            val prefs = appContext.getSharedPreferences("update_prefs", Context.MODE_PRIVATE)
+            val savedDownloadId = prefs.getLong(PREF_DOWNLOAD_ID, -1)
+            if (savedDownloadId == -1L || savedDownloadId != completedDownloadId) {
+                null
+            } else {
+                val info = DownloadCompletionInfo(
+                    apkName = prefs.getString(PREF_DOWNLOAD_APK_NAME, "update.apk") ?: "update.apk",
+                    expectedSha256 = prefs.getString(PREF_DOWNLOAD_SHA256, null),
+                    expectedSize = prefs.getLong(PREF_DOWNLOAD_EXPECTED_SIZE, -1L),
+                    candidates = splitStrings(prefs.getString(PREF_DOWNLOAD_CANDIDATES, null)),
+                    candidateIndex = prefs.getInt(PREF_DOWNLOAD_CANDIDATE_INDEX, 0)
+                )
+                // Claim the completion before leaving the lock. The receiver and the
+                // in-app progress poll can observe the same DownloadManager event.
+                prefs.edit {
+                    remove(PREF_DOWNLOAD_ID)
+                        .remove(PREF_DOWNLOAD_APK_NAME)
+                        .remove(PREF_DOWNLOAD_SHA256)
+                        .remove(PREF_DOWNLOAD_EXPECTED_SIZE)
+                        .remove(PREF_DOWNLOAD_CANDIDATES)
+                        .remove(PREF_DOWNLOAD_CANDIDATE_INDEX)
+                }
+                info
+            }
+        }
+
+        if (completion == null) {
+            onFinished?.invoke()
+            return
+        }
+
+        try {
+            downloadExecutor.execute {
+                try {
+                    processDownloadCompletion(appContext, completedDownloadId, completion)
+                } catch (e: Exception) {
+                    // A completion-time provider or DownloadManager failure must not
+                    // escape the executor thread. The download is considered failed.
+                    Log.e(TAG, "更新下载处理失败", e)
+                    postDownloadToast(appContext, R.string.toast_download_failed_try_browser)
+                } finally {
+                    onFinished?.let { callback -> mainHandler.post(callback) }
+                }
+            }
+        } catch (e: RuntimeException) {
+            Log.e(TAG, "Failed to schedule update validation", e)
+            mainHandler.post {
+                Toast.makeText(
+                    appContext,
+                    appContext.getString(R.string.toast_download_failed_try_browser),
+                    Toast.LENGTH_LONG
+                ).show()
+                onFinished?.invoke()
+            }
+        }
+    }
+
+    /**
+     * 清理进度对话框资源（在 Activity 销毁时调用）
+     */
+    fun cleanup() {
+        dismissProgressDialog()
+    }
+
+    private fun processDownloadCompletion(
+        context: Context,
+        downloadId: Long,
+        completion: DownloadCompletionInfo
+    ) {
+        val dm = context.getSystemService(Context.DOWNLOAD_SERVICE) as? DownloadManager
+        if (dm == null) {
+            postDownloadToast(context, R.string.toast_download_service_unavailable)
+            return
+        }
+
+        val queryResult = queryDownloadStatus(dm, downloadId)
+        if (queryResult.error != null) {
+            Log.w(TAG, "查询下载状态失败: ${queryResult.error.message}")
+            restoreClaimedDownload(context, downloadId, completion)
+            return
+        }
+        if (!queryResult.rowFound) {
+            retryOrNotifyDownload(
+                context,
+                dm,
+                downloadId,
+                completion,
+                R.string.toast_download_failed_try_browser
+            )
+            return
+        }
+
+        when (queryResult.status) {
+            DownloadManager.STATUS_SUCCESSFUL -> {
+                val downloadedUri = dm.getUriForDownloadedFile(downloadId)
+                if (downloadedUri == null) {
+                    Log.w(TAG, "Cannot get downloaded APK URI")
+                    try { dm.remove(downloadId) } catch (_: Exception) {}
+                    retryOrNotifyDownload(
+                        context,
+                        dm,
+                        downloadId,
+                        completion,
+                        R.string.toast_cannot_get_download_file
+                    )
+                    return
+                }
+
+                // Size and SHA256 verification can read the complete APK. Keep it
+                // off the main thread even when this was triggered by the UI poll.
+                val invalidReason = validateDownloadedApk(
+                    context,
+                    downloadedUri,
+                    completion.expectedSize,
+                    completion.expectedSha256
+                )
+                if (invalidReason != null) {
+                    Log.w(TAG, "Downloaded update APK failed validation: $invalidReason")
+                    retryOrNotifyDownload(
+                        context,
+                        dm,
+                        downloadId,
+                        completion,
+                        R.string.toast_update_integrity_mismatch
+                    )
+                    return
+                }
+
+                Log.d(TAG, "下载成功，准备安装: ${completion.apkName}")
+                mainHandler.post { installApk(context, downloadId) }
+            }
+
+            DownloadManager.STATUS_FAILED -> {
+                retryOrNotifyDownload(
+                    context,
+                    dm,
+                    downloadId,
+                    completion,
+                    R.string.toast_download_failed_try_browser
+                )
+            }
+
+            DownloadManager.STATUS_RUNNING,
+            DownloadManager.STATUS_PAUSED,
+            DownloadManager.STATUS_PENDING -> {
+                restoreClaimedDownload(context, downloadId, completion)
+                Log.d(TAG, "下载仍在进行，保留下载状态，downloadId=$downloadId status=${queryResult.status}")
+            }
+
+            null -> {
+                restoreClaimedDownload(context, downloadId, completion)
+                Log.w(TAG, "下载状态不可用，保留下载状态，downloadId=$downloadId")
+            }
+
+            else -> Log.w(TAG, "下载可能失败，downloadId=$downloadId status=${queryResult.status}")
+        }
+    }
+
+    private fun queryDownloadStatus(dm: DownloadManager, downloadId: Long): DownloadQueryResult {
+        return try {
+            val query = DownloadManager.Query().apply { setFilterById(downloadId) }
+            val cursor = dm.query(query)
+                ?: return DownloadQueryResult(rowFound = false)
+            cursor.use {
+                if (!it.moveToFirst()) {
+                    DownloadQueryResult(rowFound = false)
+                } else {
+                    val statusIndex = it.getColumnIndex(DownloadManager.COLUMN_STATUS)
+                    DownloadQueryResult(
+                        rowFound = true,
+                        status = statusIndex.takeIf { index -> index >= 0 }?.let(it::getInt)
+                    )
+                }
+            }
+        } catch (e: Exception) {
+            DownloadQueryResult(rowFound = false, error = e)
+        }
+    }
+
+    private fun retryOrNotifyDownload(
+        context: Context,
+        dm: DownloadManager,
+        downloadId: Long,
+        completion: DownloadCompletionInfo,
+        finalMessageResId: Int
+    ) {
+        if (!isCurrentDownloadOwner(context, downloadId)) {
+            Log.d(TAG, "Skipping stale download completion for downloadId=$downloadId")
+            return
+        }
+        if (retryNextDownloadSource(
+                context,
+                dm,
+                downloadId,
+                completion.apkName,
+                completion.expectedSha256,
+                completion.expectedSize,
+                completion.candidates,
+                completion.candidateIndex
+            )) {
+            postDownloadToast(context, R.string.update_progress_switching_source)
+        } else {
+            postDownloadToast(context, finalMessageResId)
+        }
+    }
+
+    private fun isCurrentDownloadOwner(context: Context, downloadId: Long): Boolean {
+        synchronized(downloadCompletionLock) {
+            val currentId = context.getSharedPreferences("update_prefs", Context.MODE_PRIVATE)
+                .getLong(PREF_DOWNLOAD_ID, -1L)
+            return currentId == -1L || currentId == downloadId
+        }
+    }
+
+    private fun restoreClaimedDownload(
+        context: Context,
+        downloadId: Long,
+        completion: DownloadCompletionInfo
+    ) {
+        synchronized(downloadCompletionLock) {
+            val prefs = context.getSharedPreferences("update_prefs", Context.MODE_PRIVATE)
+            val currentId = prefs.getLong(PREF_DOWNLOAD_ID, -1L)
+            if (currentId != -1L && currentId != downloadId) {
+                return
+            }
+            saveDownloadCompletion(context, downloadId, completion)
+        }
+    }
+
+    private fun saveDownloadCompletion(
+        context: Context,
+        downloadId: Long,
+        completion: DownloadCompletionInfo
+    ) {
+        context.getSharedPreferences("update_prefs", Context.MODE_PRIVATE).edit {
+            putLong(PREF_DOWNLOAD_ID, downloadId)
+                .putString(PREF_DOWNLOAD_APK_NAME, completion.apkName)
+                .putString(PREF_DOWNLOAD_CANDIDATES, joinStrings(completion.candidates))
+                .putInt(PREF_DOWNLOAD_CANDIDATE_INDEX, completion.candidateIndex)
+            if (completion.expectedSha256 != null) {
+                putString(PREF_DOWNLOAD_SHA256, completion.expectedSha256)
+            } else {
+                remove(PREF_DOWNLOAD_SHA256)
+            }
+            if (completion.expectedSize > 0L) {
+                putLong(PREF_DOWNLOAD_EXPECTED_SIZE, completion.expectedSize)
+            } else {
+                remove(PREF_DOWNLOAD_EXPECTED_SIZE)
+            }
+        }
+    }
+
+    private fun postDownloadToast(context: Context, messageResId: Int) {
+        mainHandler.post {
+            Toast.makeText(context, context.getString(messageResId), Toast.LENGTH_LONG).show()
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // 更新检查
+    // ------------------------------------------------------------------
+
+    private fun fetchUpdateInfo(context: Context): UpdateInfo? {
+        val metadata = if (isChineseLocale(context)) {
+            UpdateMetadataClient.fetchForChinese()
+        } else {
+            UpdateMetadataClient.fetchForGithub()
+        } ?: return null
+
+        return UpdateInfo(
+            version = metadata.version,
+            releaseNotes = metadata.releaseNotes,
+            releasePageUrl = metadata.releasePageUrl,
+            apkName = metadata.apkName,
+            downloadUrls = metadata.downloadUrls,
+            expectedSha256 = metadata.expectedSha256,
+            expectedSize = metadata.expectedSize
+        )
+    }
+
+    private class UpdateCheckTask(
+        private val appContext: Context,
+        private val activityReference: WeakReference<Activity>?,
+        private val showToast: Boolean,
+        private val enforceStartupInterval: Boolean
+    ) : Runnable {
+
+        override fun run() {
+            var updateInfo: UpdateInfo? = null
+            var releaseHandled = false
+            try {
+                if (enforceStartupInterval && !shouldRunStartupCheck(appContext)) {
+                    return
+                }
+                try {
+                    updateInfo = fetchUpdateInfo(appContext)
+                } catch (e: Exception) {
+                    Log.e(TAG, "检查更新失败", e)
+                }
+
+                val finalUpdateInfo = updateInfo
+                val runner = Runnable {
+                    try {
+                        handleUpdateResult(activityReference?.get() ?: appContext, finalUpdateInfo)
+                    }
+                    finally { isChecking.set(false) }
+                }
+
+                mainHandler.post(runner)
+                releaseHandled = true
+            } finally {
+                // 其他异常路径兑底，保证 isChecking 不会被永久占据
+                if (!releaseHandled) {
+                    isChecking.set(false)
+                }
+            }
+        }
+
+        private fun shouldRunStartupCheck(context: Context): Boolean {
+            val lastCheckTime = context.getSharedPreferences("update_prefs", Context.MODE_PRIVATE)
+                .getLong("last_check_time", 0L)
+            return System.currentTimeMillis() - lastCheckTime > UPDATE_CHECK_INTERVAL
+        }
+
+        private fun handleUpdateResult(context: Context, updateInfo: UpdateInfo?) {
+            // 仅在检查成功时写入 lastCheckTime，避免失败后 4 小时内拒不重试
+            if (updateInfo != null) {
+                context.getSharedPreferences("update_prefs", Context.MODE_PRIVATE)
+                        .edit {
+                            putLong("last_check_time", System.currentTimeMillis())
+                        }
+            }
+
+            if (updateInfo == null) {
+                if (showToast) {
+                    Toast.makeText(context, context.getString(R.string.toast_check_update_failed), Toast.LENGTH_SHORT).show()
+                }
+                return
+            }
+
+            val currentVersion = getCurrentVersion(context)
+            if (isNewVersionAvailable(currentVersion, updateInfo.version)) {
+                // 后台启动检查时如果用户已跳过该版本，不要打扰；手动检查仍弹
+                if (!showToast) {
+                    val skipped = context.getSharedPreferences("update_prefs", Context.MODE_PRIVATE)
+                            .getString(PREF_SKIPPED_VERSION, null)
+                    if (skipped != null && skipped == updateInfo.version) {
+                        Log.d(TAG, "用户已跳过版本 $skipped，启动检查不弹窗")
+                        return
+                    }
+                }
+                showUpdateDialog(context, updateInfo)
+            } else if (showToast) {
+                showLatestVersionDialog(context, currentVersion, updateInfo.releaseNotes, updateInfo.releasePageUrl)
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // 对话框
+    // ------------------------------------------------------------------
+
+    @SuppressLint("SetTextI18n")
+    private fun showLatestVersionDialog(
+        context: Context,
+        currentVersion: String,
+        releaseNotes: String?,
+        releasePageUrl: String?
+    ) {
+        if (context !is Activity) {
+            Toast.makeText(context, context.getString(R.string.toast_already_latest_version, currentVersion), Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        runOnUsableActivityWindow(context) {
+            val builder = AlertDialog.Builder(context, R.style.AppDialogStyle)
+            builder.setTitle(context.getString(R.string.update_already_latest_title))
+
+            val view = LayoutInflater.from(context).inflate(R.layout.dialog_update, null)
+
+            val version = view.findViewById<TextView>(R.id.update_version)
+            version.text = "v$currentVersion"
+
+            if (releaseNotes != null && releaseNotes.trim().isNotEmpty()) {
+                val accentColor = UiHelper.accentColor(context)
+                val notesScroll = view.findViewById<ScrollView>(R.id.update_notes_scroll)
+                notesScroll.visibility = View.VISIBLE
+                val notes = view.findViewById<TextView>(R.id.update_notes)
+                notes.text = SimpleMarkdownRenderer.render(
+                    releaseNotes,
+                    accentColor,
+                    releasePageUrl,
+                    onLink = { url ->
+                        openReleaseNoteLink(context, url)
+                    }
+                )
+                configureUpdateNotesLinks(notes, accentColor)
+                constrainUpdateNotesScroll(context, notesScroll, releaseNotes)
+            }
+
+            builder.setView(view)
+            builder.setPositiveButton(context.getString(R.string.update_btn_got_it), null)
+            builder.setCancelable(true)
+            val dialog = builder.show()
+            AppDialogStyler.tintTitle(dialog, context)
+            AppDialogStyler.installDismissKeys(dialog)
+        }
+    }
+
+    private fun showUpdateDialog(context: Context, updateInfo: UpdateInfo) {
+        if (context !is Activity) {
+            return
+        }
+
+        runOnUsableActivityWindow(context) {
+            val view = LayoutInflater.from(context).inflate(R.layout.dialog_update, null)
+
+            val curVer = getCurrentVersion(context)
+            val version = view.findViewById<TextView>(R.id.update_version)
+            version.text = "v$curVer → v${updateInfo.version}"
+
+            if (!updateInfo.releaseNotes.isNullOrEmpty()) {
+                val accentColor = UiHelper.accentColor(context)
+                val notesScroll = view.findViewById<ScrollView>(R.id.update_notes_scroll)
+                notesScroll.visibility = View.VISIBLE
+                val notesView = view.findViewById<TextView>(R.id.update_notes)
+                notesView.text = SimpleMarkdownRenderer.render(
+                    updateInfo.releaseNotes,
+                    accentColor,
+                    updateInfo.releasePageUrl,
+                    onLink = { url ->
+                        openReleaseNoteLink(context, url)
+                    }
+                )
+                configureUpdateNotesLinks(notesView, accentColor)
+                constrainUpdateNotesScroll(context, notesScroll, updateInfo.releaseNotes)
+            }
+
+            if (updateInfo.apkName != null) {
+                val fileName = view.findViewById<TextView>(R.id.update_file_name)
+                fileName.text = updateInfo.apkName
+                fileName.visibility = View.VISIBLE
+            }
+
+            val builder = AlertDialog.Builder(context, R.style.AppDialogStyle)
+            builder.setTitle(context.getString(R.string.update_new_version_title))
+            builder.setView(view)
+
+            builder.setPositiveButton(context.getString(R.string.update_btn_browser_download)) { _, _ ->
+                val intent = Intent(
+                    Intent.ACTION_VIEW,
+                    UpdateMetadataClient.GITHUB_RELEASE_PAGE_URL.toUri()
+                )
+                context.startActivity(intent)
+            }
+
+            if (updateInfo.downloadUrls.isNotEmpty()) {
+                builder.setNeutralButton(context.getString(R.string.update_btn_direct_download)) { _, _ ->
+                    if (!canInstallApk(context)) {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                            showInstallPermissionDialog(context, updateInfo)
+                        } else {
+                            Toast.makeText(
+                                context,
+                                context.getString(R.string.toast_cannot_get_install_permission),
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        }
+                    } else {
+                        startDirectDownload(context, updateInfo)
+                    }
+                }
+            }
+
+            builder.setNegativeButton(context.getString(R.string.update_btn_later), null)
+            builder.setCancelable(true)
+            val dialog = builder.show()
+            AppDialogStyler.tintTitle(dialog, context)
+            AppDialogStyler.installDismissKeys(dialog)
+            // “稍后”按钮长按 = 跳过此版本（启动检查不再弹，手动检查仍弹）
+            dialog.getButton(AlertDialog.BUTTON_NEGATIVE)?.setOnLongClickListener {
+                context.getSharedPreferences("update_prefs", Context.MODE_PRIVATE)
+                        .edit { putString(PREF_SKIPPED_VERSION, updateInfo.version) }
+                Toast.makeText(
+                    context,
+                    context.getString(R.string.toast_update_skipped_version, updateInfo.version),
+                    Toast.LENGTH_SHORT
+                ).show()
+                dialog.dismiss()
+                true
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // 安装权限
+    // ------------------------------------------------------------------
+
+    private fun canInstallApk(context: Context): Boolean {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            return context.packageManager.canRequestPackageInstalls()
+        }
+        return true
+    }
+
+    @RequiresApi(api = Build.VERSION_CODES.O)
+    private fun showInstallPermissionDialog(context: Context, info: UpdateInfo) {
+        // 暂存更新信息，等权限授予后恢复
+        pendingUpdateInfo = info
+
+        if (context !is Activity) {
+            Toast.makeText(context, context.getString(R.string.toast_need_install_permission), Toast.LENGTH_LONG).show()
+            return
+        }
+
+        val builder = AlertDialog.Builder(context, R.style.AppDialogStyle)
+        builder.setTitle(context.getString(R.string.update_install_permission_title))
+        builder.setMessage(context.getString(R.string.update_install_permission_msg))
+        builder.setPositiveButton(android.R.string.ok) { _, _ ->
+            try {
+                val intent = Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES)
+                intent.data = ("package:" + context.packageName).toUri()
+                @Suppress("DEPRECATION")
+                context.startActivityForResult(intent, INSTALL_PERMISSION_REQUEST_CODE)
+            } catch (e: Exception) {
+                try {
+                    val intent = Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES)
+                    @Suppress("DEPRECATION")
+                    context.startActivityForResult(intent, INSTALL_PERMISSION_REQUEST_CODE)
+                } catch (e2: Exception) {
+                    pendingUpdateInfo = null
+                    Toast.makeText(context, context.getString(R.string.toast_cannot_open_settings), Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+        builder.setNegativeButton(android.R.string.cancel) { _, _ -> pendingUpdateInfo = null }
+        builder.setCancelable(false)
+        val dialog = builder.show()
+        AppDialogStyler.apply(dialog, context)
+        AppDialogStyler.installDismissKeys(
+            dialog,
+            onDismiss = {
+                pendingUpdateInfo = null
+                dialog.cancel()
+            },
+            dismissOnBack = true
+        )
+    }
+
+    // ------------------------------------------------------------------
+    // 下载 APK
+    // ------------------------------------------------------------------
+
+    private fun startDirectDownload(context: Context, info: UpdateInfo) {
+        try {
+            val fileName = info.apkName ?: ("moonlight-" + info.version + ".apk")
+            val downloadCandidates = info.downloadUrls
+            if (downloadCandidates.isEmpty()) return
+            val primaryUrl = downloadCandidates[0]
+
+            val dm = context.getSystemService(Context.DOWNLOAD_SERVICE) as? DownloadManager
+            if (dm == null) {
+                Toast.makeText(context, context.getString(R.string.toast_download_service_unavailable), Toast.LENGTH_SHORT).show()
+                return
+            }
+
+            val downloadId = dm.enqueue(createUpdateDownloadRequest(context, primaryUrl, fileName))
+            Log.d(TAG, "已启动下载，ID: $downloadId, candidateCount=${downloadCandidates.size}")
+
+            // 保存下载信息到 SharedPreferences（供 BroadcastReceiver 和备用源重试使用）
+            synchronized(downloadCompletionLock) {
+                val prefs = context.getSharedPreferences("update_prefs", Context.MODE_PRIVATE)
+                prefs.edit {
+                    putLong(PREF_DOWNLOAD_ID, downloadId)
+                        .putString(PREF_DOWNLOAD_APK_NAME, fileName)
+                        // 保存当前下载源列表，用于下载失败后的状态恢复
+                        .putString(PREF_DOWNLOAD_CANDIDATES, joinStrings(downloadCandidates))
+                        .putInt(PREF_DOWNLOAD_CANDIDATE_INDEX, 0)
+                    if (info.expectedSha256 != null) {
+                        putString(PREF_DOWNLOAD_SHA256, info.expectedSha256)
+                    } else {
+                        remove(PREF_DOWNLOAD_SHA256)
+                    }
+                    if (info.expectedSize != null) {
+                        putLong(PREF_DOWNLOAD_EXPECTED_SIZE, info.expectedSize)
+                    } else {
+                        remove(PREF_DOWNLOAD_EXPECTED_SIZE)
+                    }
+                }
+            }
+
+            // 如果当前在 Activity 中，显示应用内进度对话框
+            if (context is Activity) {
+                showDownloadProgressDialog(context, downloadId, dm)
+            } else {
+                Toast.makeText(context, context.getString(R.string.toast_download_started), Toast.LENGTH_LONG).show()
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "下载失败", e)
+            Toast.makeText(context, context.getString(R.string.toast_download_failed, e.message), Toast.LENGTH_LONG).show()
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // 应用内下载进度对话框
+    // ------------------------------------------------------------------
+
+    private fun showDownloadProgressDialog(activity: Activity, downloadId: Long, dm: DownloadManager) {
+        dismissProgressDialog()
+        val view = LayoutInflater.from(activity).inflate(R.layout.dialog_download_progress, null)
+
+        val progressBar = view.findViewById<ProgressBar>(R.id.download_progress_bar)
+        val progressText = view.findViewById<TextView>(R.id.download_progress_text)
+
+        val dialog = AlertDialog.Builder(activity, R.style.AppDialogStyle)
+                .setTitle(activity.getString(R.string.update_downloading_title))
+                .setView(view)
+                .setNegativeButton(activity.getString(R.string.update_btn_background)) { _, _ ->
+                    Toast.makeText(activity, activity.getString(R.string.toast_download_continue_bg), Toast.LENGTH_SHORT).show()
+                }
+                .setCancelable(false)
+                .create()
+
+        dialog.show()
+        AppDialogStyler.tintTitle(dialog, activity)
+        AppDialogStyler.installDismissKeys(dialog, dismissOnBack = true)
+        currentProgressDialog = dialog
+        dialog.setOnDismissListener {
+            if (currentProgressDialog === dialog) {
+                clearProgressPolling()
+                currentProgressDialog = null
+            }
+        }
+
+        // 使用 Handler 轮询下载进度
+        val handler = Handler(Looper.getMainLooper())
+        progressHandler = handler
+        val currentDownloadId = longArrayOf(downloadId)
+
+        val runnable = object : Runnable {
+            @SuppressLint("SetTextI18n")
+            override fun run() {
+                if (activity.isFinishing || activity.isDestroyed) {
+                    dismissProgressDialog()
+                    return
+                }
+
+                val query = DownloadManager.Query()
+                query.setFilterById(currentDownloadId[0])
+
+                try {
+                    dm.query(query)?.use { cursor ->
+                        if (!cursor.moveToFirst()) {
+                            // 下载可能已被取消
+                            dismissProgressDialog()
+                            return
+                        }
+
+                        val statusIndex = cursor.getColumnIndex(DownloadManager.COLUMN_STATUS)
+                        val bytesDownloadedIndex = cursor.getColumnIndex(DownloadManager.COLUMN_BYTES_DOWNLOADED_SO_FAR)
+                        val bytesTotalIndex = cursor.getColumnIndex(DownloadManager.COLUMN_TOTAL_SIZE_BYTES)
+                        val reasonIndex = cursor.getColumnIndex(DownloadManager.COLUMN_REASON)
+
+                        if (statusIndex < 0) {
+                            dismissProgressDialog()
+                            return
+                        }
+
+                        val status = cursor.getInt(statusIndex)
+                        val bytesDownloaded = if (bytesDownloadedIndex >= 0) cursor.getLong(bytesDownloadedIndex) else 0L
+                        val bytesTotal = if (bytesTotalIndex >= 0) cursor.getLong(bytesTotalIndex) else -1L
+
+                        when (status) {
+                            DownloadManager.STATUS_RUNNING -> {
+                                if (bytesTotal > 0) {
+                                    val progress = (bytesDownloaded * 100 / bytesTotal).toInt()
+                                    progressBar.isIndeterminate = false
+                                    progressBar.progress = progress
+                                    val downloadedMB = String.format("%.1f", bytesDownloaded / 1048576.0)
+                                    val totalMB = String.format("%.1f", bytesTotal / 1048576.0)
+                                    progressText.text = "$downloadedMB MB / $totalMB MB ($progress%)"
+                                } else {
+                                    progressBar.isIndeterminate = true
+                                    val downloadedMB = String.format("%.1f", bytesDownloaded / 1048576.0)
+                                    progressText.text = activity.getString(R.string.update_progress_downloaded, downloadedMB)
+                                }
+                                handler.postDelayed(this, PROGRESS_POLL_INTERVAL_MS)
+                            }
+
+                            DownloadManager.STATUS_PENDING -> {
+                                progressBar.isIndeterminate = true
+                                progressText.text = activity.getString(R.string.update_progress_waiting)
+                                handler.postDelayed(this, PROGRESS_POLL_INTERVAL_MS)
+                            }
+
+                            DownloadManager.STATUS_PAUSED -> {
+                                progressText.text = activity.getString(R.string.update_progress_paused)
+                                handler.postDelayed(this, 1000)
+                            }
+
+                            DownloadManager.STATUS_SUCCESSFUL -> {
+                                progressBar.progress = 100
+                                progressText.text = activity.getString(R.string.update_progress_installing)
+                                dismissProgressDialog()
+                                // 触发安装
+                                onDownloadComplete(activity, currentDownloadId[0])
+                            }
+
+                            DownloadManager.STATUS_FAILED -> {
+                                val reason = if (reasonIndex >= 0) cursor.getInt(reasonIndex) else -1
+                                Log.w(TAG, "下载失败, reason=$reason")
+                                dismissProgressDialog()
+                                onDownloadComplete(activity, currentDownloadId[0])
+                            }
+                        }
+                    } ?: run {
+                        // cursor is null
+                        dismissProgressDialog()
+                        return
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "查询下载进度失败", e)
+                    handler.postDelayed(this, 1000)
+                }
+            }
+        }
+
+        progressRunnable = runnable
+        handler.post(runnable)
+    }
+
+    private fun dismissProgressDialog() {
+        clearProgressPolling()
+
+        if (currentProgressDialog?.isShowing == true) {
+            try {
+                currentProgressDialog?.dismiss()
+            } catch (ignored: Exception) {
+            }
+        }
+        currentProgressDialog = null
+    }
+
+    private fun clearProgressPolling() {
+        progressHandler?.let { handler ->
+            progressRunnable?.let(handler::removeCallbacks)
+        }
+        progressHandler = null
+        progressRunnable = null
+    }
+
+    // ------------------------------------------------------------------
+    // APK 安装
+    // ------------------------------------------------------------------
+
+    private fun installApk(context: Context, downloadId: Long) {
+        try {
+            val dm = context.getSystemService(Context.DOWNLOAD_SERVICE) as? DownloadManager ?: return
+
+            val downloadedUri = dm.getUriForDownloadedFile(downloadId)
+            if (downloadedUri == null) {
+                Log.w(TAG, "无法获取下载文件 URI")
+                Toast.makeText(context, context.getString(R.string.toast_cannot_get_download_file), Toast.LENGTH_LONG).show()
+                return
+            }
+
+            val installIntent = Intent(Intent.ACTION_VIEW)
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                // Android 7.0+ 使用 content:// URI
+                // DownloadManager.getUriForDownloadedFile 在 N+ 已经返回 content:// URI
+                installIntent.setDataAndType(downloadedUri, "application/vnd.android.package-archive")
+                installIntent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            } else {
+                installIntent.setDataAndType(downloadedUri, "application/vnd.android.package-archive")
+            }
+
+            installIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            context.startActivity(installIntent)
+
+            Log.d(TAG, "已启动安装界面")
+        } catch (e: Exception) {
+            Log.e(TAG, "启动安装失败", e)
+            Toast.makeText(context, context.getString(R.string.toast_install_launch_failed), Toast.LENGTH_LONG).show()
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // 版本比较
+    // ------------------------------------------------------------------
+
+    private fun getCurrentVersion(context: Context): String {
+        try {
+            val packageInfo = context.packageManager
+                    .getPackageInfo(context.packageName, 0)
+            return packageInfo.versionName ?: "0.0.0"
+        } catch (e: Exception) {
+            Log.e(TAG, "获取当前版本失败", e)
+            return "0.0.0"
+        }
+    }
+
+    private fun isNewVersionAvailable(currentVersion: String, latestVersion: String): Boolean {
+        try {
+            return compareVersions(latestVersion, currentVersion) > 0
+        } catch (e: Exception) {
+            Log.e(TAG, "版本号格式错误: current=$currentVersion, latest=$latestVersion", e)
+            return false
+        }
+    }
+
+    private fun compareVersions(leftVersion: String, rightVersion: String): Int {
+        val left = parseVersion(leftVersion)
+        val right = parseVersion(rightVersion)
+
+        val numberCount = left.numbers.size.coerceAtLeast(right.numbers.size)
+        for (i in 0 until numberCount) {
+            val leftNumber = left.numbers.getOrElse(i) { 0 }
+            val rightNumber = right.numbers.getOrElse(i) { 0 }
+            if (leftNumber != rightNumber) {
+                return leftNumber.compareTo(rightNumber)
+            }
+        }
+
+        if (left.qualifierRank != right.qualifierRank) {
+            return left.qualifierRank.compareTo(right.qualifierRank)
+        }
+
+        val qualifierNumberCount = left.qualifierNumbers.size.coerceAtLeast(right.qualifierNumbers.size)
+        for (i in 0 until qualifierNumberCount) {
+            val leftNumber = left.qualifierNumbers.getOrElse(i) { 0 }
+            val rightNumber = right.qualifierNumbers.getOrElse(i) { 0 }
+            if (leftNumber != rightNumber) {
+                return leftNumber.compareTo(rightNumber)
+            }
+        }
+
+        return 0
+    }
+
+    private fun parseVersion(version: String): ParsedVersion {
+        val normalized = version.trim()
+                .replaceFirst("^[Vv]".toRegex(), "")
+                .substringBefore('+')
+        val qualifierStart = normalized.indexOfFirst { it == '-' || it == '_' || it.isWhitespace() }
+        val numberPart = if (qualifierStart >= 0) normalized.substring(0, qualifierStart) else normalized
+        val qualifierPart = if (qualifierStart >= 0) normalized.substring(qualifierStart + 1) else ""
+        val numbers = numberPart.split('.')
+                .map { part -> part.toIntOrNull() ?: 0 }
+                .ifEmpty { listOf(0) }
+        val qualifierTokens = qualifierPart
+                .lowercase()
+                .split('.', '-', '_', ' ')
+                .filter { it.isNotBlank() }
+        val qualifierName = qualifierTokens.firstOrNull { token -> token.any { it.isLetter() } } ?: ""
+        val qualifierRank = when (qualifierName) {
+            "hotfix", "fix", "patch" -> 1
+            "", "stable", "release", "final" -> 0
+            "rc" -> -1
+            "beta" -> -2
+            "alpha" -> -3
+            else -> -1
+        }
+        val qualifierNumbers = qualifierTokens.mapNotNull { token ->
+            "\\d+".toRegex().find(token)?.value?.toIntOrNull()
+        }
+
+        return ParsedVersion(numbers, qualifierRank, qualifierNumbers)
+    }
+
+    private data class ParsedVersion(
+            val numbers: List<Int>,
+            val qualifierRank: Int,
+            val qualifierNumbers: List<Int>
+    )
+
+    // ------------------------------------------------------------------
+    // 远程背景图代理（不参与版本更新）
+    // ------------------------------------------------------------------
+
+    private fun shouldUpdateProxyList(context: Context): Boolean {
+        val currentTime = System.currentTimeMillis()
+        val lastUpdateTime = context.getSharedPreferences("update_prefs", Context.MODE_PRIVATE)
+                .getLong(PREF_LAST_PROXY_UPDATE_TIME, 0)
+        return (currentTime - lastUpdateTime) > PROXY_CACHE_DURATION || PROXY_PREFIXES.isEmpty()
+    }
+
+    private fun updateProxyList(context: Context) {
+        try {
+            Log.d(TAG, "开始更新代理列表...")
+            val scriptContent = fetchScriptContent()
+            if (scriptContent != null) {
+                val newProxies = extractProxiesFromScript(scriptContent)
+                if (newProxies.isNotEmpty()) {
+                    val allProxies = HashSet(PROXY_PREFIXES.toList())
+                    allProxies.addAll(newProxies)
+
+                    PROXY_PREFIXES = allProxies.toTypedArray()
+
+                    context.getSharedPreferences("update_prefs", Context.MODE_PRIVATE)
+                            .edit {
+                                putLong(PREF_LAST_PROXY_UPDATE_TIME, System.currentTimeMillis())
+                            }
+
+                    Log.d(TAG, "代理列表已更新，共 ${PROXY_PREFIXES.size} 个代理：${PROXY_PREFIXES.contentToString()}")
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "更新代理列表失败: ${e.message}")
+        }
+    }
+
+    private fun fetchScriptContent(): String? {
+        try {
+            val url = URL(PROXY_DISCOVERY_URL)
+            val conn = url.openConnection() as HttpURLConnection
+            conn.requestMethod = "GET"
+            conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Android; Mobile; rv:40.0)")
+            conn.connectTimeout = 2000
+            conn.readTimeout = 2000
+
+            val responseCode = conn.responseCode
+            if (responseCode == HttpURLConnection.HTTP_OK) {
+                val reader = BufferedReader(InputStreamReader(conn.inputStream))
+                val content = StringBuilder()
+                var line: String?
+                while (reader.readLine().also { line = it } != null) {
+                    content.append(line).append("\n")
+                }
+                reader.close()
+                return content.toString()
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "获取代理发现脚本失败: ${e.message}")
+        }
+        return null
+    }
+
+    private fun extractProxiesFromScript(scriptContent: String): Array<String> {
+        val proxies = ArrayList<String>()
+
+        try {
+            val patterns = arrayOf(
+                    "[\"']https://[\\w.-]+\\.(?:com|net|org|cn|top|cc|io|me|cf|tk|ml|ga|gg|xyz|site|online|tech|info|biz|work|space|shop|club|pro|dev|app|link|run|art|fun|live|store|world|today|design|cloud)/[\"']",
+                    "baseUrl\\s*=\\s*[\"']https://[\\w.-]+\\.(?:com|net|org|cn|top|cc|io|me|cf|tk|ml|ga|gg|xyz|site|online|tech|info|biz|work|space|shop|club|pro|dev|app|link|run|art|fun|live|store|world|today|design|cloud)/[\"']",
+                    "url:\\s*[\"']https://[\\w.-]+\\.(?:com|net|org|cn|top|cc|io|me|cf|tk|ml|ga|gg|xyz|site|online|tech|info|biz|work|space|shop|club|pro|dev|app|link|run|art|fun|live|store|world|today|design|cloud)/[\"']",
+                    "[\"']https://(?:gh|mirror|proxy|cdn)[\\w.-]*\\.(?:com|net|org|cn|top|cc|io|me|cf|tk|ml|ga|gg|xyz|site|online|tech|info|biz|work|space|shop|club|pro|dev|app|link|run|art|fun|live|store|world|today|design|cloud)/[\"']"
+            )
+
+            for (patternStr in patterns) {
+                val pattern = Pattern.compile(patternStr, Pattern.CASE_INSENSITIVE)
+                val matcher = pattern.matcher(scriptContent)
+
+                while (matcher.find()) {
+                    val match = matcher.group()
+                    var urlStr = match.replace("[\"']".toRegex(), "")
+
+                    if (urlStr.startsWith("https://")) {
+                        if (!urlStr.endsWith("/")) {
+                            urlStr = "$urlStr/"
+                        }
+                        if (isValidProxyUrl(urlStr)) {
+                            proxies.add(urlStr)
+                            Log.d(TAG, "发现代理地址: $urlStr")
+                        }
+                    }
+                }
+            }
+
+            val domainPattern = Pattern.compile("(?:proxy|mirror|gh|cdn)[\\w.-]*\\.(?:com|net|org|cn|top|cc|io|me|cf|tk|ml|ga|gg|xyz|site|online|tech|info|biz|work|space|shop|club|pro|dev|app|link|run|art|fun|live|store|world|today|design|cloud)", Pattern.CASE_INSENSITIVE)
+            val domainMatcher = domainPattern.matcher(scriptContent)
+
+            while (domainMatcher.find()) {
+                val domain = domainMatcher.group()
+                val proxyUrl = "https://$domain/"
+                if (isValidProxyUrl(proxyUrl)) {
+                    proxies.add(proxyUrl)
+                    Log.d(TAG, "发现域名代理: $proxyUrl")
+                }
+            }
+
+        } catch (e: Exception) {
+            Log.w(TAG, "解析代理地址失败: ${e.message}")
+        }
+
+        val uniqueProxies = HashSet(proxies)
+        return uniqueProxies.toTypedArray()
+    }
+
+    private fun isValidProxyUrl(url: String?): Boolean {
+        if (url == null || url.length < 15 || url.length > 100) {
+            return false
+        }
+
+        val blacklist = arrayOf(
+                "github.com", "googleapis.com", "gstatic.com",
+                "jquery.com", "bootstrap.com", "cdnjs.com",
+                "unpkg.com", "jsdelivr.net", "ghproxy.link"
+        )
+
+        for (blocked in blacklist) {
+            if (url.contains(blocked)) {
+                return false
+            }
+        }
+
+        return !detectRedirectToGhproxyLink(url)
+    }
+
+    private fun detectRedirectToGhproxyLink(proxyUrl: String): Boolean {
+        var conn: HttpURLConnection? = null
+        try {
+            val testUrl = proxyUrl + "https://api.github.com/zen"
+            conn = URL(testUrl).openConnection() as HttpURLConnection
+            conn.requestMethod = "HEAD"
+            conn.instanceFollowRedirects = false
+            conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Android; Mobile; rv:40.0)")
+            conn.connectTimeout = 2000
+            conn.readTimeout = 2000
+
+            val responseCode = conn.responseCode
+
+            if (responseCode in 300..399) {
+                val location = conn.getHeaderField("Location")
+                if (location != null && location.contains("ghproxy.link")) {
+                    Log.d(TAG, "代理重定向回 ghproxy.link，排除: $proxyUrl")
+                    return true
+                }
+            }
+
+            if (conn.url.toString().contains("ghproxy.link")) {
+                Log.d(TAG, "代理最终URL包含 ghproxy.link，排除: $proxyUrl")
+                return true
+            }
+
+            val server = conn.getHeaderField("Server")
+            if (server != null && server.lowercase().contains("ghproxy")) {
+                Log.d(TAG, "代理服务器信息包含 ghproxy，排除: $proxyUrl")
+                return true
+            }
+
+            Log.d(TAG, "代理检测通过: $proxyUrl (响应码: $responseCode)")
+            return false
+
+        } catch (e: java.net.SocketTimeoutException) {
+            Log.w(TAG, "代理连接失败，排除: $proxyUrl - ${e.message}")
+            return true
+        } catch (e: java.net.ConnectException) {
+            Log.w(TAG, "代理连接失败，排除: $proxyUrl - ${e.message}")
+            return true
+        } catch (e: Exception) {
+            Log.d(TAG, "代理检测异常但不排除: $proxyUrl - ${e.message}")
+            return false
+        } finally {
+            conn?.disconnect()
+        }
+    }
+
+    /**
+     * Build a list of background-image candidates. Update downloads do not use this path.
+     */
+    fun buildProxiedUrls(context: Context, url: String): List<String> {
+        val tries = ArrayList<String>()
+        for (p in getEffectiveProxyPrefixes(context)) {
+            tries.add(p + url)
+        }
+        tries.add(url) // 直连兌底
+        return tries
+    }
+
+    fun buildProxiedUrls(url: String): List<String> {
+        val tries = ArrayList<String>()
+        for (p in PROXY_PREFIXES) {
+            tries.add(p + url)
+        }
+        tries.add(url)
+        return tries
+    }
+
+    private fun isChineseLocale(context: Context): Boolean {
+        val locale = ConfigurationCompat.getLocales(context.resources.configuration)[0]
+            ?: Locale.getDefault()
+        return locale.language.equals("zh", ignoreCase = true)
+    }
+
+    private fun getEffectiveProxyPrefixes(context: Context): Array<String> {
+        if (isUserProxyOrVpnActive(context)) {
+            Log.d(TAG, "User proxy/VPN active; skipping built-in GitHub proxies")
+            return emptyArray()
+        }
+        return PROXY_PREFIXES
+    }
+
+    private fun isUserProxyOrVpnActive(context: Context): Boolean {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+                val network = cm?.activeNetwork
+                val caps = if (network != null) cm.getNetworkCapabilities(network) else null
+                if (caps?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) == true) {
+                    return true
+                }
+                val proxyInfo = cm?.defaultProxy
+                if (!proxyInfo?.host.isNullOrBlank()) {
+                    return true
+                }
+            }
+        } catch (e: Exception) {
+            Log.d(TAG, "Unable to inspect active network proxy/VPN: ${e.message}")
+        }
+
+        return try {
+            !Proxy.getDefaultHost().isNullOrBlank()
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    fun ensureProxyListUpdated(context: Context) {
+        if (shouldUpdateProxyList(context)) {
+            updateProxyList(context)
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // 工具方法
+    // ------------------------------------------------------------------
+
+    private fun runOnUsableActivityWindow(activity: Activity, action: () -> Unit) {
+        activity.runOnUiThread {
+            val decorView = activity.window?.decorView
+            if (!isUpdateDialogWindowUsable(
+                    isFinishing = activity.isFinishing,
+                    isDestroyed = activity.isDestroyed,
+                    isChangingConfigurations = activity.isChangingConfigurations,
+                    isAttachedToWindow = decorView?.isAttachedToWindow == true,
+                    hasWindowToken = decorView?.windowToken != null,
+                    isWindowVisible = decorView?.windowVisibility == View.VISIBLE,
+                    hasWindowFocus = activity.hasWindowFocus()
+                )) {
+                Log.d(TAG, "Skipping update dialog because its Activity window is no longer usable")
+                return@runOnUiThread
+            }
+
+            try {
+                action()
+            } catch (e: WindowManager.BadTokenException) {
+                // The Activity can stop between the token check and WindowManager.addView().
+                Log.w(TAG, "Skipping update dialog after its Activity window became invalid", e)
+            }
+        }
+    }
+
+    internal fun isUpdateDialogWindowUsable(
+        isFinishing: Boolean,
+        isDestroyed: Boolean,
+        isChangingConfigurations: Boolean,
+        isAttachedToWindow: Boolean,
+        hasWindowToken: Boolean,
+        isWindowVisible: Boolean,
+        hasWindowFocus: Boolean
+    ): Boolean = !isFinishing &&
+            !isDestroyed &&
+            !isChangingConfigurations &&
+            isAttachedToWindow &&
+            hasWindowToken &&
+            isWindowVisible &&
+            hasWindowFocus
+
+    private fun dpToPx(context: Context, dp: Int): Int {
+        return (dp * context.resources.displayMetrics.density).toInt()
+    }
+
+    private fun configureUpdateNotesLinks(notesView: TextView, linkColor: Int) {
+        notesView.setLinkTextColor(linkColor)
+        notesView.movementMethod = LinkMovementMethod.getInstance()
+        notesView.linksClickable = true
+    }
+
+    private fun openReleaseNoteLink(context: Context, url: String) {
+        if (!HandbookLauncher.openUrl(context, url)) {
+            BrowserOnlyLauncher.open(context, url)
+        }
+    }
+
+    private fun constrainUpdateNotesScroll(context: Context, notesScroll: ScrollView, rawNotes: String) {
+        val lineCount = rawNotes.count { it == '\n' } + 1
+        if (rawNotes.length < 700 && lineCount < 12) {
+            return
+        }
+
+        val metrics = context.resources.displayMetrics
+        val isLandscape = metrics.widthPixels > metrics.heightPixels
+        val maxFraction = if (isLandscape) 0.42f else 0.48f
+        val maxHeight = (metrics.heightPixels * maxFraction).toInt()
+            .coerceAtLeast(dpToPx(context, if (isLandscape) 180 else 260))
+
+        notesScroll.layoutParams = (notesScroll.layoutParams ?: ViewGroup.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        )).apply {
+            height = maxHeight
+        }
+        notesScroll.isVerticalScrollBarEnabled = true
+    }
+
+    private fun joinStrings(list: List<String>): String {
+        val sb = StringBuilder()
+        for (i in list.indices) {
+            if (i > 0) sb.append("|||")
+            sb.append(list[i])
+        }
+        return sb.toString()
+    }
+
+    /**
+     * Splits a SharedPreferences-safe string list created by [joinStrings].
+     */
+    private fun splitStrings(value: String?): List<String> {
+        if (value.isNullOrBlank()) return emptyList()
+        return value.split("|||").filter { it.isNotBlank() }
+    }
+
+    private fun createUpdateDownloadRequest(
+            context: Context,
+            url: String,
+            fileName: String
+    ): DownloadManager.Request {
+        return DownloadManager.Request(url.toUri()).apply {
+            setTitle(context.getString(R.string.update_download_notification_title))
+            setDescription(fileName)
+            setMimeType("application/vnd.android.package-archive")
+            setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+            setVisibleInDownloadsUi(true)
+            setAllowedOverMetered(true)
+            setAllowedOverRoaming(true)
+            addRequestHeader("User-Agent", "Mozilla/5.0 (Android; Mobile; rv:40.0)")
+            addRequestHeader("Accept", "*/*")
+            addRequestHeader("Referer", "https://github.com/")
+            setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName)
+        }
+    }
+
+    private fun validateDownloadedApk(
+            context: Context,
+            uri: Uri,
+            expectedSize: Long,
+            expectedSha256: String?
+    ): String? {
+        if (!hasZipHeader(context, uri)) {
+            return "missing APK ZIP header"
+        }
+
+        if (expectedSize > 0L) {
+            val actualSize = getUriSize(context, uri)
+            if (actualSize <= 0L || actualSize != expectedSize) {
+                return "size mismatch expected=$expectedSize actual=$actualSize"
+            }
+        }
+
+        if (expectedSha256 != null) {
+            val actualSha256 = computeFileSha256(context, uri)
+            if (actualSha256 == null || !actualSha256.equals(expectedSha256, ignoreCase = true)) {
+                return "sha256 mismatch expected=$expectedSha256 actual=$actualSha256"
+            }
+        }
+
+        return null
+    }
+
+    private fun retryNextDownloadSource(
+            context: Context,
+            dm: DownloadManager,
+            oldDownloadId: Long,
+            apkName: String,
+            expectedSha256: String?,
+            expectedSize: Long,
+            candidates: List<String>,
+            candidateIndex: Int
+    ): Boolean {
+        var nextIndex = candidateIndex + 1
+        while (nextIndex < candidates.size) {
+            val nextUrl = candidates[nextIndex]
+            try {
+                try { dm.remove(oldDownloadId) } catch (_: Exception) {}
+
+                val newDownloadId = synchronized(downloadCompletionLock) {
+                    val prefs = context.getSharedPreferences("update_prefs", Context.MODE_PRIVATE)
+                    val currentId = prefs.getLong(PREF_DOWNLOAD_ID, -1L)
+                    if (currentId != -1L && currentId != oldDownloadId) {
+                        Log.d(TAG, "Skipping retry because a newer download owns the update state")
+                        return false
+                    }
+
+                    val id = dm.enqueue(createUpdateDownloadRequest(context, nextUrl, apkName))
+                    prefs.edit {
+                        putLong(PREF_DOWNLOAD_ID, id)
+                            .putString(PREF_DOWNLOAD_APK_NAME, apkName)
+                            .putString(PREF_DOWNLOAD_CANDIDATES, joinStrings(candidates))
+                            .putInt(PREF_DOWNLOAD_CANDIDATE_INDEX, nextIndex)
+                        if (expectedSha256 != null) {
+                            putString(PREF_DOWNLOAD_SHA256, expectedSha256)
+                        } else {
+                            remove(PREF_DOWNLOAD_SHA256)
+                        }
+                        if (expectedSize > 0L) {
+                            putLong(PREF_DOWNLOAD_EXPECTED_SIZE, expectedSize)
+                        } else {
+                            remove(PREF_DOWNLOAD_EXPECTED_SIZE)
+                        }
+                    }
+                    id
+                }
+                Log.d(TAG, "Retrying update download with candidate[$nextIndex]")
+                return true
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to retry update download candidate[$nextIndex]: ${e.message}")
+                nextIndex++
+            }
+        }
+
+        try { dm.remove(oldDownloadId) } catch (_: Exception) {}
+        return false
+    }
+
+    private fun hasZipHeader(context: Context, uri: Uri): Boolean {
+        return try {
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                val header = ByteArray(4)
+                val read = input.read(header)
+                read >= 2 && header[0] == 0x50.toByte() && header[1] == 0x4B.toByte()
+            } ?: false
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to read APK header: ${e.message}")
+            false
+        }
+    }
+
+    private fun getUriSize(context: Context, uri: Uri): Long {
+        try {
+            context.contentResolver.openAssetFileDescriptor(uri, "r")?.use { afd ->
+                if (afd.length > 0L) {
+                    return afd.length
+                }
+            }
+        } catch (e: Exception) {
+            Log.d(TAG, "Unable to read APK size from descriptor: ${e.message}")
+        }
+
+        return try {
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                val buf = ByteArray(64 * 1024)
+                var total = 0L
+                while (true) {
+                    val n = input.read(buf)
+                    if (n <= 0) break
+                    total += n.toLong()
+                }
+                total
+            } ?: -1L
+        } catch (e: Exception) {
+            Log.w(TAG, "getUriSize failed: ${e.message}")
+            -1L
+        }
+    }
+
+    /**
+     * 计算下载文件的 SHA256 hex（小写）。失败返回 null。
+     */
+    private fun computeFileSha256(context: Context, uri: Uri): String? {
+        return try {
+            val md = MessageDigest.getInstance("SHA-256")
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                val buf = ByteArray(64 * 1024)
+                while (true) {
+                    val n = input.read(buf)
+                    if (n <= 0) break
+                    md.update(buf, 0, n)
+                }
+            } ?: return null
+            md.digest().joinToString("") { "%02x".format(it.toInt() and 0xFF) }
+        } catch (e: Exception) {
+            Log.e(TAG, "computeFileSha256 失败", e)
+            null
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // 数据类
+    // ------------------------------------------------------------------
+
+    private data class DownloadCompletionInfo(
+        val apkName: String,
+        val expectedSha256: String?,
+        val expectedSize: Long,
+        val candidates: List<String>,
+        val candidateIndex: Int
+    )
+
+    private data class DownloadQueryResult(
+        val rowFound: Boolean,
+        val status: Int? = null,
+        val error: Exception? = null
+    )
+
+    private class UpdateInfo(
+            val version: String,
+            val releaseNotes: String?,
+            val releasePageUrl: String?,
+            val apkName: String?,
+            val downloadUrls: List<String>,
+            val expectedSha256: String? = null,
+            val expectedSize: Long? = null
+    )
+
+}

@@ -1,0 +1,1047 @@
+#include <jni.h>
+
+#include <pthread.h>
+#include <string.h>
+
+#include <Limelight.h>
+
+#include <opus_multistream.h>
+#include <android/log.h>
+
+#include <cpu-features.h>
+
+#if defined(__aarch64__)
+#include <sys/auxv.h>
+#include <asm/hwcap.h>
+#endif
+
+#include "audio_haptics_android_adapter_bridge.h"
+
+#define AUDIO_BACKLOG_DROP_THRESHOLD_MS 40
+
+static OpusMSDecoder* Decoder;
+static OPUS_MULTISTREAM_CONFIGURATION OpusConfig;
+
+static JavaVM *JVM;
+static pthread_key_t JniEnvKey;
+static pthread_once_t JniEnvKeyInitOnce = PTHREAD_ONCE_INIT;
+static jclass GlobalBridgeClass;
+static jmethodID BridgeDrSetupMethod;
+static jmethodID BridgeDrStartMethod;
+static jmethodID BridgeDrStopMethod;
+static jmethodID BridgeDrCleanupMethod;
+static jmethodID BridgeDrSubmitDecodeUnitMethod;
+static jmethodID BridgeDrSubmitPyrowaveDecodeUnitMethod;
+static int BridgeVideoFormat;
+static jmethodID BridgeArInitMethod;
+static jmethodID BridgeArStartMethod;
+static jmethodID BridgeArStopMethod;
+static jmethodID BridgeArCleanupMethod;
+static jmethodID BridgeArPlaySampleMethod;
+static jmethodID BridgeArPlayEncodedSampleMethod;
+static jmethodID BridgeClStageStartingMethod;
+static jmethodID BridgeClStageCompleteMethod;
+static jmethodID BridgeClStageFailedMethod;
+static jmethodID BridgeClConnectionStartedMethod;
+static jmethodID BridgeClConnectionTerminatedMethod;
+static jmethodID BridgeClRumbleMethod;
+static jmethodID BridgeClConnectionStatusUpdateMethod;
+static jmethodID BridgeClSetHdrModeMethod;
+static jmethodID BridgeClRumbleTriggersMethod;
+static jmethodID BridgeClSetAdaptiveTriggersMethod;
+static jmethodID BridgeClSetMotionEventStateMethod;
+static jmethodID BridgeClSetControllerLEDMethod;
+static jmethodID BridgeClDs5HapticsPcmMethod;
+static jmethodID BridgeClDs5HapticsIrMethod;
+static jmethodID BridgeClDs5HapticsIrExtendedMethod;
+static bool s_authoredHapticsEnabled;
+static jmethodID BridgeClDs5HapticsStateMethod;
+static jmethodID BridgeClResolutionChangedMethod;
+static jmethodID BridgeClClipboardDataMethod;
+static jmethodID BridgeClCursorUpdateMethod;
+static jmethodID BridgeClRemoteTextContextMethod;
+static jmethodID BridgeClHostSessionStateMethod;
+static jbyteArray DecodedFrameBuffer;
+static jshortArray DecodedAudioBuffer;
+// Pre-allocated byte buffer for AC3/E-AC3 raw frame passthrough.
+// AC3 max frame size at 640 kbps / 32 ms = 2560 bytes; round up for E-AC3 headroom.
+// E-AC3 frame size: a single independent + up to 8 dependent substreams
+// can stack to ~8 KB; pad to 16 KB for headroom. AC3 alone tops out around
+// 2.5 KB at 640 kbps so this is generous either way.
+#define ENCODED_AUDIO_BUFFER_SIZE 16384
+static jbyteArray EncodedAudioBuffer;
+
+void BridgeClRemoteTextContext(const LI_REMOTE_TEXT_CONTEXT* context);
+void BridgeClHostSessionState(uint8_t state);
+
+void DetachThread(void* context) {
+    (*JVM)->DetachCurrentThread(JVM);
+}
+
+void JniEnvKeyInit(void) {
+    // Create a TLS slot for the JNIEnv. We aren't in
+    // a pthread during init, so we must wait until we
+    // are to initialize this.
+    pthread_key_create(&JniEnvKey, DetachThread);
+}
+
+JNIEnv* GetThreadEnv(void) {
+    JNIEnv* env;
+
+    // First check if this is already attached to the JVM
+    if ((*JVM)->GetEnv(JVM, (void**)&env, JNI_VERSION_1_4) == JNI_OK) {
+        return env;
+    }
+
+    // Create the TLS slot now that we're safely in a pthread
+    pthread_once(&JniEnvKeyInitOnce, JniEnvKeyInit);
+
+    // Try the TLS to see if we already have a JNIEnv
+    env = pthread_getspecific(JniEnvKey);
+    if (env)
+        return env;
+
+    // This is the thread's first JNI call, so attach now
+    (*JVM)->AttachCurrentThread(JVM, &env, NULL);
+
+    // Write our JNIEnv to TLS, so we detach before dying
+    pthread_setspecific(JniEnvKey, env);
+
+    return env;
+}
+
+JNIEXPORT void JNICALL
+Java_com_limelight_nvstream_jni_MoonBridge_init(JNIEnv *env, jclass clazz) {
+    (*env)->GetJavaVM(env, &JVM);
+    GlobalBridgeClass = (*env)->NewGlobalRef(env, (*env)->FindClass(env, "com/limelight/nvstream/jni/MoonBridge"));
+    BridgeDrSetupMethod = (*env)->GetStaticMethodID(env, clazz, "bridgeDrSetup", "(IIII)I");
+    BridgeDrStartMethod = (*env)->GetStaticMethodID(env, clazz, "bridgeDrStart", "()V");
+    BridgeDrStopMethod = (*env)->GetStaticMethodID(env, clazz, "bridgeDrStop", "()V");
+    BridgeDrCleanupMethod = (*env)->GetStaticMethodID(env, clazz, "bridgeDrCleanup", "()V");
+    BridgeDrSubmitDecodeUnitMethod = (*env)->GetStaticMethodID(env, clazz, "bridgeDrSubmitDecodeUnit", "([BIIIICJJJ)I");
+    BridgeDrSubmitPyrowaveDecodeUnitMethod = (*env)->GetStaticMethodID(env, clazz, "bridgeDrSubmitPyrowaveDecodeUnit", "([BIIIICJJJ[B)I");
+    BridgeArInitMethod = (*env)->GetStaticMethodID(env, clazz, "bridgeArInit", "(IIIII)I");
+    BridgeArStartMethod = (*env)->GetStaticMethodID(env, clazz, "bridgeArStart", "()V");
+    BridgeArStopMethod = (*env)->GetStaticMethodID(env, clazz, "bridgeArStop", "()V");
+    BridgeArCleanupMethod = (*env)->GetStaticMethodID(env, clazz, "bridgeArCleanup", "()V");
+    BridgeArPlaySampleMethod = (*env)->GetStaticMethodID(env, clazz, "bridgeArPlaySample", "([S)V");
+    BridgeArPlayEncodedSampleMethod = (*env)->GetStaticMethodID(env, clazz, "bridgeArPlayEncodedSample", "([BI)V");
+    BridgeClStageStartingMethod = (*env)->GetStaticMethodID(env, clazz, "bridgeClStageStarting", "(I)V");
+    BridgeClStageCompleteMethod = (*env)->GetStaticMethodID(env, clazz, "bridgeClStageComplete", "(I)V");
+    BridgeClStageFailedMethod = (*env)->GetStaticMethodID(env, clazz, "bridgeClStageFailed", "(II)V");
+    BridgeClConnectionStartedMethod = (*env)->GetStaticMethodID(env, clazz, "bridgeClConnectionStarted", "()V");
+    BridgeClConnectionTerminatedMethod = (*env)->GetStaticMethodID(env, clazz, "bridgeClConnectionTerminated", "(I)V");
+    BridgeClRumbleMethod = (*env)->GetStaticMethodID(env, clazz, "bridgeClRumble", "(SSS)V");
+    BridgeClConnectionStatusUpdateMethod = (*env)->GetStaticMethodID(env, clazz, "bridgeClConnectionStatusUpdate", "(I)V");
+    BridgeClSetHdrModeMethod = (*env)->GetStaticMethodID(env, clazz, "bridgeClSetHdrMode", "(Z[B)V");
+    BridgeClRumbleTriggersMethod = (*env)->GetStaticMethodID(env, clazz, "bridgeClRumbleTriggers", "(SSS)V");
+    BridgeClSetAdaptiveTriggersMethod = (*env)->GetStaticMethodID(env, clazz, "bridgeClSetAdaptiveTriggers", "(SBBB[B[B)V");
+    BridgeClSetMotionEventStateMethod = (*env)->GetStaticMethodID(env, clazz, "bridgeClSetMotionEventState", "(SBS)V");
+    BridgeClSetControllerLEDMethod = (*env)->GetStaticMethodID(env, clazz, "bridgeClSetControllerLED", "(SBBB)V");
+    BridgeClDs5HapticsPcmMethod = (*env)->GetStaticMethodID(env, clazz, "bridgeClDs5HapticsPcm", "(SBIJIIBB[B)V");
+    BridgeClDs5HapticsStateMethod = (*env)->GetStaticMethodID(env, clazz, "bridgeClDs5HapticsState", "(S[B)V");
+    BridgeClDs5HapticsIrMethod = (*env)->GetStaticMethodID(env, clazz, "bridgeClDs5HapticsIr", "(SBIJI[F)V");
+    BridgeClDs5HapticsIrExtendedMethod = (*env)->GetStaticMethodID(env, clazz, "bridgeClDs5HapticsIrExtended", "(SBIJI[FIJ[F[I[J[F)V");
+    BridgeClResolutionChangedMethod = (*env)->GetStaticMethodID(env, clazz, "bridgeClResolutionChanged", "(II)V");
+    BridgeClClipboardDataMethod = (*env)->GetStaticMethodID(env, clazz, "bridgeClClipboardData", "([B)V");
+    BridgeClCursorUpdateMethod = (*env)->GetStaticMethodID(env, clazz, "bridgeClCursorUpdate", "(IIIIII[B)V");
+    BridgeClRemoteTextContextMethod = (*env)->GetStaticMethodID(env, clazz, "bridgeClRemoteTextContext", "([IJJ)V");
+    LiSetRemoteTextContextCallback(BridgeClRemoteTextContext);
+    BridgeClHostSessionStateMethod = (*env)->GetStaticMethodID(env, clazz, "bridgeClHostSessionState", "(Z)V");
+    LiSetHostSessionStateCallback(BridgeClHostSessionState);
+}
+
+int BridgeDrSetup(int videoFormat, int width, int height, int redrawRate, void* context, int drFlags) {
+    JNIEnv* env = GetThreadEnv();
+    int err;
+
+    err = (*env)->CallStaticIntMethod(env, GlobalBridgeClass, BridgeDrSetupMethod, videoFormat, width, height, redrawRate);
+    if ((*env)->ExceptionCheck(env)) {
+        // This is called on a Java thread, so it's safe to return
+        return -1;
+    }
+    else if (err != 0) {
+        return err;
+    }
+
+    // Use a 32K frame buffer that will increase if needed
+    BridgeVideoFormat = videoFormat;
+    DecodedFrameBuffer = (*env)->NewGlobalRef(env, (*env)->NewByteArray(env, 32768));
+
+    return 0;
+}
+
+void BridgeDrStart(void) {
+    JNIEnv* env = GetThreadEnv();
+
+    (*env)->CallStaticVoidMethod(env, GlobalBridgeClass, BridgeDrStartMethod);
+}
+
+void BridgeDrStop(void) {
+    JNIEnv* env = GetThreadEnv();
+
+    (*env)->CallStaticVoidMethod(env, GlobalBridgeClass, BridgeDrStopMethod);
+}
+
+void BridgeDrCleanup(void) {
+    JNIEnv* env = GetThreadEnv();
+
+    (*env)->DeleteGlobalRef(env, DecodedFrameBuffer);
+
+    (*env)->CallStaticVoidMethod(env, GlobalBridgeClass, BridgeDrCleanupMethod);
+}
+
+int BridgeDrSubmitDecodeUnit(PDECODE_UNIT decodeUnit) {
+    JNIEnv* env = GetThreadEnv();
+    int ret;
+
+    // Increase the size of our frame data buffer if our frame won't fit
+    if ((*env)->GetArrayLength(env, DecodedFrameBuffer) < decodeUnit->fullLength) {
+        (*env)->DeleteGlobalRef(env, DecodedFrameBuffer);
+        DecodedFrameBuffer = (*env)->NewGlobalRef(env, (*env)->NewByteArray(env, decodeUnit->fullLength));
+    }
+
+    PLENTRY currentEntry;
+    int offset;
+
+    currentEntry = decodeUnit->bufferList;
+    offset = 0;
+    while (currentEntry != NULL) {
+        // Submit parameter set NALUs separately from picture data
+        if (currentEntry->bufferType != BUFFER_TYPE_PICDATA) {
+            // Use the beginning of the buffer each time since this is a separate
+            // invocation of the decoder each time.
+            (*env)->SetByteArrayRegion(env, DecodedFrameBuffer, 0, currentEntry->length, (jbyte*)currentEntry->data);
+
+            ret = (*env)->CallStaticIntMethod(env, GlobalBridgeClass, BridgeDrSubmitDecodeUnitMethod,
+                                              DecodedFrameBuffer, currentEntry->length, currentEntry->bufferType,
+                                              decodeUnit->frameNumber, decodeUnit->frameType, (jchar)decodeUnit->frameHostProcessingLatency,
+                                              (jlong)decodeUnit->receiveTimeUs, (jlong)decodeUnit->enqueueTimeUs,
+                                              (jlong)decodeUnit->presentationTimeUs);
+            if ((*env)->ExceptionCheck(env)) {
+                // We will crash here
+                (*JVM)->DetachCurrentThread(JVM);
+                return DR_OK;
+            }
+            else if (ret != DR_OK) {
+                return ret;
+            }
+        }
+        else {
+            (*env)->SetByteArrayRegion(env, DecodedFrameBuffer, offset, currentEntry->length, (jbyte*)currentEntry->data);
+            offset += currentEntry->length;
+        }
+
+        currentEntry = currentEntry->next;
+    }
+
+    if (BridgeVideoFormat == VIDEO_FORMAT_PYROWAVE) {
+        jbyteArray metadata = NULL;
+        if (decodeUnit->pyrowaveMetadataLength != 0) {
+            if (decodeUnit->pyrowaveMetadata == NULL) return DR_NEED_IDR;
+            metadata = (*env)->NewByteArray(env, decodeUnit->pyrowaveMetadataLength);
+            if (metadata == NULL) {
+                // This callback runs on an attached native decoder thread.
+                // Do not leave an allocation exception pending across frames.
+                if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+                return DR_NEED_IDR;
+            }
+            (*env)->SetByteArrayRegion(env, metadata, 0, decodeUnit->pyrowaveMetadataLength,
+                                      (const jbyte*)decodeUnit->pyrowaveMetadata);
+            if ((*env)->ExceptionCheck(env)) {
+                (*env)->DeleteLocalRef(env, metadata);
+                (*env)->ExceptionClear(env);
+                return DR_NEED_IDR;
+            }
+        }
+        ret = (*env)->CallStaticIntMethod(env, GlobalBridgeClass, BridgeDrSubmitPyrowaveDecodeUnitMethod,
+                                         DecodedFrameBuffer, offset, BUFFER_TYPE_PICDATA,
+                                         decodeUnit->frameNumber, decodeUnit->frameType, (jchar)decodeUnit->frameHostProcessingLatency,
+                                         (jlong)decodeUnit->receiveTimeUs, (jlong)decodeUnit->enqueueTimeUs,
+                                         (jlong)decodeUnit->presentationTimeUs, metadata);
+        if (metadata != NULL) (*env)->DeleteLocalRef(env, metadata);
+    } else {
+        ret = (*env)->CallStaticIntMethod(env, GlobalBridgeClass, BridgeDrSubmitDecodeUnitMethod,
+                                       DecodedFrameBuffer, offset, BUFFER_TYPE_PICDATA,
+                                       decodeUnit->frameNumber, decodeUnit->frameType, (jchar)decodeUnit->frameHostProcessingLatency,
+                                       (jlong)decodeUnit->receiveTimeUs, (jlong)decodeUnit->enqueueTimeUs,
+                                       (jlong)decodeUnit->presentationTimeUs);
+    }
+    if ((*env)->ExceptionCheck(env)) {
+        // We will crash here
+        (*JVM)->DetachCurrentThread(JVM);
+        return DR_OK;
+    }
+    else {
+        return ret;
+    }
+}
+
+int BridgeArInit(int audioConfiguration, POPUS_MULTISTREAM_CONFIGURATION opusConfig, void* context, int flags) {
+    JNIEnv* env = GetThreadEnv();
+    int err;
+
+    int negotiatedCodec = LiGetNegotiatedAudioCodec();
+    int negotiatedBitrate = LiGetNegotiatedAudioBitrate();
+
+    err = (*env)->CallStaticIntMethod(env, GlobalBridgeClass, BridgeArInitMethod,
+                                      audioConfiguration, opusConfig->sampleRate, opusConfig->samplesPerFrame,
+                                      negotiatedCodec, negotiatedBitrate);
+    if ((*env)->ExceptionCheck(env)) {
+        // This is called on a Java thread, so it's safe to return
+        err = -1;
+    }
+    if (err == 0) {
+        memcpy(&OpusConfig, opusConfig, sizeof(*opusConfig));
+
+        if (negotiatedCodec == AUDIO_CODEC_OPUS) {
+            // PCM path: create the Opus decoder + short-array sink.
+            Decoder = opus_multistream_decoder_create(opusConfig->sampleRate,
+                                                      opusConfig->channelCount,
+                                                      opusConfig->streams,
+                                                      opusConfig->coupledStreams,
+                                                      opusConfig->mapping,
+                                                      &err);
+            if (Decoder == NULL) {
+                (*env)->CallStaticVoidMethod(env, GlobalBridgeClass, BridgeArCleanupMethod);
+                return -1;
+            }
+
+            // We know ahead of time what the buffer size will be for decoded audio, so pre-allocate it
+            DecodedAudioBuffer = (*env)->NewGlobalRef(env, (*env)->NewShortArray(env, opusConfig->channelCount * opusConfig->samplesPerFrame));
+
+            audio_haptics_android_adapter_init(
+                opusConfig->sampleRate, opusConfig->channelCount);
+        } else {
+            // Encoded passthrough (AC3 / E-AC3): skip Opus decoder, allocate raw byte buffer.
+            Decoder = NULL;
+            EncodedAudioBuffer = (*env)->NewGlobalRef(env, (*env)->NewByteArray(env, ENCODED_AUDIO_BUFFER_SIZE));
+            __android_log_print(ANDROID_LOG_INFO, "moonlight-jni",
+                                "BridgeArInit: codec=%d (passthrough), bitrate=%d bps",
+                                negotiatedCodec, negotiatedBitrate);
+        }
+    }
+
+    return err;
+}
+
+void BridgeArStart(void) {
+    JNIEnv* env = GetThreadEnv();
+
+    (*env)->CallStaticVoidMethod(env, GlobalBridgeClass, BridgeArStartMethod);
+}
+
+void BridgeArStop(void) {
+    JNIEnv* env = GetThreadEnv();
+
+    (*env)->CallStaticVoidMethod(env, GlobalBridgeClass, BridgeArStopMethod);
+}
+
+void BridgeArCleanup() {
+    JNIEnv* env = GetThreadEnv();
+
+    audio_haptics_android_adapter_cleanup();
+
+    if (Decoder != NULL) {
+        opus_multistream_decoder_destroy(Decoder);
+        Decoder = NULL;
+    }
+
+    if (DecodedAudioBuffer != NULL) {
+        (*env)->DeleteGlobalRef(env, DecodedAudioBuffer);
+        DecodedAudioBuffer = NULL;
+    }
+
+    if (EncodedAudioBuffer != NULL) {
+        (*env)->DeleteGlobalRef(env, EncodedAudioBuffer);
+        EncodedAudioBuffer = NULL;
+    }
+
+    (*env)->CallStaticVoidMethod(env, GlobalBridgeClass, BridgeArCleanupMethod);
+}
+
+void BridgeArDecodeAndPlaySample(char* sampleData, int sampleLength) {
+    JNIEnv* env = GetThreadEnv();
+
+    // Encoded passthrough path (AC3 / E-AC3): hand the raw bitstream to Java
+    // verbatim, no Opus decode. Drop oversized frames to avoid buffer overrun.
+    if (Decoder == NULL) {
+        if (sampleLength <= 0 || sampleLength > ENCODED_AUDIO_BUFFER_SIZE) {
+            __android_log_print(ANDROID_LOG_WARN, "moonlight-jni",
+                                "BridgeArDecodeAndPlaySample: dropping oversized encoded frame (%d bytes)", sampleLength);
+            return;
+        }
+        (*env)->SetByteArrayRegion(env, EncodedAudioBuffer, 0, sampleLength, (const jbyte*)sampleData);
+        // Java side reads the leading sampleLength bytes (first 2 bytes of an AC3
+        // frame are the sync word 0x0B77, length is encoded inside the bitstream).
+        (*env)->CallStaticVoidMethod(env, GlobalBridgeClass, BridgeArPlayEncodedSampleMethod, EncodedAudioBuffer, (jint) sampleLength);
+        if ((*env)->ExceptionCheck(env)) {
+            (*JVM)->DetachCurrentThread(JVM);
+        }
+        return;
+    }
+
+    jshort* decodedData = (*env)->GetPrimitiveArrayCritical(env, DecodedAudioBuffer, NULL);
+
+    int decodeLen = opus_multistream_decode(Decoder,
+                                            (const unsigned char*)sampleData,
+                                            sampleLength,
+                                            decodedData,
+                                            OpusConfig.samplesPerFrame,
+                                            0);
+    if (decodeLen > 0) {
+        // Decide whether to retain this PCM frame before audio-derived analysis.
+        // Keeping the backlog gate here guarantees that the haptics pipeline
+        // observe exactly the same frames that are handed to AudioTrack. Previously
+        // AndroidAudioRenderer dropped the frame after haptics had already processed
+        // it, which made vibration drift from the sound during network bursts.
+        int pendingAudioDurationMs = LiGetPendingAudioDuration();
+        if (pendingAudioDurationMs >= AUDIO_BACKLOG_DROP_THRESHOLD_MS) {
+            (*env)->ReleasePrimitiveArrayCritical(
+                env, DecodedAudioBuffer, decodedData, JNI_ABORT);
+            __android_log_print(
+                ANDROID_LOG_INFO,
+                "moonlight-jni",
+                "Too much pending audio data: %d ms",
+                pendingAudioDurationMs);
+            return;
+        }
+
+        // Feed retained PCM directly into the project-owned audio haptics SDK.
+        // The adapter performs no JNI calls while the critical array is held.
+        audio_haptics_android_adapter_process_frame(
+            (const int16_t*)decodedData,
+            decodeLen);
+
+        // We must release the array elements before making further JNI calls
+        (*env)->ReleasePrimitiveArrayCritical(env, DecodedAudioBuffer, decodedData, 0);
+
+        (*env)->CallStaticVoidMethod(env, GlobalBridgeClass, BridgeArPlaySampleMethod, DecodedAudioBuffer);
+        audio_haptics_android_adapter_notify();
+        if ((*env)->ExceptionCheck(env)) {
+            // We will crash here
+            (*JVM)->DetachCurrentThread(JVM);
+        }
+    }
+    else {
+        // We can abort here to avoid the copy back since no data was modified
+        (*env)->ReleasePrimitiveArrayCritical(env, DecodedAudioBuffer, decodedData, JNI_ABORT);
+    }
+}
+
+void BridgeClStageStarting(int stage) {
+    JNIEnv* env = GetThreadEnv();
+
+    (*env)->CallStaticVoidMethod(env, GlobalBridgeClass, BridgeClStageStartingMethod, stage);
+}
+
+void BridgeClStageComplete(int stage) {
+    JNIEnv* env = GetThreadEnv();
+
+    (*env)->CallStaticVoidMethod(env, GlobalBridgeClass, BridgeClStageCompleteMethod, stage);
+}
+
+void BridgeClStageFailed(int stage, int errorCode) {
+    JNIEnv* env = GetThreadEnv();
+
+    (*env)->CallStaticVoidMethod(env, GlobalBridgeClass, BridgeClStageFailedMethod, stage, errorCode);
+}
+
+void BridgeClConnectionStarted(void) {
+    JNIEnv* env = GetThreadEnv();
+
+    (*env)->CallStaticVoidMethod(env, GlobalBridgeClass, BridgeClConnectionStartedMethod);
+}
+
+void BridgeClConnectionTerminated(int errorCode) {
+    JNIEnv* env = GetThreadEnv();
+
+    (*env)->CallStaticVoidMethod(env, GlobalBridgeClass, BridgeClConnectionTerminatedMethod, errorCode);
+    if ((*env)->ExceptionCheck(env)) {
+        // We will crash here
+        (*JVM)->DetachCurrentThread(JVM);
+    }
+}
+
+void BridgeClRumble(unsigned short controllerNumber, unsigned short lowFreqMotor, unsigned short highFreqMotor) {
+    JNIEnv* env = GetThreadEnv();
+
+    // The seemingly redundant short casts are required in order to convert the unsigned short to a signed short.
+    // If we leave it as an unsigned short, CheckJNI will fail when the value exceeds 32767. The cast itself is
+    // fine because the Java code treats the value as unsigned even though it's stored in a signed type.
+    (*env)->CallStaticVoidMethod(env, GlobalBridgeClass, BridgeClRumbleMethod, controllerNumber, (short)lowFreqMotor, (short)highFreqMotor);
+    if ((*env)->ExceptionCheck(env)) {
+        // We will crash here
+        (*JVM)->DetachCurrentThread(JVM);
+    }
+}
+
+void BridgeClConnectionStatusUpdate(int connectionStatus) {
+    JNIEnv* env = GetThreadEnv();
+
+    (*env)->CallStaticVoidMethod(env, GlobalBridgeClass, BridgeClConnectionStatusUpdateMethod, connectionStatus);
+    if ((*env)->ExceptionCheck(env)) {
+        // We will crash here
+        (*JVM)->DetachCurrentThread(JVM);
+        return;
+    }
+}
+
+void BridgeClSetHdrMode(bool enabled, void* hdrMetadata) {
+    JNIEnv* env = GetThreadEnv();
+
+    jbyteArray hdrMetadataByteArray = NULL;
+
+    // Check if HDR metadata was provided
+    if (enabled && hdrMetadata != NULL) {
+        hdrMetadataByteArray = (*env)->NewByteArray(env, sizeof(SS_HDR_METADATA));
+        (*env)->SetByteArrayRegion(env, hdrMetadataByteArray, 0, sizeof(SS_HDR_METADATA), (jbyte*)hdrMetadata);
+    }
+
+    (*env)->CallStaticVoidMethod(env, GlobalBridgeClass, BridgeClSetHdrModeMethod, enabled, hdrMetadataByteArray);
+    if ((*env)->ExceptionCheck(env)) {
+        // We will crash here
+        (*JVM)->DetachCurrentThread(JVM);
+    }
+}
+
+void BridgeClRumbleTriggers(unsigned short controllerNumber, unsigned short leftTrigger, unsigned short rightTrigger) {
+    JNIEnv* env = GetThreadEnv();
+
+    // The seemingly redundant short casts are required in order to convert the unsigned short to a signed short.
+    // If we leave it as an unsigned short, CheckJNI will fail when the value exceeds 32767. The cast itself is
+    // fine because the Java code treats the value as unsigned even though it's stored in a signed type.
+    (*env)->CallStaticVoidMethod(env, GlobalBridgeClass, BridgeClRumbleTriggersMethod, controllerNumber, (short)leftTrigger, (short)rightTrigger);
+    if ((*env)->ExceptionCheck(env)) {
+        // We will crash here
+        (*JVM)->DetachCurrentThread(JVM);
+    }
+}
+
+void BridgeClSetAdaptiveTriggers(uint16_t controllerNumber, uint8_t eventFlags,
+                                 uint8_t typeLeft, uint8_t typeRight,
+                                 uint8_t* left, uint8_t* right) {
+    JNIEnv* env = GetThreadEnv();
+    jbyteArray leftArray = (*env)->NewByteArray(env, DS_EFFECT_PAYLOAD_SIZE);
+    if (leftArray == NULL) {
+        (*env)->ExceptionClear(env);
+        return;
+    }
+    jbyteArray rightArray = (*env)->NewByteArray(env, DS_EFFECT_PAYLOAD_SIZE);
+    if (rightArray == NULL) {
+        (*env)->ExceptionClear(env);
+        (*env)->DeleteLocalRef(env, leftArray);
+        return;
+    }
+
+    (*env)->SetByteArrayRegion(env, leftArray, 0, DS_EFFECT_PAYLOAD_SIZE, (const jbyte*)left);
+    (*env)->SetByteArrayRegion(env, rightArray, 0, DS_EFFECT_PAYLOAD_SIZE, (const jbyte*)right);
+    if (!(*env)->ExceptionCheck(env)) {
+        // Casts to signed types are required for CheckJNI; see BridgeClRumble.
+        (*env)->CallStaticVoidMethod(env, GlobalBridgeClass, BridgeClSetAdaptiveTriggersMethod,
+                                     (jshort)controllerNumber, (jbyte)eventFlags,
+                                     (jbyte)typeLeft, (jbyte)typeRight,
+                                     leftArray, rightArray);
+    }
+
+    (*env)->DeleteLocalRef(env, rightArray);
+    (*env)->DeleteLocalRef(env, leftArray);
+    if ((*env)->ExceptionCheck(env)) {
+        // We will crash here
+        (*JVM)->DetachCurrentThread(JVM);
+    }
+}
+
+void BridgeClSetMotionEventState(uint16_t controllerNumber, uint8_t motionType, uint16_t reportRateHz) {
+    JNIEnv* env = GetThreadEnv();
+
+    (*env)->CallStaticVoidMethod(env, GlobalBridgeClass, BridgeClSetMotionEventStateMethod, controllerNumber, motionType, reportRateHz);
+    if ((*env)->ExceptionCheck(env)) {
+        // We will crash here
+        (*JVM)->DetachCurrentThread(JVM);
+    }
+}
+
+void BridgeClSetControllerLED(uint16_t controllerNumber, uint8_t r, uint8_t g, uint8_t b) {
+    JNIEnv* env = GetThreadEnv();
+
+    // These jbyte casts are necessary to satisfy CheckJNI
+    (*env)->CallStaticVoidMethod(env, GlobalBridgeClass, BridgeClSetControllerLEDMethod, controllerNumber, (jbyte)r, (jbyte)g, (jbyte)b);
+    if ((*env)->ExceptionCheck(env)) {
+        // We will crash here
+        (*JVM)->DetachCurrentThread(JVM);
+    }
+}
+
+static void BridgeClDs5HapticsState(uint16_t controllerNumber, const uint8_t* state) {
+    JNIEnv* env = GetThreadEnv();
+    jbyteArray bytes = (*env)->NewByteArray(env, 8);
+    if (bytes == NULL) { (*env)->ExceptionClear(env); return; }
+    (*env)->SetByteArrayRegion(env, bytes, 0, 8, (const jbyte*)state);
+    if (!(*env)->ExceptionCheck(env)) {
+        (*env)->CallStaticVoidMethod(env, GlobalBridgeClass, BridgeClDs5HapticsStateMethod,
+                                   (jshort)controllerNumber, bytes);
+    }
+    (*env)->DeleteLocalRef(env, bytes);
+    if ((*env)->ExceptionCheck(env)) (*JVM)->DetachCurrentThread(JVM);
+}
+
+void BridgeClDs5HapticsPcm(const LI_DS5_HAPTICS_PCM_FRAME* frame) {
+    JNIEnv* env = GetThreadEnv();
+
+    // Zero-length frames are valid: common-c uses them to carry lifecycle
+    // flags (STREAM_END / DISCONTINUITY) so the client can flush.
+    if (frame == NULL || (frame->pcmDataLength != 0 && frame->pcmData == NULL)) {
+        return;
+    }
+
+    // Copy the PCM data out of the callback-owned buffer. The callback is
+    // invoked on the control receive thread and the frame pointer is only
+    // valid during the call.
+    jbyteArray pcm = (*env)->NewByteArray(env, (jsize)frame->pcmDataLength);
+    if (pcm == NULL) {
+        (*env)->ExceptionClear(env);
+        return;
+    }
+    if (frame->pcmDataLength > 0) {
+        (*env)->SetByteArrayRegion(env, pcm, 0, (jsize)frame->pcmDataLength,
+                                   (const jbyte*)frame->pcmData);
+    }
+    if (!(*env)->ExceptionCheck(env)) {
+        (*env)->CallStaticVoidMethod(env, GlobalBridgeClass, BridgeClDs5HapticsPcmMethod,
+                                     (jshort)frame->controllerNumber, (jbyte)frame->flags,
+                                     (jint)frame->sequenceNumber, (jlong)frame->presentationTimeUs,
+                                     (jint)frame->sampleRate, (jint)frame->frameCount,
+                                     (jbyte)frame->channelCount, (jbyte)frame->bitsPerSample,
+                                     pcm);
+    }
+
+    (*env)->DeleteLocalRef(env, pcm);
+    if ((*env)->ExceptionCheck(env)) {
+        // We will crash here
+        (*JVM)->DetachCurrentThread(JVM);
+    }
+}
+
+static void authoredIrBaseValues(const LI_DS5_HAPTICS_IR_FRAME_V2* frame, jfloat values[10]) {
+    for (int i = 0; i < 2; i++) {
+        values[i * 5] = frame->lanes[i].rmsAmplitude;
+        values[i * 5 + 1] = frame->lanes[i].peakAmplitude;
+        values[i * 5 + 2] = frame->lanes[i].transientStrength;
+        values[i * 5 + 3] = frame->lanes[i].lowBandRatio;
+        values[i * 5 + 4] = frame->lanes[i].zeroCrossingRateHz;
+    }
+}
+
+void BridgeClDs5HapticsIr(const LI_DS5_HAPTICS_IR_FRAME_V2* frame) {
+    if (frame == NULL) return;
+    JNIEnv* env = GetThreadEnv();
+    jfloat values[10];
+    authoredIrBaseValues(frame, values);
+    jfloatArray lanes = (*env)->NewFloatArray(env, 10);
+    if (lanes == NULL) { (*env)->ExceptionClear(env); return; }
+    (*env)->SetFloatArrayRegion(env, lanes, 0, 10, values);
+    if (!(*env)->ExceptionCheck(env)) {
+        (*env)->CallStaticVoidMethod(env, GlobalBridgeClass, BridgeClDs5HapticsIrMethod,
+            (jshort)frame->controllerNumber, (jbyte)frame->flags, (jint)frame->sourceSequenceNumber,
+            (jlong)frame->timestampUs, (jint)frame->sourceFrameCount, lanes);
+    }
+    (*env)->DeleteLocalRef(env, lanes);
+    if ((*env)->ExceptionCheck(env)) (*JVM)->DetachCurrentThread(JVM);
+}
+
+void BridgeClDs5HapticsIrExtended(const LI_DS5_HAPTICS_IR_EXTENDED_FRAME* frame) {
+    if (frame == NULL || frame->eventCount > LI_DS5_HAPTICS_IR_EXTENDED_MAX_EVENTS) return;
+    JNIEnv* env = GetThreadEnv();
+    jfloat baseValues[10], values[4], features[16];
+    jint ids[8];
+    jlong times[8];
+    authoredIrBaseValues(&frame->base, baseValues);
+    for (int i = 0; i < 2; i++) {
+        values[i*2] = frame->lanes[i].continuousLow;
+        values[i*2+1] = frame->lanes[i].continuousHigh;
+    }
+    for (int i = 0; i < frame->eventCount; i++) {
+        ids[i] = (jint)frame->events[i].eventId;
+        times[i] = (jlong)frame->events[i].sourceTimeUs;
+        features[i*2] = frame->events[i].leftStrength;
+        features[i*2+1] = frame->events[i].rightStrength;
+    }
+    jfloatArray baseLanes = NULL, lanes = NULL, eventFeatures = NULL;
+    jintArray eventIds = NULL;
+    jlongArray eventTimes = NULL;
+    baseLanes = (*env)->NewFloatArray(env, 10);
+    if (!baseLanes) goto allocation_failed;
+    lanes = (*env)->NewFloatArray(env, 4);
+    if (!lanes) goto allocation_failed;
+    eventIds = (*env)->NewIntArray(env, frame->eventCount);
+    if (!eventIds) goto allocation_failed;
+    eventTimes = (*env)->NewLongArray(env, frame->eventCount);
+    if (!eventTimes) goto allocation_failed;
+    eventFeatures = (*env)->NewFloatArray(env, frame->eventCount * 2);
+    if (!eventFeatures) goto allocation_failed;
+
+    (*env)->SetFloatArrayRegion(env, baseLanes, 0, 10, baseValues);
+    (*env)->SetFloatArrayRegion(env, lanes, 0, 4, values);
+    if (frame->eventCount) {
+        (*env)->SetIntArrayRegion(env, eventIds, 0, frame->eventCount, ids);
+        (*env)->SetLongArrayRegion(env, eventTimes, 0, frame->eventCount, times);
+        (*env)->SetFloatArrayRegion(env, eventFeatures, 0, frame->eventCount * 2, features);
+    }
+    if (!(*env)->ExceptionCheck(env)) (*env)->CallStaticVoidMethod(env, GlobalBridgeClass,
+        BridgeClDs5HapticsIrExtendedMethod, (jshort)frame->base.controllerNumber, (jbyte)frame->base.flags,
+        (jint)frame->base.sourceSequenceNumber, (jlong)frame->base.timestampUs,
+        (jint)frame->base.sourceFrameCount, baseLanes, (jint)frame->epoch,
+        (jlong)frame->windowEndUs, lanes, eventIds, eventTimes, eventFeatures);
+    goto cleanup;
+
+allocation_failed:
+    (*env)->ExceptionClear(env);
+cleanup:
+    if (baseLanes) (*env)->DeleteLocalRef(env, baseLanes);
+    if (lanes) (*env)->DeleteLocalRef(env, lanes);
+    if (eventIds) (*env)->DeleteLocalRef(env, eventIds);
+    if (eventTimes) (*env)->DeleteLocalRef(env, eventTimes);
+    if (eventFeatures) (*env)->DeleteLocalRef(env, eventFeatures);
+    if ((*env)->ExceptionCheck(env)) (*JVM)->DetachCurrentThread(JVM);
+}
+
+void BridgeClResolutionChanged(uint32_t width, uint32_t height) {
+    JNIEnv* env = GetThreadEnv();
+
+    (*env)->CallStaticVoidMethod(env, GlobalBridgeClass, BridgeClResolutionChangedMethod, (jint)width, (jint)height);
+    if ((*env)->ExceptionCheck(env)) {
+        // We will crash here
+        (*JVM)->DetachCurrentThread(JVM);
+    }
+}
+
+// Sunshine clipboard sync. Invoked from the control receive thread; we marshal the
+// payload as a fresh byte[] each time. The receive thread is dedicated and short-
+// lived per packet, so the cost of allocating a Java array per inbound clipboard
+// item (rare event) is acceptable. The wire format of `data` is opaque to native;
+// Java parses the v1 frame.
+void BridgeClClipboardData(const char* data, int length) {
+    JNIEnv* env = GetThreadEnv();
+
+    if (length < 0) {
+        return;
+    }
+
+    jbyteArray payload = (*env)->NewByteArray(env, (jsize)length);
+    if (payload == NULL) {
+        (*env)->ExceptionClear(env);
+        return;
+    }
+    if (length > 0) {
+        (*env)->SetByteArrayRegion(env, payload, 0, (jsize)length, (const jbyte*)data);
+    }
+
+    (*env)->CallStaticVoidMethod(env, GlobalBridgeClass, BridgeClClipboardDataMethod, payload);
+    (*env)->DeleteLocalRef(env, payload);
+    if ((*env)->ExceptionCheck(env)) {
+        (*JVM)->DetachCurrentThread(JVM);
+    }
+}
+
+void BridgeClCursorUpdate(const LI_CURSOR_UPDATE* update) {
+    JNIEnv* env = GetThreadEnv();
+    jbyteArray pixels = NULL;
+
+    if (update == NULL) {
+        return;
+    }
+
+    if ((update->flags & LI_CURSOR_UPDATE_FLAG_SHAPE) != 0 &&
+            update->pixels != NULL && update->pixelDataLength > 0) {
+        pixels = (*env)->NewByteArray(env, (jsize)update->pixelDataLength);
+        if (pixels == NULL) {
+            (*env)->ExceptionClear(env);
+            return;
+        }
+        (*env)->SetByteArrayRegion(env, pixels, 0, (jsize)update->pixelDataLength,
+                                   (const jbyte*)update->pixels);
+    }
+
+    (*env)->CallStaticVoidMethod(env, GlobalBridgeClass, BridgeClCursorUpdateMethod,
+                                 (jint)update->flags,
+                                 (jint)update->shapeId,
+                                 (jint)update->width,
+                                 (jint)update->height,
+                                 (jint)update->hotspotX,
+                                 (jint)update->hotspotY,
+                                 pixels);
+    if (pixels != NULL) {
+        (*env)->DeleteLocalRef(env, pixels);
+    }
+    if ((*env)->ExceptionCheck(env)) {
+        (*JVM)->DetachCurrentThread(JVM);
+    }
+}
+
+void BridgeClLogMessage(const char* format, ...) {
+    va_list va;
+    va_start(va, format);
+    __android_log_vprint(ANDROID_LOG_INFO, "moonlight-common-c", format, va);
+    va_end(va);
+}
+
+void BridgeClRemoteTextContext(const LI_REMOTE_TEXT_CONTEXT* context) {
+    JNIEnv* env = GetThreadEnv();
+    jint values[] = {
+        context->flags,
+        context->revision,
+        context->source,
+        context->cause,
+        context->anchorX,
+        context->anchorY,
+        context->elementLeft,
+        context->elementTop,
+        context->elementRight,
+        context->elementBottom,
+        context->caretLeft,
+        context->caretTop,
+        context->caretRight,
+        context->caretBottom,
+        context->captureWidth,
+        context->captureHeight,
+    };
+    jintArray array = (*env)->NewIntArray(env, sizeof(values) / sizeof(values[0]));
+    if (array == NULL) {
+        if ((*env)->ExceptionCheck(env)) {
+            (*env)->ExceptionClear(env);
+        }
+        return;
+    }
+
+    (*env)->SetIntArrayRegion(env, array, 0, sizeof(values) / sizeof(values[0]), values);
+    (*env)->CallStaticVoidMethod(env, GlobalBridgeClass, BridgeClRemoteTextContextMethod,
+                                 array, (jlong)context->activationId, (jlong)context->inputToken);
+    (*env)->DeleteLocalRef(env, array);
+    if ((*env)->ExceptionCheck(env)) {
+        (*env)->ExceptionDescribe(env);
+        (*env)->ExceptionClear(env);
+    }
+}
+
+void BridgeClHostSessionState(uint8_t state) {
+    JNIEnv* env = GetThreadEnv();
+    (*env)->CallStaticVoidMethod(env, GlobalBridgeClass, BridgeClHostSessionStateMethod,
+                                 state == LI_HOST_SESSION_LOCKED ? JNI_TRUE : JNI_FALSE);
+    if ((*env)->ExceptionCheck(env)) {
+        (*env)->ExceptionDescribe(env);
+        (*env)->ExceptionClear(env);
+    }
+}
+
+static DECODER_RENDERER_CALLBACKS BridgeVideoRendererCallbacks = {
+        .setup = BridgeDrSetup,
+        .start = BridgeDrStart,
+        .stop = BridgeDrStop,
+        .cleanup = BridgeDrCleanup,
+        .submitDecodeUnit = BridgeDrSubmitDecodeUnit,
+};
+
+static AUDIO_RENDERER_CALLBACKS BridgeAudioRendererCallbacks = {
+        .init = BridgeArInit,
+        .start = BridgeArStart,
+        .stop = BridgeArStop,
+        .cleanup = BridgeArCleanup,
+        .decodeAndPlaySample = BridgeArDecodeAndPlaySample,
+        .capabilities = CAPABILITY_SUPPORTS_ARBITRARY_AUDIO_DURATION
+};
+
+static CONNECTION_LISTENER_CALLBACKS BridgeConnListenerCallbacks = {
+        .stageStarting = BridgeClStageStarting,
+        .stageComplete = BridgeClStageComplete,
+        .stageFailed = BridgeClStageFailed,
+        .connectionStarted = BridgeClConnectionStarted,
+        .connectionTerminated = BridgeClConnectionTerminated,
+        .logMessage = BridgeClLogMessage,
+        .rumble = BridgeClRumble,
+        .connectionStatusUpdate = BridgeClConnectionStatusUpdate,
+        .setHdrMode = BridgeClSetHdrMode,
+        .rumbleTriggers = BridgeClRumbleTriggers,
+        .setMotionEventState = BridgeClSetMotionEventState,
+        .setControllerLED = BridgeClSetControllerLED,
+        .setAdaptiveTriggers = BridgeClSetAdaptiveTriggers,
+        // Set per connection below, only with a client-side rumble fallback.
+        .ds5HapticsPcm = NULL,
+        .resolutionChanged = BridgeClResolutionChanged,
+        .clipboardData = BridgeClClipboardData,
+        .cursorUpdate = BridgeClCursorUpdate,
+};
+
+static bool
+hasFastAes() {
+    int cpuCount = android_getCpuCount();
+    if (cpuCount <= 2) {
+        __android_log_print(ANDROID_LOG_DEBUG, "moonlight-jni",
+                            "AES capability source=core-limit cores=%d enabled=false",
+                            cpuCount);
+        return false;
+    }
+
+    // Prefer the kernel-provided ELF hardware capability on ARM64. The NDK
+    // cpufeatures fallback is retained for older toolchains and other ABIs.
+#if defined(__aarch64__) && defined(AT_HWCAP) && defined(HWCAP_AES)
+    unsigned long hwcaps = getauxval(AT_HWCAP);
+    if (hwcaps != 0) {
+        bool enabled = (hwcaps & HWCAP_AES) != 0;
+        __android_log_print(ANDROID_LOG_DEBUG, "moonlight-jni",
+                            "AES capability source=hwcap cores=%d enabled=%s",
+                            cpuCount, enabled ? "true" : "false");
+        return enabled;
+    }
+#endif
+
+    bool enabled;
+    const char* source = "cpufeatures";
+    switch (android_getCpuFamily()) {
+        case ANDROID_CPU_FAMILY_ARM:
+            enabled = !!(android_getCpuFeatures() & ANDROID_CPU_ARM_FEATURE_AES);
+            break;
+        case ANDROID_CPU_FAMILY_ARM64:
+            enabled = !!(android_getCpuFeatures() & ANDROID_CPU_ARM64_FEATURE_AES);
+            break;
+        case ANDROID_CPU_FAMILY_X86:
+        case ANDROID_CPU_FAMILY_X86_64:
+            enabled = !!(android_getCpuFeatures() & ANDROID_CPU_X86_FEATURE_AES_NI);
+            break;
+        case ANDROID_CPU_FAMILY_MIPS:
+        case ANDROID_CPU_FAMILY_MIPS64:
+            enabled = false;
+            break;
+        default:
+            // Assume new architectures will all have crypto acceleration (RISC-V will)
+            source = "architecture-default";
+            enabled = true;
+            break;
+    }
+
+    __android_log_print(ANDROID_LOG_DEBUG, "moonlight-jni",
+                        "AES capability source=%s cores=%d enabled=%s",
+                        source, cpuCount, enabled ? "true" : "false");
+    return enabled;
+}
+
+JNIEXPORT jint JNICALL
+Java_com_limelight_nvstream_jni_MoonBridge_getNegotiatedDynamicHdrFormat(JNIEnv *env, jclass clazz) {
+    return LiGetNegotiatedDynamicHdrFormat();
+}
+
+// Sunshine dynamic HDR negotiation state, staged by setDynamicHdrNegotiation()
+// before the connection starts. Zero defaults are the legacy client.
+static int s_dynamicHdrCaps;
+static int s_dynamicHdrDirectSurface;
+static int s_dynamicHdrPreference;
+
+JNIEXPORT void JNICALL
+Java_com_limelight_nvstream_jni_MoonBridge_setDynamicHdrNegotiation(JNIEnv *env, jclass clazz,
+                                                                    jint caps,
+                                                                    jint dolbyVisionDirectSurface,
+                                                                    jint dynamicHdrPreference) {
+    s_dynamicHdrCaps = caps;
+    s_dynamicHdrDirectSurface = dolbyVisionDirectSurface;
+    s_dynamicHdrPreference = dynamicHdrPreference;
+}
+
+JNIEXPORT void JNICALL
+Java_com_limelight_nvstream_jni_MoonBridge_setAuthoredHapticsEnabled(JNIEnv *env, jclass clazz, jboolean enabled) {
+    (void)env;
+    (void)clazz;
+    s_authoredHapticsEnabled = enabled;
+}
+
+JNIEXPORT jint JNICALL
+Java_com_limelight_nvstream_jni_MoonBridge_startConnection(JNIEnv *env, jclass clazz,
+                                                           jstring address, jstring appVersion, jstring gfeVersion,
+                                                           jstring rtspSessionUrl, jint serverCodecModeSupport,
+                                                           jint width, jint height, jint fps,
+                                                           jint bitrate, jint packetSize, jint streamingRemotely,
+                                                           jint audioConfiguration, jint supportedVideoFormats,
+                                                           jint clientRefreshRateX100,
+                                                           jbyteArray riAesKey, jbyteArray riAesIv,
+                                                           jint videoCapabilities,
+                                                           jint colorSpace, jint colorRange, jint hdrMode,
+                                                           jboolean enableMic, jboolean controlOnly,
+                                                           jint audioCodec, jint audioBitrate, jboolean authoredPcmHaptics, jint fecPercentage) {
+    SERVER_INFORMATION serverInfo = {
+            .address = (*env)->GetStringUTFChars(env, address, 0),
+            .serverInfoAppVersion = (*env)->GetStringUTFChars(env, appVersion, 0),
+            .serverInfoGfeVersion = gfeVersion ? (*env)->GetStringUTFChars(env, gfeVersion, 0) : NULL,
+            .rtspSessionUrl = rtspSessionUrl ? (*env)->GetStringUTFChars(env, rtspSessionUrl, 0) : NULL,
+            .serverCodecModeSupport = serverCodecModeSupport,
+    };
+    STREAM_CONFIGURATION streamConfig = {
+            .width = width,
+            .height = height,
+            .fps = fps,
+            .bitrate = bitrate,
+            .videoFecPercentage = fecPercentage,
+            .packetSize = packetSize,
+            .streamingRemotely = streamingRemotely,
+            .audioConfiguration = audioConfiguration,
+            .supportedVideoFormats = supportedVideoFormats,
+            .clientRefreshRateX100 = clientRefreshRateX100,
+            .encryptionFlags = ENCFLG_AUDIO | ENCFLG_MICROPHONE,
+            .colorSpace = colorSpace,
+            .colorRange = colorRange,
+            .hdrMode = hdrMode,  // 0=SDR, 1=HDR10/PQ, 2=HLG
+            .enableMic = enableMic,
+            .controlOnly = controlOnly,
+            .audioCodec = audioCodec,
+            .audioBitrate = audioBitrate,
+            .dynamicHdrCaps = s_dynamicHdrCaps,
+            .dolbyVisionDirectSurface = s_dynamicHdrDirectSurface,
+            .dynamicHdrPreference = s_dynamicHdrPreference
+    };
+
+    // Consume the staged negotiation state so it never leaks into a later
+    // connection that skipped the setter (per-connection semantics, no
+    // reliance on caller discipline).
+    s_dynamicHdrCaps = 0;
+    s_dynamicHdrDirectSurface = 0;
+    s_dynamicHdrPreference = 0;
+
+    jbyte* riAesKeyBuf = (*env)->GetByteArrayElements(env, riAesKey, NULL);
+    memcpy(streamConfig.remoteInputAesKey, riAesKeyBuf, sizeof(streamConfig.remoteInputAesKey));
+    (*env)->ReleaseByteArrayElements(env, riAesKey, riAesKeyBuf, JNI_ABORT);
+
+    jbyte* riAesIvBuf = (*env)->GetByteArrayElements(env, riAesIv, NULL);
+    memcpy(streamConfig.remoteInputAesIv, riAesIvBuf, sizeof(streamConfig.remoteInputAesIv));
+    (*env)->ReleaseByteArrayElements(env, riAesIv, riAesIvBuf, JNI_ABORT);
+
+    BridgeVideoRendererCallbacks.capabilities = videoCapabilities;
+
+    // Enable all encryption features if the platform has fast AES support
+    if (hasFastAes()) {
+        streamConfig.encryptionFlags = ENCFLG_ALL;
+    }
+
+    CONNECTION_LISTENER_CALLBACKS connectionCallbacks = BridgeConnListenerCallbacks;
+    connectionCallbacks.ds5HapticsPcm = authoredPcmHaptics ? BridgeClDs5HapticsPcm : NULL;
+    connectionCallbacks.ds5HapticsIrV2 = !authoredPcmHaptics && s_authoredHapticsEnabled ? BridgeClDs5HapticsIr : NULL;
+    connectionCallbacks.ds5HapticsIrExtended = !authoredPcmHaptics && s_authoredHapticsEnabled ? BridgeClDs5HapticsIrExtended : NULL;
+    s_authoredHapticsEnabled = false;
+    LiSetDs5HapticsStateCallback(authoredPcmHaptics ? BridgeClDs5HapticsState : NULL);
+
+    int ret = LiStartConnection(&serverInfo,
+                                &streamConfig,
+                                &connectionCallbacks,
+                                &BridgeVideoRendererCallbacks,
+                                &BridgeAudioRendererCallbacks,
+                                NULL, 0,
+                                NULL, 0);
+
+    (*env)->ReleaseStringUTFChars(env, address, serverInfo.address);
+    (*env)->ReleaseStringUTFChars(env, appVersion, serverInfo.serverInfoAppVersion);
+    if (gfeVersion != NULL) {
+        (*env)->ReleaseStringUTFChars(env, gfeVersion, serverInfo.serverInfoGfeVersion);
+    }
+    if (rtspSessionUrl != NULL) {
+        (*env)->ReleaseStringUTFChars(env, rtspSessionUrl, serverInfo.rtspSessionUrl);
+    }
+
+    return ret;
+}

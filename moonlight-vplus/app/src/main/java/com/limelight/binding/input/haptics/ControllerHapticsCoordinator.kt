@@ -1,0 +1,920 @@
+package com.limelight.binding.input.haptics
+
+import android.os.Handler
+import android.os.Looper
+import android.os.Build
+import android.os.Message
+import android.os.SystemClock
+import android.view.MotionEvent
+import com.limelight.LimeLog
+import com.limelight.binding.input.ControllerHandler
+import com.limelight.binding.input.GenericControllerContext
+import com.limelight.binding.input.InputDeviceContext
+import com.limelight.binding.input.DriverControllerContext
+import com.limelight.nvstream.Ds5HapticsIrFrame
+import com.limelight.nvstream.Ds5HapticsIrExtendedFrame
+import com.limelight.nvstream.Ds5HapticsPcmFrame
+import com.limelight.nvstream.Ds5HapticsState
+import com.limelight.nvstream.jni.MoonBridge
+import java.util.concurrent.ConcurrentHashMap
+
+/**
+ * Owns controller-haptics runtime policy for the Android client.
+ *
+ * [ControllerHandler] remains responsible for input-device lifecycle and controller numbering,
+ * while this class owns source arbitration, target selection, output pacing, expiry, and stop
+ * behavior. All mutable mixer and scheduler state is serialized on the handler's main looper.
+ */
+internal class ControllerHapticsCoordinator(
+    private val handler: ControllerHandler
+) {
+    private data class NativeHapticsBinding(
+        val controllerNumber: Short,
+        val sink: WaveformHapticsSink,
+        val onAvailability: (HapticAvailability) -> Unit
+    )
+
+    private val mixer = ControllerHapticsMixer()
+    private val deviceMixer = ControllerHapticsMixer()
+    // Same main looper and FIFO order, but asynchronous messages are not held behind the UI
+    // traversal sync barrier, which could otherwise consume the 20-30 ms authored playout budget.
+    private val outputHandler = Handler(handler.mainThreadHandler.looper)
+    private val postOutputDelayed: (Runnable, Long) -> Unit = { task, delayMs ->
+        outputHandler.sendMessageDelayed(
+            Message.obtain(outputHandler, task).apply { isAsynchronous = true }, delayMs)
+    }
+    private val removeOutput: (Runnable) -> Unit = outputHandler::removeCallbacks
+    private val ds5HapticsBindings = ConcurrentHashMap<Int, NativeHapticsBinding>()
+    private val ds5ControlStates = mutableMapOf<Short, Ds5HapticsState>()
+    // Absent: no PCM yet; false: only silence observed; true: nonzero content already logged.
+    private val pcmSeenNonzero = mutableMapOf<Short, Boolean>()
+    private val ds5LifecycleLock = Any()
+    private val outputLifecycle = ControllerOutputLifecycle()
+    private var ds5LifecycleGeneration = 0L
+    private val ds5RequestedGenerations = mutableMapOf<Int, Long>()
+    private val deviceCapabilities: DeviceHapticsCapabilities by lazy {
+        DeviceHapticsCapabilities.probe(handler.deviceVibrator)
+    }
+    private val deviceVibrationCoordinator by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        // The device stop chain runs its delayed callbacks on the vibration worker, not the
+        // output looper: a blocked main thread must not extend a playing waveform's stop.
+        val worker = DeviceVibrationCoordinator.newWorker()
+        val delayer = ExecutorDelayer(worker)
+        DeviceVibrationCoordinator(
+            postDelayed = delayer::post,
+            removeCallback = delayer::remove,
+            vibrateDevice = { amplitude, durationMs ->
+                handler.rumbleManager.vibrateSingleAmplitude(
+                    amplitude = amplitude,
+                    durationMs = durationMs
+                )
+            },
+            cancelDeviceVibration = handler.deviceVibrator::cancel,
+            executor = worker,
+            playDeviceTick = if (handler.rumbleManager.supportsDeviceTick) handler.rumbleManager::playDeviceDetailTick else null,
+            detailTickIntervalMs = handler.rumbleManager.deviceTickIntervalMs,
+            clockMs = SystemClock::elapsedRealtime,
+            nativeHaptics = if (Build.VERSION.SDK_INT >= 29 && handler.prefConfig.nativeDeviceHaptics &&
+                handler.prefConfig.ds5SimulationMode.allowsNativeDeviceHaptics(
+                    handler.prefConfig.gameRumbleMode, handler.prefConfig.deviceRumbleStrength,
+                    handler.prefConfig.hostGamepadSelection))
+                NativeAuthoredHaptics.create(handler.activityContext) else null
+        )
+    }
+
+    private val renderer by lazy {
+        RumbleOutputRenderer(
+            controllerMixer = mixer, deviceMixer = deviceMixer,
+            clockMs = SystemClock::elapsedRealtime,
+            postDelayed = postOutputDelayed,
+            removeCallbacks = removeOutput,
+            controllerAvailable = ::controllerHasRumble,
+            controllerIntervalMs = ::dispatchIntervalMs,
+            writeController = { mixed ->
+                if (!ds5HapticsBindings.values.any { it.controllerNumber == mixed.controllerNumber &&
+                        it.sink.playbackControl?.playbackActive == true }) handler.rumbleManager.handleRumble(
+                    mixed.controllerNumber, mixed.output.lowFrequency.toMotorShort(),
+                    mixed.output.highFrequency.toMotorShort()
+                )
+            },
+            writeDeviceAmplitude = { amplitude ->
+                deviceVibrationCoordinator.submitGameRumble(
+                    DeviceVibrationCoordinator.GameSource.ROUTED_GAME,
+                    amplitude, handler.prefConfig.deviceRumbleStrength
+                )
+            },
+            enabled = { !isStoppingOrStopped() }
+        )
+    }
+    private val gamePipeline by lazy {
+        GameRumblePipeline(
+            renderer = renderer,
+            context = ::gameRumbleContext,
+            clockMs = SystemClock::elapsedRealtime,
+            postDelayed = postOutputDelayed,
+            removeCallbacks = removeOutput
+        )
+    }
+
+    private val authoredIr by lazy {
+        AuthoredIrCoordinator(mixer, renderer, deviceVibrationCoordinator, ::gameRumbleContext,
+            { handler.rumbleManager.supportsDeviceTick }, { handler.prefConfig.deviceRumbleStrength },
+            SystemClock::elapsedRealtime, postOutputDelayed, removeOutput, { scheduleNextExpiry() },
+            { !isStoppingOrStopped() })
+    }
+
+    fun submitDs5HapticsIr(frame: Ds5HapticsIrFrame) = synchronized(ds5LifecycleLock) {
+        if (!isStoppingOrStopped() && outputLifecycle.capture(frame.controllerNumber) != null &&
+            handler.isControllerSlotEnabled(frame.controllerNumber)) authoredIr.submit(frame)
+    }
+
+    fun submitDs5HapticsIrExtended(frame: Ds5HapticsIrExtendedFrame) = synchronized(ds5LifecycleLock) {
+        if (!isStoppingOrStopped() && outputLifecycle.capture(frame.controllerNumber) != null &&
+            handler.isControllerSlotEnabled(frame.controllerNumber)) authoredIr.submit(frame)
+    }
+
+    @Volatile
+    private var primaryControllerNumber = NO_CONTROLLER
+    private var audioController: Short? = null
+    private var lastAudioContinuousState = ControllerRumbleState.ZERO
+    private var lastAudioContinuousExpiresAtMs: Long? = null
+    @Volatile private var stopping = false
+    @Volatile private var stopped = false
+    // Output-thread only: deadline of the queued expiryRunnable, null when none is queued.
+    private var expiryDueAtMs: Long? = null
+
+    private val expiryRunnable = Runnable {
+        expiryDueAtMs = null
+        if (stopped || stopping || handler.stopped) return@Runnable
+        val nowMs = SystemClock.elapsedRealtime()
+        mixer.pruneExpired(nowMs).forEach(renderer::queueController)
+        deviceMixer.pruneExpired(nowMs).forEach(renderer::queueDevice)
+        scheduleNextExpiry(nowMs)
+    }
+
+    fun hasRumbleCapableController(): Boolean =
+        primaryControllerNumber != NO_CONTROLLER
+
+    fun submitLegacyDeviceRumble(lowFrequency: Short, highFrequency: Short) {
+        deviceVibrationCoordinator.submitGameRumble(
+            DeviceVibrationCoordinator.GameSource.LEGACY_OVERLAY,
+            SingleMotorRumbleFold.amplitude(lowFrequency, highFrequency),
+            handler.prefConfig.deviceRumbleStrength
+        )
+    }
+
+    fun playDeviceTouchHaptic(lowFrequency: Short, highFrequency: Short, durationMs: Int) =
+        deviceVibrationCoordinator.playTouchHaptic(lowFrequency, highFrequency, durationMs)
+
+    fun setDeviceTouchAudioCallbacks(
+        onPreemptRequested: (() -> Boolean)?,
+        onFinished: (() -> Unit)?
+    ) = deviceVibrationCoordinator.setAudioTouchCallbacks(onPreemptRequested, onFinished)
+
+    fun claimDeviceVibratorForAudio(): DeviceVibrationCoordinator.AudioClaimResult =
+        deviceVibrationCoordinator.claimForAudio()
+
+    fun releaseDeviceVibratorFromAudio() = deviceVibrationCoordinator.releaseFromAudio()
+
+    private fun primaryControllerNumber(): Short? =
+        primaryControllerNumber
+            .takeUnless { it == NO_CONTROLLER }
+            ?.toShort()
+
+    fun hasRumbleCapability(context: InputDeviceContext): Boolean {
+        if (!handler.isContextUsable(context)) return false
+        // Built-in gamepads (e.g. Switch OLED Joy-Con under LineageOS) report as internal
+        // but still carry real vibrators, so capability must not gate on isExternal. This
+        // mirrors the arrival advertisement in InputDeviceContext, which likewise has no
+        // external filter for LI_CCAP_RUMBLE.
+        if (handler.prefConfig.multiController && !context.assignedControllerNumber) return false
+        val inputDevice = context.inputDevice ?: return false
+        // Keep the plain X/Y range check first: upstream eligibility relies on motion ranges
+        // alone, so devices passing it must not newly require SOURCE_JOYSTICK. Only when X/Y is
+        // absent do we fall back to hasJoystickAxes() — which does check that flag — so the
+        // right Joy-Con's fallback stick pairs (Z/RZ, RX/RY) stay eligible exactly as far as
+        // device discovery lets them through.
+        if (ControllerHandler.getMotionRangeForJoystickAxis(inputDevice, MotionEvent.AXIS_X) == null ||
+            ControllerHandler.getMotionRangeForJoystickAxis(inputDevice, MotionEvent.AXIS_Y) == null
+        ) {
+            if (!ControllerHandler.hasJoystickAxes(inputDevice)) return false
+        }
+        return context.vibratorManager != null ||
+            context.vibrator != null ||
+            context.directDualSenseBluetoothOutput != null ||
+            handler.sceManager.isRecognizedDevice(inputDevice)
+    }
+
+    fun hasRumbleCapability(context: DriverControllerContext): Boolean {
+        if (!handler.isContextUsable(context)) return false
+        if (handler.prefConfig.multiController && !context.assignedControllerNumber) return false
+        val capabilities = context.device?.capabilities?.toInt() ?: return false
+        return capabilities and MoonBridge.LI_CCAP_RUMBLE.toInt() != 0
+    }
+
+    fun noteControllerInput(context: GenericControllerContext) {
+        when (context) {
+            is InputDeviceContext -> if (hasRumbleCapability(context)) {
+                updatePrimaryController(context.controllerNumber)
+            }
+            is DriverControllerContext -> if (hasRumbleCapability(context)) {
+                updatePrimaryController(context.controllerNumber)
+            }
+        }
+    }
+
+    fun refreshPrimaryController() {
+        runOnOutputThread { refreshPrimaryControllerOnOutputThread() }
+    }
+
+    private fun refreshPrimaryControllerOnOutputThread() {
+        if (isStoppingOrStopped()) return
+
+        val current = primaryControllerNumber()
+        if (current != null && controllerHasRumble(current)) {
+            return
+        }
+
+        var candidate = NO_CONTROLLER
+        for (i in 0 until handler.inputDeviceContexts.size()) {
+            val context = handler.inputDeviceContexts.valueAt(i)
+            if (!hasRumbleCapability(context)) continue
+            val number = if (context.assignedControllerNumber) {
+                context.controllerNumber.toInt()
+            } else {
+                0
+            }
+            if (number == 0) {
+                updatePrimaryController(0)
+                return
+            }
+            if (candidate == NO_CONTROLLER) candidate = number
+        }
+
+        for (context in handler.driverControllerContexts.values) {
+            if (!hasRumbleCapability(context)) continue
+            val number = if (context.assignedControllerNumber) {
+                context.controllerNumber.toInt()
+            } else {
+                0
+            }
+            if (number == 0) {
+                updatePrimaryController(0)
+                return
+            }
+            if (candidate == NO_CONTROLLER) candidate = number
+        }
+
+        if (candidate == NO_CONTROLLER) {
+            primaryControllerNumber = NO_CONTROLLER
+        } else {
+            updatePrimaryController(candidate.toShort())
+        }
+    }
+
+    private fun updatePrimaryController(controllerNumber: Short) {
+        if (primaryControllerNumber == controllerNumber.toInt()) return
+        primaryControllerNumber = controllerNumber.toInt()
+
+        // USB input may arrive on its driver thread. Mixer-owned state is inspected only after
+        // switching to the serialized output looper.
+        runOnOutputThread {
+            if (!isStoppingOrStopped() && audioController != null &&
+                controllerHasRumble(controllerNumber)
+            ) {
+                switchAudioTarget(controllerNumber)
+            }
+        }
+    }
+
+    /** Submit authoritative base-motor rumble received from the streaming host. */
+    fun submitHost(controllerNumber: Short, lowFrequency: Short, highFrequency: Short) {
+        runForControllerOutput(controllerNumber) {
+            val nowMs = SystemClock.elapsedRealtime()
+            val state = ControllerRumbleState(
+                lowFrequency = lowFrequency.toNormalizedRumble(),
+                highFrequency = highFrequency.toNormalizedRumble()
+            )
+            gamePipeline.submitHost(controllerNumber, state)
+            scheduleNextExpiry(nowMs)
+        }
+    }
+
+    /** Submit a local diagnostic effect without overwriting HOST or AUDIO state. */
+    fun submitTest(controllerNumber: Short, lowFrequency: Short, highFrequency: Short) {
+        runForControllerOutput(controllerNumber) {
+            gamePipeline.submitTest(
+                controllerNumber,
+                ControllerRumbleState(
+                    lowFrequency = lowFrequency.toNormalizedRumble(),
+                    highFrequency = highFrequency.toNormalizedRumble()
+                )
+            )
+        }
+    }
+
+    fun submitAudio(
+        continuousLow: Float,
+        continuousHigh: Float,
+        transientLow: Float,
+        transientHigh: Float,
+        transientDurationMs: Int,
+        hasTransient: Boolean,
+        continuousChanged: Boolean
+    ) {
+        val source = primaryControllerNumber() ?: return
+        runForControllerOutput(source) {
+            val target = primaryControllerNumber()
+            if (target == null || !controllerHasRumble(target)) {
+                clearAudioNow()
+                return@runForControllerOutput
+            }
+
+            val nowMs = SystemClock.elapsedRealtime()
+            if (continuousChanged) {
+                lastAudioContinuousState = ControllerRumbleState(continuousLow, continuousHigh)
+            }
+            lastAudioContinuousExpiresAtMs = if (lastAudioContinuousState.isZero) {
+                null
+            } else {
+                nowMs + AUDIO_CONTINUOUS_WATCHDOG_MS
+            }
+            switchAudioTarget(target, nowMs)
+
+            var mixed = mixer.submitAudioContinuous(
+                target,
+                lastAudioContinuousState,
+                nowMs,
+                lastAudioContinuousExpiresAtMs
+            )
+            if (hasTransient) {
+                // A pulse must survive at least one device output interval, otherwise an expiry
+                // callback can replace it before a rate-limited Android vibrator receives it.
+                val transientLifetimeMs = transientDurationMs.toLong().coerceIn(
+                    dispatchIntervalMs(target) + 1L,
+                    120L
+                )
+                mixed = mixer.submitAudioTransient(
+                    target,
+                    ControllerRumbleState(transientLow, transientHigh),
+                    nowMs,
+                    nowMs + transientLifetimeMs
+                )
+            }
+            renderer.queueController(mixed)
+            scheduleNextExpiry(nowMs)
+        }
+    }
+
+    /** Compatibility input for the legacy bass-energy callback. */
+    fun submitLegacyAudio(
+        lowFrequency: Float,
+        highFrequency: Float,
+        durationMs: Int,
+        continuous: Boolean
+    ) {
+        val source = primaryControllerNumber() ?: return
+        runForControllerOutput(source) {
+            val target = primaryControllerNumber()
+            if (target == null || !controllerHasRumble(target)) {
+                clearAudioNow()
+                return@runForControllerOutput
+            }
+
+            val nowMs = SystemClock.elapsedRealtime()
+            val state = ControllerRumbleState(lowFrequency, highFrequency)
+            val expiresAtMs = nowMs + durationMs.toLong().coerceIn(
+                dispatchIntervalMs(target) + 1L,
+                350L
+            )
+            if (continuous) {
+                lastAudioContinuousState = state
+                lastAudioContinuousExpiresAtMs = expiresAtMs
+            }
+            switchAudioTarget(target, nowMs)
+
+            val mixed = if (continuous) {
+                mixer.submitAudioContinuous(target, state, nowMs, expiresAtMs)
+            } else {
+                mixer.submitAudioTransient(target, state, nowMs, expiresAtMs)
+            }
+            renderer.queueController(mixed)
+            scheduleNextExpiry(nowMs)
+        }
+    }
+
+    fun stopAudio() {
+        runOnOutputThread { clearAudioNow() }
+    }
+
+    fun refreshAudioWatchdog() {
+        runOnOutputThread {
+            if (isStoppingOrStopped() || lastAudioContinuousState.isZero) {
+                return@runOnOutputThread
+            }
+            val target = audioController ?: return@runOnOutputThread
+            if (!controllerHasRumble(target)) return@runOnOutputThread
+
+            val nowMs = SystemClock.elapsedRealtime()
+            lastAudioContinuousExpiresAtMs = nowMs + AUDIO_CONTINUOUS_WATCHDOG_MS
+            renderer.queueController(
+                mixer.submitAudioContinuous(
+                    target,
+                    lastAudioContinuousState,
+                    nowMs,
+                    lastAudioContinuousExpiresAtMs
+                )
+            )
+            scheduleNextExpiry(nowMs)
+        }
+    }
+
+    fun submitHostTriggers(controllerNumber: Short, leftTrigger: Short, rightTrigger: Short) {
+        runForControllerOutput(controllerNumber) {
+            if (!isStoppingOrStopped()) {
+                // Trigger motors remain authoritative HOST output. Base motors flow through the
+                // source mixer and therefore cannot erase this independently stored state.
+                handler.rumbleManager.handleRumbleTriggers(
+                    controllerNumber,
+                    leftTrigger,
+                    rightTrigger
+                )
+            }
+        }
+    }
+
+    fun submitHostAdaptiveTriggers(
+        controllerNumber: Short,
+        eventFlags: Byte,
+        typeLeft: Byte,
+        typeRight: Byte,
+        left: ByteArray,
+        right: ByteArray
+    ) {
+        // Snapshot the payloads before deferring: the rumble manager queues these
+        // arrays across threads and hands them to the USB output worker as-is.
+        val leftSnapshot = left.copyOf()
+        val rightSnapshot = right.copyOf()
+        runForControllerOutput(controllerNumber) {
+            if (!isStoppingOrStopped()) {
+                handler.rumbleManager.handleAdaptiveTriggers(
+                    controllerNumber,
+                    eventFlags,
+                    typeLeft,
+                    typeRight,
+                    leftSnapshot,
+                    rightSnapshot
+                )
+            }
+        }
+    }
+
+    private val pcmRouter = AuthoredPcmOutputRouter()
+    private data class PendingPcm(val state: ControllerRumbleState, val expiresAt: Long, val generation: Long)
+    private val pendingPcm = mutableMapOf<Short, PendingPcm>()
+    private var pcmDispatchPending = false
+
+    fun submitDs5HapticsState(controllerNumber: Short, state: Ds5HapticsState) {
+        val generation = outputLifecycle.capture(controllerNumber) ?: return
+        // State and PCM arrive on the control receive thread. Publish here, before a later
+        // PCM callback can reach its sink; updateControl only accepts state, never transport I/O.
+        synchronized(ds5LifecycleLock) {
+            if (!outputLifecycle.isCurrent(controllerNumber, generation) || isStoppingOrStopped()) return
+            if (ds5ControlStates.put(controllerNumber, state) == null) {
+                LimeLog.info("DualSense authored control state received: player=$controllerNumber")
+            }
+            ds5HapticsBindings.values.filter { it.controllerNumber == controllerNumber }
+                .forEach { it.sink.updateControl(state) }
+        }
+    }
+
+    fun submitDs5HapticsPcm(frame: Ds5HapticsPcmFrame) {
+        if (isStoppingOrStopped()) return
+        val generation = outputLifecycle.capture(frame.controllerNumber) ?: return
+        var failedBinding: NativeHapticsBinding? = null
+        val dispatch = synchronized(ds5LifecycleLock) {
+            if (!outputLifecycle.isCurrent(frame.controllerNumber, generation) || isStoppingOrStopped()) return
+            val binding = ds5HapticsBindings.values.firstOrNull { it.controllerNumber == frame.controllerNumber }
+            val delivery = pcmRouter.submit(frame, binding?.sink,
+                handler.prefConfig.gameRumbleMode != GameRumbleMode.DEVICE) ?: return
+            val direct = delivery.direct
+            val seenNonzero = pcmSeenNonzero[frame.controllerNumber]
+            if (seenNonzero != true) {
+                val nonzero = frame.pcm.any { it != 0.toByte() }
+                if (seenNonzero == null || nonzero) {
+                    LimeLog.info("Authored PCM: player=${frame.controllerNumber} nonzero=$nonzero " +
+                        "direct=$direct sink=${binding?.sink?.javaClass?.simpleName ?: "none"} " +
+                        "control=${ds5ControlStates.containsKey(frame.controllerNumber)}")
+                }
+                pcmSeenNonzero[frame.controllerNumber] = nonzero
+            }
+            if (binding != null && delivery.failedSink) {
+                val entry = ds5HapticsBindings.entries.firstOrNull { it.value === binding }
+                if (entry != null && ds5HapticsBindings.remove(entry.key, binding)) failedBinding = binding
+            }
+            // Serialize acceptance with retirement. A receive callback may have captured
+            // the old generation before the main thread withdrew the controller.
+            synchronized(pendingPcm) {
+                pendingPcm[frame.controllerNumber] = PendingPcm(
+                    delivery.fallback,
+                    SystemClock.elapsedRealtime() + 50, generation)
+                if (pcmDispatchPending) false else {
+                    pcmDispatchPending = true
+                    true
+                }
+            }
+        }
+        failedBinding?.let {
+            it.onAvailability(HapticAvailability.FAILED)
+            stopSinksAsync(listOf(it))
+        }
+        // Bound the UI queue to one runnable and one latest value per player. Always send a
+        // zero when direct output takes ownership so stale fallback cannot replay afterward.
+        if (!dispatch) return
+        postOutputDelayed(Runnable {
+            val latest = synchronized(pendingPcm) {
+                pendingPcm.toMap().also { pendingPcm.clear(); pcmDispatchPending = false }
+            }
+            if (isStoppingOrStopped()) return@Runnable
+            val now = SystemClock.elapsedRealtime()
+            for ((number, pending) in latest) {
+                if (!outputLifecycle.isCurrent(number, pending.generation) ||
+                    !handler.isControllerSlotEnabled(number)) continue
+                val context = gameRumbleContext(number)
+                val plan = GameRumbleAllocator.allocate(context, RumbleSignalFeatures(pending.state))
+                renderer.queueController(mixer.submit(number, RumbleSource.AUTHORED,
+                    plan.controller ?: ControllerRumbleState.ZERO, now, pending.expiresAt))
+                if (number.toInt() == 0) renderer.queueDevice(deviceMixer.submit(number,
+                    RumbleSource.AUTHORED, plan.device ?: ControllerRumbleState.ZERO, now, pending.expiresAt))
+            }
+            scheduleNextExpiry(now)
+        }, 0L)
+    }
+
+    fun attachWaveformHapticsSink(
+        controllerId: Int,
+        controllerNumber: Short,
+        sink: WaveformHapticsSink,
+        sourceActive: () -> Boolean = { true },
+        onAvailability: (HapticAvailability) -> Unit = {}
+    ) {
+        val generation: Long
+        synchronized(ds5LifecycleLock) {
+            generation = ++ds5LifecycleGeneration
+            ds5RequestedGenerations[controllerId] = generation
+        }
+        // A sink may arrive on the main thread. Its startup can perform transport I/O, so keep it
+        // on the existing background worker.
+        handler.backgroundThreadHandler.post {
+            synchronized(ds5LifecycleLock) {
+                if (ds5RequestedGenerations[controllerId] != generation) {
+                    sink.stop()
+                    return@post
+                }
+            }
+            if (isStoppingOrStopped() || !sourceActive()) {
+                sink.stop()
+                return@post
+            }
+
+            sink.playbackControl?.let { playback ->
+                playback.onPlaybackChanged = { playing ->
+                    val completed = java.util.concurrent.CountDownLatch(1)
+                    runOnOutputThread {
+                        try {
+                            if (ds5HapticsBindings[controllerId]?.sink === sink) {
+                                if (playing) handler.rumbleManager.handleRumble(controllerNumber, 0, 0)
+                                onSinkChanged(controllerNumber)
+                            }
+                        } finally { completed.countDown() }
+                    }
+                    // Serialize rumble-off ahead of the first waveform packet. This callback runs
+                    // on the sink's transport worker, so a stalled main thread must only cost the
+                    // ordering guarantee here — throwing would tear down a healthy transport.
+                    if (playing && !completed.await(500, java.util.concurrent.TimeUnit.MILLISECONDS)) {
+                        LimeLog.warning(
+                            "Timed out zeroing motors before waveform playback for controller $controllerId"
+                        )
+                    }
+                }
+            }
+
+            synchronized(ds5LifecycleLock) { ds5ControlStates[controllerNumber]?.let(sink::updateControl) }
+            if (!runCatching { sink.start() }.getOrDefault(false)) {
+                onAvailability(HapticAvailability.FAILED)
+                synchronized(ds5LifecycleLock) {
+                    if (ds5RequestedGenerations[controllerId] == generation) {
+                        ds5RequestedGenerations.remove(controllerId)
+                    }
+                }
+                sink.stop()
+                return@post
+            }
+
+            val replaced = ArrayList<NativeHapticsBinding>()
+            val accepted = synchronized(ds5LifecycleLock) {
+                if (ds5RequestedGenerations[controllerId] != generation || isStoppingOrStopped() || !sourceActive()) {
+                    false
+                } else {
+                    ds5RequestedGenerations.remove(controllerId)
+                    // Host controls may have changed while transport startup was in flight.
+                    ds5ControlStates[controllerNumber]?.let(sink::updateControl)
+                    ds5HapticsBindings.remove(controllerId)?.let(replaced::add)
+                    // In single-controller mode several devices may share player 0. Preserve the
+                    // historical latest-attached-wins policy without dropping the working sink
+                    // until its replacement has started successfully.
+                    ds5HapticsBindings.entries.toList().forEach { (existingId, binding) ->
+                        if (binding.controllerNumber == controllerNumber &&
+                            ds5HapticsBindings.remove(existingId, binding)
+                        ) {
+                            replaced.add(binding)
+                        }
+                    }
+                    ds5HapticsBindings[controllerId] =
+                        NativeHapticsBinding(controllerNumber, sink, onAvailability)
+                    true
+                }
+            }
+            if (!accepted) {
+                sink.stop()
+                return@post
+            }
+            onAvailability(HapticAvailability.READY)
+            // onPlaybackChanged only fires on later transitions, so an accepted sink that is
+            // already playing needs an explicit replay (see onSinkChanged for the invariant).
+            if (sink.playbackControl?.playbackActive == true) {
+                onSinkChanged(controllerNumber)
+            }
+            replaced.forEach { it.sink.stop() }
+        }
+    }
+
+    fun detachDs5HapticsSink(controllerId: Int) {
+        val binding: NativeHapticsBinding?
+        synchronized(ds5LifecycleLock) {
+            ds5RequestedGenerations.remove(controllerId)
+            ds5LifecycleGeneration++
+            binding = ds5HapticsBindings.remove(controllerId)
+        }
+        binding?.let { stopSinksAsync(listOf(it)) }
+    }
+
+    private fun stopSinksAsync(bindings: List<NativeHapticsBinding>) {
+        if (bindings.isEmpty()) return
+        bindings.forEach { stopWaveformSinkAsync(it.sink) }
+    }
+
+    fun stopWaveformSinkAsync(sink: WaveformHapticsSink) {
+        val cleanup = Runnable { sink.stop() }
+        if (Looper.myLooper() == handler.backgroundThreadHandler.looper) {
+            cleanup.run()
+        } else if (!handler.backgroundThreadHandler.post(cleanup)) {
+            Thread(cleanup, "DualSenseHapticsCleanup").apply { isDaemon = true }.start()
+        }
+    }
+
+    fun clearControllerIfUnavailable(controllerNumber: Short) {
+        runOnOutputThread {
+            if (stopped || controllerHasRumble(controllerNumber)) return@runOnOutputThread
+
+            renderer.resetController(controllerNumber)
+            val nowMs = SystemClock.elapsedRealtime()
+            gamePipeline.replay(controllerNumber)
+            scheduleNextExpiry(nowMs)
+        }
+    }
+
+    /**
+     * Replay entry for any change that can flip gameRumbleContext allocation: the waveform
+     * binding set or its playback state. Current triggers are the playback start/stop edge in
+     * onPlaybackChanged and a binding accepted while already playing. Any new trigger of the
+     * same kind must go through here so tracked state is re-routed under the fresh context.
+     */
+    fun onSinkChanged(controllerNumber: Short) {
+        runForControllerOutput(controllerNumber) {
+            renderer.resetController(controllerNumber)
+
+            val nowMs = SystemClock.elapsedRealtime()
+            gamePipeline.replay(controllerNumber)
+            scheduleNextExpiry(nowMs)
+        }
+    }
+
+    /** A withdrawn slot must never replay its old host/test/audio envelope on re-arrival. */
+    fun retireController(controllerNumber: Short) {
+        synchronized(ds5LifecycleLock) {
+            outputLifecycle.retire(controllerNumber)
+            pcmRouter.reset(controllerNumber)
+            ds5ControlStates.remove(controllerNumber)
+            pcmSeenNonzero.remove(controllerNumber)
+            synchronized(pendingPcm) { pendingPcm.remove(controllerNumber) }
+        }
+        runOnOutputThread {
+            gamePipeline.reset(controllerNumber)
+            renderer.retireController(controllerNumber)
+            authoredIr.retire(controllerNumber)
+            if (audioController == controllerNumber) {
+                audioController = null
+                lastAudioContinuousState = ControllerRumbleState.ZERO
+                lastAudioContinuousExpiresAtMs = null
+            }
+        }
+    }
+
+    fun controllerArrived(controllerNumber: Short) {
+        synchronized(ds5LifecycleLock) { outputLifecycle.arrive(controllerNumber) }
+    }
+
+    /** Stops logical output immediately and releases transport sinks asynchronously. */
+    fun stop() {
+        if (stopped || stopping) return
+        stopping = true
+        stopAllNow()
+        val bindings = synchronized(ds5LifecycleLock) {
+            ds5RequestedGenerations.clear()
+            ds5ControlStates.clear()
+            pcmSeenNonzero.clear()
+            ds5LifecycleGeneration++
+            ds5HapticsBindings.values.toList().also { ds5HapticsBindings.clear() }
+        }
+        primaryControllerNumber = NO_CONTROLLER
+        stopped = true
+        stopping = false
+        stopSinksAsync(bindings)
+    }
+
+    private fun switchAudioTarget(
+        target: Short,
+        nowMs: Long = SystemClock.elapsedRealtime()
+    ) {
+        val previous = audioController
+        if (previous == target) return
+        if (lastAudioContinuousExpiresAtMs?.let { it <= nowMs } == true) {
+            lastAudioContinuousState = ControllerRumbleState.ZERO
+            lastAudioContinuousExpiresAtMs = null
+        }
+        if (previous != null) {
+            renderer.queueController(mixer.clearSource(previous, RumbleSource.AUDIO, nowMs))
+        }
+        audioController = target
+        renderer.queueController(
+            mixer.submitAudioContinuous(
+                target,
+                lastAudioContinuousState,
+                nowMs,
+                lastAudioContinuousExpiresAtMs
+            )
+        )
+    }
+
+    private fun clearAudioNow() {
+        lastAudioContinuousState = ControllerRumbleState.ZERO
+        lastAudioContinuousExpiresAtMs = null
+        val target = audioController ?: return
+        audioController = null
+        renderer.queueController(mixer.clearSource(target, RumbleSource.AUDIO, SystemClock.elapsedRealtime()))
+        scheduleNextExpiry()
+    }
+
+    private fun controllerHasRumble(controllerNumber: Short): Boolean {
+        for (i in 0 until handler.inputDeviceContexts.size()) {
+            val context = handler.inputDeviceContexts.valueAt(i)
+            if (context.controllerNumber == controllerNumber && hasRumbleCapability(context)) {
+                return true
+            }
+        }
+        for (context in handler.driverControllerContexts.values) {
+            if (context.controllerNumber == controllerNumber && hasRumbleCapability(context)) {
+                return true
+            }
+        }
+        return false
+    }
+
+    // Any capable borrower suppresses the channel — not "all contexts borrow": in a mixed
+    // controller the borrowed actuator is still driven by the controller channel, so the device
+    // channel must yield even though a real-motor context loses its transient compensation.
+    private fun controllerBorrowsDeviceVibrator(controllerNumber: Short): Boolean {
+        for (i in 0 until handler.inputDeviceContexts.size()) {
+            val context = handler.inputDeviceContexts.valueAt(i)
+            if (context.controllerNumber == controllerNumber &&
+                hasRumbleCapability(context) &&
+                context.borrowsDeviceVibrator
+            ) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private fun gameRumbleContext(controllerNumber: Short): GameRumbleContext {
+        val mode = handler.prefConfig.gameRumbleMode
+        val hasController = controllerHasRumble(controllerNumber)
+        // COORDINATED is the only mode where controller and device channels can both fire from one
+        // rumble state. When the controller sink is the device's own borrowed vibrator, the device
+        // channel would double-drive that same actuator, so it must yield — but only while the
+        // controller channel actually dispatches. An active DS5 waveform sink suppresses
+        // writeController, leaving the borrowed vibrator unwritten and the device channel free.
+        // Evaluated lazily: the binding and borrower scans only matter in this one case.
+        val hasDevice = controllerNumber.toInt() == 0 && deviceCapabilities.hasVibrator && !(
+            mode == GameRumbleMode.COORDINATED && hasController &&
+                ds5HapticsBindings.values.none {
+                    it.controllerNumber == controllerNumber && it.sink.playbackControl?.playbackActive == true
+                } &&
+                controllerBorrowsDeviceVibrator(controllerNumber)
+            )
+        return GameRumbleContext(mode, hasController, hasDevice, deviceCapabilities.tier)
+    }
+
+    private fun runOnOutputThread(action: () -> Unit) {
+        if (Looper.myLooper() == outputHandler.looper) {
+            action()
+        } else {
+            postOutputDelayed(Runnable(action), 0L)
+        }
+    }
+
+    fun runForControllerOutput(number: Short, action: () -> Unit) {
+        val generation = outputLifecycle.capture(number) ?: return
+        runOnOutputThread {
+            if (!isStoppingOrStopped() && outputLifecycle.isCurrent(number, generation) &&
+                handler.isControllerSlotEnabled(number)) action()
+        }
+    }
+
+    private fun dispatchIntervalMs(controllerNumber: Short): Long {
+        for (i in 0 until handler.inputDeviceContexts.size()) {
+            val context = handler.inputDeviceContexts.valueAt(i)
+            if (context.controllerNumber == controllerNumber && hasRumbleCapability(context)) {
+                return ANDROID_RUMBLE_INTERVAL_MS
+            }
+        }
+        return USB_RUMBLE_INTERVAL_MS
+    }
+
+    private fun scheduleNextExpiry(nowMs: Long = SystemClock.elapsedRealtime()) {
+        val mixerExpiry = mixer.nextExpiryAtMs()
+        val deviceExpiry = deviceMixer.nextExpiryAtMs()
+        val nextExpiryMs = when {
+            mixerExpiry == null -> deviceExpiry
+            deviceExpiry == null -> mixerExpiry
+            else -> minOf(mixerExpiry, deviceExpiry)
+        }
+        if (nextExpiryMs == null) {
+            cancelExpiry()
+            return
+        }
+        val dueAtMs = maxOf(nextExpiryMs, nowMs + 1L)
+        // Authored leases extend every frame. An earlier pending wake is harmless (it prunes
+        // nothing and reschedules), so only move the callback when the deadline gets earlier.
+        val scheduled = expiryDueAtMs
+        if (scheduled != null && scheduled <= dueAtMs) return
+        if (scheduled != null) removeOutput(expiryRunnable)
+        expiryDueAtMs = dueAtMs
+        postOutputDelayed(expiryRunnable, dueAtMs - nowMs)
+    }
+
+    private fun cancelExpiry() {
+        if (expiryDueAtMs != null) removeOutput(expiryRunnable)
+        expiryDueAtMs = null
+    }
+
+    private fun stopAllNow() {
+        cancelExpiry()
+        authoredIr.stop()
+        gamePipeline.stop()
+        val controllerNumbers = renderer.stop().toMutableSet()
+        for (controllerNumber in 0 until ControllerHandler.MAX_GAMEPADS.toInt()) {
+            controllerNumbers.add(controllerNumber.toShort())
+        }
+
+        audioController = null
+        lastAudioContinuousState = ControllerRumbleState.ZERO
+        lastAudioContinuousExpiresAtMs = null
+
+        controllerNumbers.forEach { controllerNumber ->
+            handler.rumbleManager.handleRumble(
+                controllerNumber,
+                0,
+                0
+            )
+            handler.rumbleManager.handleRumbleTriggers(controllerNumber, 0, 0)
+            handler.rumbleManager.clearAdaptiveTriggers(controllerNumber)
+        }
+        deviceVibrationCoordinator.stop()
+    }
+
+    private fun isStoppingOrStopped(): Boolean =
+        stopping || stopped || handler.stopped
+
+    private fun Short.toNormalizedRumble(): Float =
+        (toInt() and 0xFFFF) / 65535f
+
+    private companion object {
+        const val NO_CONTROLLER = -1
+        const val ANDROID_RUMBLE_INTERVAL_MS = 33L
+        const val USB_RUMBLE_INTERVAL_MS = 20L
+        const val AUDIO_CONTINUOUS_WATCHDOG_MS = 5_000L
+
+    }
+}

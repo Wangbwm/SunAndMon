@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 音訊振動路由模式 -->
+    <string-array name="audio_vibration_mode_names">
+        <item>自動</item>
+        <item>僅裝置振動</item>
+        <item>僅手把振動</item>
+        <item>同時振動</item>
+    </string-array>
+
+    <!-- 音訊振動場景模式 -->
+    <string-array name="audio_vibration_scene_names">
+        <item>遊戲 / 影視</item>
+        <item>音樂</item>
+        <item>自動</item>
+    </string-array>
+
+    <!-- 浮球手勢動作 -->
+    <string-array name="float_ball_action_names">
+        <item>無動作</item>
+        <item>打開虛擬鍵盤</item>
+        <item>打開選單</item>
+        <item>切換懸浮球顯示或隱藏</item>
+        <item>顯示效能監控圖層</item>
+        <item>指紋解鎖主機</item>
+    </string-array>
+    <string-array name="framegen_quality_preset_names">
+        <item>@string/framegen_quality_performance</item>
+        <item>@string/framegen_quality_balanced</item>
+        <item>@string/framegen_quality_clarity</item>
+        <item>@string/framegen_quality_custom</item>
+    </string-array>
+</resources>

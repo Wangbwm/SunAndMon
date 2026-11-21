@@ -1,0 +1,39 @@
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:state_focused="true">
+        <layer-list>
+            <item>
+                <vector
+                    android:width="32dp"
+                    android:height="32dp"
+                    android:viewportWidth="24"
+                    android:viewportHeight="24">
+                    <path
+                        android:fillColor="@color/ui_shell_accent"
+                        android:pathData="M3,12 L24,0 L24,24 Z"
+                        android:strokeColor="@color/scene_btn_stroke"
+                        android:strokeWidth="2" />
+                </vector>
+            </item>
+        </layer-list>
+    </item>
+
+    <item android:state_pressed="true">
+        <layer-list>
+            <item>
+                <vector
+                    android:width="32dp"
+                    android:height="32dp"
+                    android:viewportWidth="24"
+                    android:viewportHeight="24">
+                    <path
+                        android:fillColor="@color/ui_shell_accent"
+                        android:pathData="M3,12 L24,0 L24,24 Z"
+                        android:strokeColor="@color/scene_btn_stroke"
+                        android:strokeWidth="2" />
+                </vector>
+            </item>
+        </layer-list>
+    </item>
+
+    <item android:drawable="@android:color/transparent" />
+</selector>

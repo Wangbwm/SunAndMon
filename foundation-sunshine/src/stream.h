@@ -1,0 +1,213 @@
+/**
+ * @file src/stream.h
+ * @brief Declarations for the streaming protocols.
+ */
+#pragma once
+#include <atomic>
+#include <chrono>
+#include <cstdint>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+#include <boost/asio.hpp>
+
+#include "audio.h"
+#include "crypto.h"
+#include "session_info.h"
+#include "video.h"
+
+namespace rtsp_stream {
+  struct launch_session_t;
+}
+
+namespace video_fec {
+  class controller_t;
+}
+
+namespace stream {
+  constexpr auto VIDEO_STREAM_PORT = 9;
+  constexpr auto CONTROL_PORT = 10;
+  constexpr auto AUDIO_STREAM_PORT = 11;
+  constexpr auto MIC_STREAM_PORT = 12;  // Port for microphone streaming
+
+  /**
+   * @brief Convert a steady-clock presentation time to the 90 kHz RTP video clock.
+   *
+   * The conversion is performed with a signed intermediate so timestamps just
+   * before the epoch round correctly before the final RTP modulo-2^32 cast.
+   */
+  std::uint32_t
+  video_rtp_timestamp(
+    std::chrono::steady_clock::time_point presentation_time,
+    std::chrono::steady_clock::time_point epoch);
+
+  struct session_t;
+  struct config_t {
+    audio::config_t audio;
+    video::config_t monitor;
+
+    int packetsize;
+    int minRequiredFecPackets;
+    std::shared_ptr<video_fec::controller_t> fec_control;
+    bool fec_feedback = false;
+    bool endpoint_auto_refresh = false;
+    int mlFeatureFlags;
+    /// ds5::control_extension::mask_* directions the client offered in x-ml-general.ds5Extensions.
+    std::uint32_t ds5ExtensionMask = 0;
+    int controlProtocolType;
+    int audioQosType;
+    int videoQosType;
+
+    uint32_t encryptionFlagsEnabled;
+
+    std::optional<int> gcmap;
+  };
+
+  namespace session {
+    enum class stop_reason_e : int {
+      none,
+      control_disconnect,
+      control_timeout,
+      protocol_error,
+      video_ended,
+      audio_ended,
+      client_cancel,
+      host_terminate,
+    };
+
+    const char *
+    stop_reason_name(stop_reason_e reason);
+
+    enum class state_e : int {
+      STOPPED,  ///< The session is stopped
+      STOPPING,  ///< The session is stopping
+      STARTING,  ///< The session is starting
+      RUNNING,  ///< The session is running
+    };
+
+    struct lifecycle_snapshot_t {
+      state_e state;
+      stop_reason_e stop_reason;
+    };
+
+    class lifecycle_t {
+    public:
+      explicit lifecycle_t(state_e initial_state = state_e::STOPPED) noexcept:
+          _state(initial_state) {}
+
+      state_e
+      state() const noexcept {
+        return _state.load(std::memory_order_acquire);
+      }
+
+      void
+      set_state(state_e state) {
+        std::lock_guard lock(_mutex);
+        _state.store(state, std::memory_order_release);
+      }
+
+      bool
+      request_stop(stop_reason_e reason) {
+        std::lock_guard lock(_mutex);
+        if (_state.load(std::memory_order_relaxed) != state_e::RUNNING) {
+          return false;
+        }
+
+        _stop_reason = reason;
+        _state.store(state_e::STOPPING, std::memory_order_release);
+        return true;
+      }
+
+      lifecycle_snapshot_t
+      snapshot() const {
+        std::lock_guard lock(_mutex);
+        return {
+          _state.load(std::memory_order_relaxed),
+          _stop_reason,
+        };
+      }
+
+    private:
+      mutable std::mutex _mutex;
+      std::atomic<state_e> _state;
+      stop_reason_e _stop_reason { stop_reason_e::none };
+    };
+  }  // namespace session
+
+  namespace session {
+    std::shared_ptr<session_t>
+    alloc(config_t &config, rtsp_stream::launch_session_t &launch_session);
+    int
+    start(session_t &session, const std::string &addr_string);
+    void
+    stop(session_t &session, stop_reason_e reason = stop_reason_e::none);
+    void
+    join(session_t &session);
+    state_e
+    state(session_t &session);
+
+    bool
+    belongs_to_client(const session_t &session, const std::string &uuid);
+
+    // Resolve only RUNNING video sessions authenticated by this certificate.
+    streaming::capture_target_result_t
+    current_capture_for_client(const std::string &client_cert_uuid);
+
+    bool
+    has_active_video_sessions();
+
+    /**
+     * @brief 请求统一的异步应用取消流程。
+     *
+     * 手动 /cancel 和“所有客户端断开后结束串流”都通过此函数进入同一条清理链路。
+     * 函数只负责提交异步任务，不在调用线程中直接终止应用或恢复显示；任务会在 RTSP
+     * 执行上下文中重新检查条件，并由完成回调释放去重标记、终止应用和恢复显示状态。
+     *
+     * @param source 用于本地日志的触发原因，不会作为外部协议数据发送。
+     * @param require_no_video_session 是否要求任务执行时仍没有视频会话和待处理的 RTSP 票据。
+     */
+    void
+    request_global_cancel(std::string_view source, bool require_no_video_session = false);
+
+    /**
+     * @brief Send dynamic parameter change event to a specific client session.
+     * @param client_name The name of the client to target.
+     * @param param The dynamic parameter to change.
+     * @return true if the event was sent successfully, false otherwise.
+     */
+    bool
+    change_dynamic_param_for_client(const std::string &client_name, const video::dynamic_param_t &param);
+
+    bool
+    set_host_audio_for_client(const std::string &client_name, bool enabled);
+
+    /** One running session after the host's bitrate ceiling changed. */
+    struct bitrate_cap_result_t {
+      std::string client_name;
+      int total_kbps;  ///< the session's total bitrate now (including FEC), before and after in `was_kbps`
+      int was_kbps;
+    };
+
+    /**
+     * @brief The host's bitrate ceiling (config::host_max_bitrate_kbps) changed: every running session takes it now.
+     *
+     * Each session's bitrate budget holds the cap it was made with; this gives it the current one (streaming::bitrate_budget_t::set_maximum). A session that is above the new ceiling comes down to it, a session
+     * that was held down comes back up to what its client or its ABR last asked for (or stays there when that is still above the ceiling); 0 means no ceiling. The encoding thread applies the new total through the
+     * budget's pending() like any other change (no new channel), and the client is told through the host bitrate update (0x5506) when it negotiated it.
+     * @return The sessions whose total changed.
+     */
+    std::vector<bitrate_cap_result_t>
+    apply_host_bitrate_cap();
+
+    /**
+     * @brief Get information about all active sessions.
+     * @return Vector of session information.
+     */
+    std::vector<session_info_t>
+    get_all_sessions_info();
+  }  // namespace session
+}  // namespace stream

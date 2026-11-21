@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <declare-styleable name="NumberSeekbar">
+        <attr name="max" format="integer" />
+        <attr name="min" format="integer" />
+        <attr name="text" format="string" />
+        <attr name="progress" format="integer" />
+    </declare-styleable>
+    <!-- 自定义IconListPreference属性 -->
+    <declare-styleable name="IconListPreference">
+        <attr name="entryIcons" format="reference" />
+    </declare-styleable>
+
+    <!--
+        首页背景强调色槽位。默认值指向品牌粉（ui_shell_accent 系）；
+        选择“跟随壁纸”后，由 YouAccentOverlayBg0..11 切换到背景对应的色相桶。
+    -->
+    <attr name="appAccent" format="color" />
+    <attr name="appAccentSoft" format="color" />
+    <attr name="appAccentFocus" format="color" />
+</resources>

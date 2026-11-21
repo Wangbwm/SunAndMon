@@ -1,0 +1,4333 @@
+@file:Suppress("DEPRECATION")
+package com.limelight.binding.input
+
+import com.limelight.binding.input.haptics.HapticEvidence
+
+import com.limelight.nvstream.HostGamepadSelection
+
+import android.app.Activity
+import android.content.Context
+import android.hardware.Sensor
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
+import android.hardware.input.InputManager
+import android.hardware.usb.UsbManager
+import android.hardware.usb.UsbDevice
+import android.os.Build
+import android.os.Handler
+import android.os.HandlerThread
+import android.os.Looper
+import android.os.SystemClock
+import android.os.Vibrator
+import android.os.VibratorManager
+import android.util.SparseArray
+import android.view.InputDevice
+import android.view.InputEvent
+import android.view.KeyEvent
+import android.view.MotionEvent
+import android.view.HapticFeedbackConstants
+
+import com.limelight.LimeLog
+import java.util.concurrent.ConcurrentHashMap
+import com.limelight.R
+import com.limelight.binding.input.haptics.*
+import com.limelight.binding.input.haptics.WaveformHapticsSink
+import com.limelight.binding.input.driver.AbstractController
+import com.limelight.binding.input.driver.UsbDriverListener
+import com.limelight.binding.input.driver.UsbDriverService
+import com.limelight.binding.input.driver.wireless.dualsense.AndroidBluetoothHidHostTransport
+import com.limelight.binding.input.driver.wireless.dualsense.DirectDualSenseBluetoothOutput
+import com.limelight.binding.input.haptics.ControllerHapticsCoordinator
+import com.limelight.binding.input.haptics.DualSenseNativeHapticsSink
+import com.limelight.nvstream.Ds5HapticsPcmFrame
+import com.limelight.nvstream.Ds5HapticsState
+import com.limelight.nvstream.NvConnection
+import com.limelight.nvstream.input.ControllerPacket
+import com.limelight.nvstream.input.KeyboardPacket
+import com.limelight.nvstream.input.MouseButtonPacket
+import com.limelight.nvstream.jni.MoonBridge
+import com.limelight.preferences.PreferenceConfiguration
+import com.limelight.ui.GameGestures
+import com.limelight.ui.GameMenuAxisSourceLifecycle
+import com.limelight.utils.Vector2d
+import com.limelight.utils.CompletionSignal
+
+import org.cgutman.shieldcontrollerextensions.SceManager
+
+import java.lang.reflect.InvocationTargetException
+import java.util.concurrent.ConcurrentSkipListMap
+import java.util.concurrent.atomic.AtomicInteger
+
+class ControllerHandler(
+    internal val activityContext: Activity,
+    internal val conn: NvConnection,
+    private val gestures: GameGestures,
+    internal val prefConfig: PreferenceConfiguration,
+    private val onTogglePerformanceOverlay: () -> Unit = {},
+    private val onExitStream: () -> Unit = { activityContext.finish() }
+) : InputManager.InputDeviceListener, UsbDriverListener {
+
+    companion object {
+        private const val MAXIMUM_BUMPER_UP_DELAY_MS = 100
+        private const val USB_HANDOFF_WITHDRAW_MAX_RETRIES = 5
+        private const val USB_HANDOFF_WITHDRAW_RETRY_DELAY_MS = 50L
+
+        // Mirrors the HarmonyOS client's STANDARD_BUTTON_FLAGS for virtual pads.
+        private val STANDARD_GAMEPAD_BUTTON_FLAGS = (
+            ControllerPacket.A_FLAG or ControllerPacket.B_FLAG or
+                ControllerPacket.X_FLAG or ControllerPacket.Y_FLAG or
+                ControllerPacket.UP_FLAG or ControllerPacket.DOWN_FLAG or
+                ControllerPacket.LEFT_FLAG or ControllerPacket.RIGHT_FLAG or
+                ControllerPacket.LB_FLAG or ControllerPacket.RB_FLAG or
+                ControllerPacket.LS_CLK_FLAG or ControllerPacket.RS_CLK_FLAG or
+                ControllerPacket.PLAY_FLAG or ControllerPacket.BACK_FLAG or
+                ControllerPacket.SPECIAL_BUTTON_FLAG
+            )
+
+        const val START_DOWN_TIME_MOUSE_MODE_MS = 750
+
+        const val MINIMUM_BUTTON_DOWN_TIME_MS = 25
+
+        const val PERFORMANCE_OVERLAY_COMBO_FLAGS: Int = ControllerPacket.BACK_FLAG or
+            ControllerPacket.LB_FLAG or ControllerPacket.RB_FLAG or ControllerPacket.X_FLAG
+
+        private val USB_MENU_DIRECTION_MASK = ControllerPacket.UP_FLAG or
+            ControllerPacket.DOWN_FLAG or ControllerPacket.LEFT_FLAG or ControllerPacket.RIGHT_FLAG
+        private val MOUSE_DPAD_MASK = USB_MENU_DIRECTION_MASK
+        private val MOUSE_BUTTON_MASK = ControllerPacket.A_FLAG or ControllerPacket.B_FLAG
+        private val MOUSE_DPAD_FLAGS = intArrayOf(
+            ControllerPacket.UP_FLAG, ControllerPacket.DOWN_FLAG,
+            ControllerPacket.LEFT_FLAG, ControllerPacket.RIGHT_FLAG
+        )
+
+        private const val EMULATING_SPECIAL = 0x1
+        private const val EMULATING_SELECT = 0x2
+        private const val EMULATING_TOUCHPAD = 0x4
+
+        internal const val MAX_GAMEPADS: Short = 16 // Limited by bits in activeGamepadMask
+
+        internal fun usbGameMenuAxisSourceId(controllerId: Int): Int = Int.MIN_VALUE + controllerId
+
+        const val BATTERY_RECHECK_INTERVAL_MS = 120 * 1000
+
+        const val GYRO_ACTIVATION_ALWAYS = ControllerGyroManager.GYRO_ACTIVATION_ALWAYS
+
+        val ANDROID_TO_LI_BUTTON_MAP: Map<Int, Int> = mapOf(
+            KeyEvent.KEYCODE_BUTTON_A to ControllerPacket.A_FLAG,
+            KeyEvent.KEYCODE_BUTTON_B to ControllerPacket.B_FLAG,
+            KeyEvent.KEYCODE_BUTTON_X to ControllerPacket.X_FLAG,
+            KeyEvent.KEYCODE_BUTTON_Y to ControllerPacket.Y_FLAG,
+            KeyEvent.KEYCODE_DPAD_UP to ControllerPacket.UP_FLAG,
+            KeyEvent.KEYCODE_DPAD_DOWN to ControllerPacket.DOWN_FLAG,
+            KeyEvent.KEYCODE_DPAD_LEFT to ControllerPacket.LEFT_FLAG,
+            KeyEvent.KEYCODE_DPAD_RIGHT to ControllerPacket.RIGHT_FLAG,
+            KeyEvent.KEYCODE_DPAD_UP_LEFT to (ControllerPacket.UP_FLAG or ControllerPacket.LEFT_FLAG),
+            KeyEvent.KEYCODE_DPAD_UP_RIGHT to (ControllerPacket.UP_FLAG or ControllerPacket.RIGHT_FLAG),
+            KeyEvent.KEYCODE_DPAD_DOWN_LEFT to (ControllerPacket.DOWN_FLAG or ControllerPacket.LEFT_FLAG),
+            KeyEvent.KEYCODE_DPAD_DOWN_RIGHT to (ControllerPacket.DOWN_FLAG or ControllerPacket.RIGHT_FLAG),
+            KeyEvent.KEYCODE_BUTTON_L1 to ControllerPacket.LB_FLAG,
+            KeyEvent.KEYCODE_BUTTON_R1 to ControllerPacket.RB_FLAG,
+            KeyEvent.KEYCODE_BUTTON_THUMBL to ControllerPacket.LS_CLK_FLAG,
+            KeyEvent.KEYCODE_BUTTON_THUMBR to ControllerPacket.RS_CLK_FLAG,
+            KeyEvent.KEYCODE_BUTTON_START to ControllerPacket.PLAY_FLAG,
+            KeyEvent.KEYCODE_MENU to ControllerPacket.PLAY_FLAG,
+            KeyEvent.KEYCODE_BUTTON_SELECT to ControllerPacket.BACK_FLAG,
+            KeyEvent.KEYCODE_BACK to ControllerPacket.BACK_FLAG,
+            KeyEvent.KEYCODE_BUTTON_MODE to ControllerPacket.SPECIAL_BUTTON_FLAG,
+
+            // This is the Xbox Series X Share button
+            KeyEvent.KEYCODE_MEDIA_RECORD to ControllerPacket.MISC_FLAG,
+
+            // This is a weird one, but it's what Android does prior to 4.10 kernels
+            // where DualShock/DualSense touchpads weren't mapped as separate devices.
+            // https://android.googlesource.com/platform/frameworks/base/+/master/data/keyboards/Vendor_054c_Product_0ce6_fallback.kl
+            // https://android.googlesource.com/platform/frameworks/base/+/master/data/keyboards/Vendor_054c_Product_09cc.kl
+            KeyEvent.KEYCODE_BUTTON_1 to ControllerPacket.TOUCHPAD_FLAG
+
+            // FIXME: Paddles?
+        )
+
+        @JvmStatic
+        fun clampFloat(v: Float, min: Float, max: Float): Float {
+            return if (v < min) min else if (v > max) max else v
+        }
+
+        @JvmStatic
+        fun clampShortToStickRange(v: Int): Short {
+            if (v > 0x7FFE) return 0x7FFE.toShort()
+            if (v < -0x7FFE) return (-0x7FFE).toShort()
+            return v.toShort()
+        }
+
+        // Treat very small physical stick values as 0 to avoid jitter when summing
+        private const val PHYS_EPSILON: Short = 512 // ~1.6% of full scale
+
+        @JvmStatic
+        fun denoisePhys(v: Short): Short {
+            return if (Math.abs(v.toInt()) <= PHYS_EPSILON) 0 else v
+        }
+
+        @JvmStatic
+        fun getMotionRangeForJoystickAxis(dev: InputDevice, axis: Int): InputDevice.MotionRange? {
+            // First get the axis for SOURCE_JOYSTICK
+            var range = dev.getMotionRange(axis, InputDevice.SOURCE_JOYSTICK)
+            if (range == null) {
+                // Now try the axis for SOURCE_GAMEPAD
+                range = dev.getMotionRange(axis, InputDevice.SOURCE_GAMEPAD)
+            }
+            return range
+        }
+
+        @JvmStatic
+        fun hasJoystickAxes(device: InputDevice): Boolean {
+            if ((device.sources and InputDevice.SOURCE_JOYSTICK) != InputDevice.SOURCE_JOYSTICK) return false
+            if (getMotionRangeForJoystickAxis(device, MotionEvent.AXIS_X) != null &&
+                getMotionRangeForJoystickAxis(device, MotionEvent.AXIS_Y) != null) return true
+            return joyConSide(device.vendorId, device.productId) == JoyConSide.RIGHT &&
+                JoyConMapping.stickAxes(JoyConSide.RIGHT, device.motionRanges.filter {
+                    getMotionRangeForJoystickAxis(device, it.axis) != null
+                }.map { it.axis }.toSet()) != null
+        }
+
+        @JvmStatic
+        fun hasGamepadButtons(device: InputDevice): Boolean {
+            return (device.sources and InputDevice.SOURCE_GAMEPAD) == InputDevice.SOURCE_GAMEPAD
+        }
+
+        @JvmStatic
+        fun isGameControllerDevice(device: InputDevice?): Boolean {
+            if (device == null) {
+                return true
+            }
+
+            if (hasJoystickAxes(device) || hasGamepadButtons(device)) {
+                // Has real joystick axes or gamepad buttons
+                return true
+            }
+
+            // HACK for https://issuetracker.google.com/issues/163120692
+            if (Build.VERSION.SDK_INT == Build.VERSION_CODES.R) {
+                if (device.id == -1) {
+                    // This "virtual" device could be input from any of the attached devices.
+                    // Look to see if any gamepads are connected.
+                    val ids = InputDevice.getDeviceIds()
+                    for (id in ids) {
+                        val dev = InputDevice.getDevice(id) ?: continue
+
+                        // If there are any gamepad devices connected, we'll
+                        // report that this virtual device is a gamepad.
+                        if (hasJoystickAxes(dev) || hasGamepadButtons(dev)) {
+                            return true
+                        }
+                    }
+                }
+            }
+
+            // Otherwise, we'll try anything that claims to be a non-alphabetic keyboard
+            return device.keyboardType != InputDevice.KEYBOARD_TYPE_ALPHABETIC
+        }
+
+        @JvmStatic
+        fun getAttachedControllerMask(
+            context: Context,
+            includeScreenDs5Touchpad: Boolean = true
+        ): Short {
+            var count = 0
+            var mask: Short = 0
+            val preferences = PreferenceConfiguration.readPreferences(context)
+            val joyCons = mutableMapOf<Int, JoyConSide>()
+
+            // Count all input devices that are gamepads
+            val im = context.getSystemService(Context.INPUT_SERVICE) as InputManager
+            for (id in im.inputDeviceIds) {
+                val dev = im.getInputDevice(id) ?: continue
+
+                if (hasJoystickAxes(dev)) {
+                    joyConSide(dev.vendorId, dev.productId)?.let { joyCons[id] = it }
+                    LimeLog.info("Counting InputDevice: " + dev.name)
+                    mask = (mask.toInt() or (1 shl count++)).toShort()
+                }
+            }
+
+            if (preferences.combineJoyCons) {
+                val pairing = JoyConPairing().apply { update(joyCons) }
+                count -= pairing.pairCount
+                mask = ((1 shl count.coerceAtMost(MAX_GAMEPADS.toInt())) - 1).toShort()
+            }
+
+            // Count all USB devices that match our drivers
+            if (PreferenceConfiguration.readPreferences(context).usbDriver) {
+                val usbManager = context.getSystemService(Context.USB_SERVICE) as? UsbManager
+                if (usbManager != null) {
+                    for (dev in usbManager.deviceList.values) {
+                        // We explicitly check not to claim devices that appear as InputDevices
+                        // otherwise we will double count them.
+                        if (UsbDriverService.shouldClaimDevice(dev, false) &&
+                            !UsbDriverService.isRecognizedInputDevice(dev)
+                        ) {
+                            LimeLog.info("Counting UsbDevice: " + dev.deviceName)
+                            mask = (mask.toInt() or (1 shl count++)).toShort()
+                        }
+                    }
+                }
+            }
+
+            if (preferences.onscreenController ||
+                (includeScreenDs5Touchpad && preferences.screenDs5Touchpad)
+            ) {
+                LimeLog.info("Counting OSC gamepad")
+                mask = (mask.toInt() or 1).toShort()
+            }
+
+            LimeLog.info("Enumerated $count gamepads")
+            return mask
+        }
+
+        @JvmStatic
+        fun hasButtonUnderTouchpad(dev: InputDevice, type: Byte): Boolean {
+            // It has to have a touchpad to have a button under it
+            if ((dev.sources and InputDevice.SOURCE_TOUCHPAD) != InputDevice.SOURCE_TOUCHPAD) {
+                return false
+            }
+
+            // Landroid/view/InputDevice;->hasButtonUnderPad()Z is blocked after O
+            if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.O) {
+                try {
+                    return dev.javaClass.getMethod("hasButtonUnderPad").invoke(dev) as Boolean
+                } catch (e: NoSuchMethodException) {
+                    e.printStackTrace()
+                } catch (e: IllegalAccessException) {
+                    e.printStackTrace()
+                } catch (e: InvocationTargetException) {
+                    e.printStackTrace()
+                } catch (e: ClassCastException) {
+                    e.printStackTrace()
+                }
+            }
+
+            // We can't use the platform API, so we'll have to just guess based on the gamepad type.
+            // If this is a PlayStation controller with a touchpad, we know it has a clickpad.
+            return type == MoonBridge.LI_CTYPE_PS
+        }
+
+        @JvmStatic
+        fun isExternal(dev: InputDevice): Boolean {
+            // The ASUS Tinker Board inaccurately reports Bluetooth gamepads as internal,
+            // causing shouldIgnoreBack() to believe it should pass through back as a
+            // navigation event for any attached gamepads.
+            if (Build.MODEL == "Tinker Board") {
+                return true
+            }
+
+            val deviceName = dev.name
+            if (deviceName.contains("gpio") || // This is the back button on Shield portable consoles
+                deviceName.contains("joy_key") || // These are the gamepad buttons on the Archos Gamepad 2
+                deviceName.contains("keypad") || // These are gamepad buttons on the XPERIA Play
+                deviceName.equals("NVIDIA Corporation NVIDIA Controller v01.01", ignoreCase = true) || // Gamepad on Shield Portable
+                deviceName.equals("NVIDIA Corporation NVIDIA Controller v01.02", ignoreCase = true) || // Gamepad on Shield Portable (?)
+                deviceName.equals("GR0006", ignoreCase = true) // Gamepad on Logitech G Cloud
+            ) {
+                LimeLog.info(dev.name + " is internal by hardcoded mapping")
+                return false
+            }
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                // Landroid/view/InputDevice;->isExternal()Z is officially public on Android Q
+                return dev.isExternal
+            } else {
+                try {
+                    // Landroid/view/InputDevice;->isExternal()Z is on the light graylist in Android P
+                    return dev.javaClass.getMethod("isExternal").invoke(dev) as Boolean
+                } catch (e: NoSuchMethodException) {
+                    e.printStackTrace()
+                } catch (e: IllegalAccessException) {
+                    e.printStackTrace()
+                } catch (e: InvocationTargetException) {
+                    e.printStackTrace()
+                } catch (e: ClassCastException) {
+                    e.printStackTrace()
+                }
+            }
+
+            // Answer true if we don't know
+            return true
+        }
+    } // companion object
+
+    // ========== Instance Fields ==========
+
+    private val inputVector = Vector2d()
+    private val mouseKeyboardTranslator by lazy { KeyboardTranslator() }
+    private val emulatedDpadHolds = EmulatedButtonHolds()
+    private val emulatedMouseButtonHolds = EmulatedButtonHolds()
+
+    internal val inputDeviceContexts = SparseArray<InputDeviceContext>()
+    @Volatile internal var inputDeviceContextSnapshot: List<InputDeviceContext> = emptyList()
+        private set
+    internal val driverControllerContexts = ConcurrentSkipListMap<Int, DriverControllerContext>()
+    private val driverControllerContextsLifecycleLock = Any()
+    // Serializes lights session transfer in migrateContext/close in destroy() (main thread)
+    // against session open/requestLights in handleSetControllerLED (common-c callback thread).
+    internal val lightsSessionLock = Any()
+
+    internal val deviceVibrator: Vibrator
+    private val deviceVibratorManager: VibratorManager?
+    internal val deviceSensorManager: SensorManager?
+    private val inputManager: InputManager
+    internal val sceManager: SceManager
+    // Initialized at declaration: hapticsCoordinator below reads its looper during construction.
+    internal val mainThreadHandler = Handler(Looper.getMainLooper())
+    private val backgroundHandlerThread: HandlerThread
+    internal val backgroundThreadHandler: Handler
+    internal val motionSender: ControllerMotionSender
+    private val stateSender = ControllerStateSender { controller, mask, buttons, lt, rt, lx, ly, rx, ry ->
+        conn.sendControllerInputChecked(controller, mask, buttons, lt, rt, lx, ly, rx, ry)
+    }
+    private var hasGameController = false
+    @Volatile internal var stopped = false
+
+    private val currentControllers = AtomicInteger()
+    private val initialControllerSlots = InitialControllerSlots()
+    private val initialControllers: Short get() = initialControllerSlots.mask.toShort()
+    private val usbHandoff = UsbControllerHandoff()
+    internal val joyConSupport = JoyConControllerSupport { inputDeviceContexts.get(it) }
+    private val startWheelOwnerGate = StartWheelOwnerGate()
+
+    internal data class ControllerArrivalMetadata(
+        val type: Byte,
+        val supportedButtonFlags: Int,
+        val capabilities: Short
+    )
+
+    // Arrival metadata is written from USB driver threads and read/written from the
+    // main thread, so all access to these arrays must hold this lock.
+    private val arrivalMetadataLock = Any()
+    private val controllerArrivalMetadata = arrayOfNulls<ControllerArrivalMetadata>(MAX_GAMEPADS.toInt())
+    private val sentControllerArrivalMetadata = arrayOfNulls<ControllerArrivalMetadata>(MAX_GAMEPADS.toInt())
+
+    private val stickDeadzone: Double
+
+    internal val defaultContext: InputDeviceContext
+
+    // --- Managers ---
+    internal val gyroManager = ControllerGyroManager(this)
+    internal val rumbleManager = ControllerRumbleManager(this)
+    private val systemWaveformRoutes = ConcurrentHashMap<Int, SystemWaveformRoute>()
+    private val directWaveformRouteIds = ConcurrentHashMap<Int, Int>()
+    private val waveformCapabilities = ConcurrentHashMap<Int, HapticRouteSnapshot>()
+    private val retiredWaveformRoutes = java.util.Collections.newSetFromMap(ConcurrentHashMap<Int, Boolean>())
+    private val hapticsCoordinator = ControllerHapticsCoordinator(this)
+    private var directDualSenseBluetoothTransport: AndroidBluetoothHidHostTransport? = null
+
+    @Volatile
+    private var screenDs5TouchpadPressed = false
+
+    private val REMAP_IGNORE = -1
+    private val REMAP_CONSUME = -2
+
+    // ========== Constructor ==========
+
+    init {
+        deviceVibrator = activityContext.getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
+        deviceSensorManager = activityContext.getSystemService(Context.SENSOR_SERVICE) as? SensorManager
+        inputManager = activityContext.getSystemService(Context.INPUT_SERVICE) as InputManager
+
+        // Create a HandlerThread to process battery state updates. These can be slow enough
+        // that they lead to ANRs if we do them on the main thread.
+        backgroundHandlerThread = HandlerThread("ControllerHandler")
+        backgroundHandlerThread.start()
+        backgroundThreadHandler = Handler(backgroundHandlerThread.looper)
+
+        motionSender = ControllerMotionSender(conn) { controller, type, gyroStop ->
+            val localGyro = type == MoonBridge.LI_MOTION_TYPE_GYRO &&
+                (gyroManager.isMouseMode || gyroManager.isRightStickMode) &&
+                gyroManager.isGyroHoldActiveFor(controller)
+            !stopped && isControllerSlotEnabled(controller) &&
+                (gyroStop || (!isControllerLocallyCaptured(controller) && !localGyro))
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+            prefConfig.dualSenseDirectBluetooth &&
+            AndroidBluetoothHidHostTransport.isAvailable(activityContext)
+        ) {
+            directDualSenseBluetoothTransport = AndroidBluetoothHidHostTransport(
+                activityContext.applicationContext
+            ) {
+                mainThreadHandler.post {
+                    for (index in 0 until inputDeviceContexts.size()) {
+                        inputDeviceContexts.valueAt(index)
+                            .directDualSenseBluetoothOutput?.onTransportReady()
+                    }
+                    refreshDirectBluetoothWaveformRoutes()
+                }
+            }.also { it.start() }
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+            prefConfig.dualSenseDirectBluetooth
+        ) {
+            LimeLog.warning(
+                "Direct DualSense Bluetooth output is unavailable without Bluetooth permission"
+            )
+        }
+
+        deviceVibratorManager = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            activityContext.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager
+        } else {
+            null
+        }
+
+        sceManager = SceManager(activityContext)
+        sceManager.start()
+
+        val ids = InputDevice.getDeviceIds()
+        for (id in ids) {
+            val dev = InputDevice.getDevice(id) ?: continue
+            if ((dev.sources and InputDevice.SOURCE_JOYSTICK) != 0 ||
+                (dev.sources and InputDevice.SOURCE_GAMEPAD) != 0
+            ) {
+                // This looks like a gamepad, but we'll check X and Y to be sure
+                if (getMotionRangeForJoystickAxis(dev, MotionEvent.AXIS_X) != null &&
+                    getMotionRangeForJoystickAxis(dev, MotionEvent.AXIS_Y) != null
+                ) {
+                    // This is a gamepad
+                    hasGameController = true
+                }
+            }
+        }
+
+        stickDeadzone = controllerStickDeadzoneRadius(prefConfig.deadzonePercentage)
+
+        // Initialize the default context for events with no device
+        defaultContext = InputDeviceContext(this)
+        defaultContext.leftStickXAxis = MotionEvent.AXIS_X
+        defaultContext.leftStickYAxis = MotionEvent.AXIS_Y
+        defaultContext.leftStickDeadzoneRadius = stickDeadzone.toFloat()
+        defaultContext.rightStickXAxis = MotionEvent.AXIS_Z
+        defaultContext.rightStickYAxis = MotionEvent.AXIS_RZ
+        defaultContext.rightStickDeadzoneRadius = stickDeadzone.toFloat()
+        defaultContext.leftTriggerAxis = MotionEvent.AXIS_BRAKE
+        defaultContext.rightTriggerAxis = MotionEvent.AXIS_GAS
+        defaultContext.hatXAxis = MotionEvent.AXIS_HAT_X
+        defaultContext.hatYAxis = MotionEvent.AXIS_HAT_Y
+        defaultContext.controllerNumber = 0
+        defaultContext.assignedControllerNumber = true
+        defaultContext.controllerArrival.markReported()
+        defaultContext.external = false
+
+        // Some devices (GPD XD) have a back button which sends input events
+        // with device ID == 0. This hits the default context which would normally
+        // consume these. Instead, let's ignore them since that's probably the
+        // most likely case.
+        defaultContext.ignoreBack = true
+
+        // Get the initially attached set of gamepads. As each gamepad receives
+        // its initial InputEvent, we will move these from this set onto the
+        // currentControllers set which will allow them to properly unplug
+        // if they are removed.
+        enumerateInitialControllerSlots()
+
+        // Register ourselves for input device notifications
+        inputManager.registerInputDeviceListener(this, null)
+        for (deviceId in InputDevice.getDeviceIds()) {
+            registerRumbleContextIfNeeded(deviceId)
+        }
+        hapticsCoordinator.refreshPrimaryController()
+    }
+
+    // ========== InputDeviceListener callbacks ==========
+
+    private fun inputSource(id: Int) = "input:$id"
+    private fun usbSource(path: String) = "usb:$path"
+    private fun source(context: GenericControllerContext): String? = when (context) {
+        is DriverControllerContext -> context.usbDevicePath?.let(::usbSource)
+        is InputDeviceContext -> inputSource(context.id)
+        else -> null
+    }
+
+    private fun enumerateInitialControllerSlots() {
+        val devices = inputManager.inputDeviceIds.map { inputManager.getInputDevice(it) }.filterNotNull().filter(::hasJoystickAxes)
+        val pairing = JoyConPairing().apply {
+            if (prefConfig.combineJoyCons) update(devices.mapNotNull { device ->
+                joyConSide(device.vendorId, device.productId)?.let { device.id to it }
+            }.toMap())
+        }
+        var next = 0
+        for (device in devices) {
+            if (initialControllerSlots.slot(inputSource(device.id)) != null) continue
+            initialControllerSlots.add(inputSource(device.id), next)
+            pairing.partner(device.id)?.let { initialControllerSlots.add(inputSource(it), next) }
+            next++
+        }
+        if (prefConfig.usbDriver) {
+            val manager = activityContext.getSystemService(Context.USB_SERVICE) as? UsbManager
+            manager?.deviceList?.values?.forEach { device ->
+                if (UsbDriverService.shouldClaimDevice(device, false) && !UsbDriverService.isRecognizedInputDevice(device)) {
+                    initialControllerSlots.add(usbSource(device.deviceName), next++)
+                }
+            }
+        }
+    }
+
+    private fun isUsbForwarded(device: InputDevice): Boolean = usbHandoff.blocks(
+        UsbControllerHandoff.Identity(device.vendorId, device.productId))
+
+    internal fun isContextUsable(context: GenericControllerContext): Boolean = !stopped && !context.retired &&
+        (context !is InputDeviceContext || context.inputDevice?.let { !isUsbForwarded(it) } != false) &&
+        (context !is DriverControllerContext || !usbHandoff.blocksPath(context.usbDevicePath))
+
+    internal fun isControllerSlotEnabled(number: Short): Boolean =
+        getActiveControllerMask().toInt() and (1 shl number.toInt()) != 0
+
+    class UsbForwardingLease internal constructor(
+        internal val handler: ControllerHandler,
+        internal val token: UsbControllerHandoff.Lease,
+        val ready: CompletionSignal = CompletionSignal()
+    ) {
+        internal var restored = false
+        /** Called on the owning activity's main thread after exporter cleanup. */
+        fun restore(devicePresent: Boolean) = handler.restoreUsbForwarding(this, devicePresent)
+    }
+
+    fun beginUsbForwarding(device: UsbDevice): UsbForwardingLease {
+        check(Looper.myLooper() == mainThreadHandler.looper && !stopped)
+        val identity = UsbControllerHandoff.Identity(device.vendorId, device.productId)
+        val systemDevices = inputManager.inputDeviceIds.map { inputManager.getInputDevice(it) }.filterNotNull()
+            .filter { it.vendorId == device.vendorId && it.productId == device.productId }
+        val driverIds = UsbDriverService.controllerIdsForDevice(device.deviceName)
+        val gamepad = systemDevices.any { hasJoystickAxes(it) || hasGamepadButtons(it) } ||
+            driverIds.any { driverControllerContexts[it]?.device !is com.limelight.binding.input.driver.UsbWaveformController } ||
+            UsbDriverService.shouldClaimDevice(device, true)
+        val lease = UsbForwardingLease(this, usbHandoff.acquire(device.deviceName, identity, gamepad))
+        val pendingWithdrawals = mutableListOf<Short>()
+        val reportedWithdrawals = mutableSetOf<Short>()
+        runCatching {
+            val affected = mutableSetOf<Short>()
+            for (systemDevice in systemDevices) {
+                initialControllerSlots.remove(inputSource(systemDevice.id))?.let {
+                    affected.add(if (prefConfig.multiController) it.toShort() else 0)
+                }
+            }
+            initialControllerSlots.remove(usbSource(device.deviceName))?.let {
+                affected.add(if (prefConfig.multiController) it.toShort() else 0)
+            }
+            val retired = mutableListOf<GenericControllerContext>()
+            synchronized(lightsSessionLock) {
+                for (i in inputDeviceContexts.size() - 1 downTo 0) {
+                    val context = inputDeviceContexts.valueAt(i)
+                    if (context.inputDevice?.let(::isUsbForwarded) != true) continue
+                    context.retired = true
+                    if (context.assignedControllerNumber) affected.add(context.controllerNumber)
+                    updateInputDeviceContext(inputDeviceContexts.keyAt(i), null)
+                    retired.add(context)
+                }
+            }
+            synchronized(driverControllerContextsLifecycleLock) {
+                driverIds.forEach { id -> driverControllerContexts.remove(id)?.let { context ->
+                    context.retired = true
+                    if (context.assignedControllerNumber) affected.add(context.controllerNumber)
+                    retired.add(context)
+                } }
+            }
+            retired.forEach { context ->
+                (gestures as? GameMenuAxisSourceLifecycle)?.releaseControllerMenuAxisSource(
+                    if (context is DriverControllerContext) usbGameMenuAxisSourceId(context.id) else context.id)
+                if (context is DriverControllerContext) {
+                    cancelForwardedDriverTouches(context)
+                    context.device?.let(rumbleManager::forgetUsbDevice)
+                    hapticsCoordinator.detachDs5HapticsSink(context.id)
+                }
+                synchronized(lightsSessionLock) { context.destroy() }
+            }
+            systemWaveformRoutes.entries.filter { (_, route) ->
+                route.metadata.device.vendorId == identity.vendorId && route.metadata.device.productId == identity.productId
+            }.forEach { (id, _) -> onSystemWaveformSinkGone(id) }
+
+            synchronized(arrivalMetadataLock) {
+                val oldMask = currentControllers.get()
+                affected.forEach { number ->
+                    val remaining = localControllerContexts().filter {
+                        isContextUsable(it) && it.assignedControllerNumber && it.controllerNumber == number
+                    }
+                    if (remaining.isEmpty()) {
+                        updateControllerSlot(number.toInt(), reserve = false)
+                    } else if (oldMask and (1 shl number.toInt()) != 0) {
+                        remaining.first().reservedControllerNumber = true
+                    }
+                }
+                // Single-controller compatibility can have declared player 1 before any input.
+                if (gamepad && !prefConfig.multiController) affected.add(0)
+                for (number in affected) {
+                    val activeMask = getActiveControllerMask()
+                    stateSender.reset(number)
+                    motionSender.reset(number, clearDemand = !isControllerSlotEnabled(number))
+                    val survivor = localControllerContexts().firstOrNull {
+                        isContextUsable(it) && it.assignedControllerNumber && it.controllerNumber == number
+                    }
+                    if (isControllerSlotEnabled(number)) {
+                        if (survivor != null) {
+                            synchronized(survivor.controllerArrival) {
+                                survivor.controllerArrival.recordAttempt(survivor.sendControllerArrival())
+                            }
+                            sendControllerInputPacketLocked(survivor)
+                        } else if (number.toInt() == 0 &&
+                            (prefConfig.onscreenController || prefConfig.enableCrownFeatures || prefConfig.screenDs5Touchpad)) {
+                            val screenMetadata = ControllerArrivalMetadata(
+                                MoonBridge.LI_CTYPE_XBOX, STANDARD_GAMEPAD_BUTTON_FLAGS, 0)
+                            controllerArrivalMetadata[0] = screenMetadata
+                            check(sendControllerArrivalMetadataLocked(0, screenMetadata) == 0)
+                            sendControllerInputPacketLocked(defaultContext)
+                        } else check(conn.sendControllerInputChecked(number, activeMask) == 0)
+                    } else {
+                        pendingWithdrawals += number
+                        if (sentControllerArrivalMetadata[number.toInt()] != null ||
+                            retired.any { it.controllerNumber == number && it.controllerArrival.isReported }) {
+                            reportedWithdrawals += number
+                        }
+                    }
+                }
+            }
+        }.fold({
+            if (pendingWithdrawals.isEmpty()) {
+                finishUsbForwardingHandoff(lease)
+            } else {
+                retryUsbHandoffWithdrawals(lease, pendingWithdrawals, reportedWithdrawals)
+            }
+        }, lease.ready::completeExceptionally)
+        return lease
+    }
+
+    /** Retry a transient full input queue without removing a slot reused by another source. */
+    private fun retryUsbHandoffWithdrawals(
+        lease: UsbForwardingLease,
+        numbers: List<Short>,
+        reported: Set<Short>,
+        attempt: Int = 0,
+    ) {
+        if (stopped) {
+            lease.ready.completeExceptionally(IllegalStateException("Controller handler stopped during USB handoff"))
+            return
+        }
+        val remaining = synchronized(arrivalMetadataLock) {
+            numbers.filter { number ->
+                if (isControllerSlotEnabled(number)) return@filter false
+                withdrawControllerSlotLocked(
+                    number,
+                    getActiveControllerMask(),
+                    number in reported || sentControllerArrivalMetadata[number.toInt()] != null,
+                ) != 0
+            }
+        }
+        if (remaining.isEmpty()) {
+            finishUsbForwardingHandoff(lease)
+            return
+        }
+        if (attempt >= USB_HANDOFF_WITHDRAW_MAX_RETRIES) {
+            lease.ready.completeExceptionally(
+                IllegalStateException("Unable to withdraw controller slots during USB handoff")
+            )
+            return
+        }
+        val delay = USB_HANDOFF_WITHDRAW_RETRY_DELAY_MS shl attempt.coerceAtMost(4)
+        if (!mainThreadHandler.postDelayed(
+                { retryUsbHandoffWithdrawals(lease, remaining, reported, attempt + 1) },
+                delay,
+            )) {
+            lease.ready.completeExceptionally(IllegalStateException("Controller handler looper stopped during USB handoff"))
+        }
+    }
+
+    private fun finishUsbForwardingHandoff(lease: UsbForwardingLease) {
+        gyroManager.onControllerSourceChanged(0)
+        gyroManager.onSensorsReenabled()
+        hapticsCoordinator.refreshPrimaryController()
+        // Drain any output already running when the contexts were retired. Sink
+        // teardown is queued on this looper too; export waits for the same barrier.
+        if (!backgroundThreadHandler.post { lease.ready.complete() }) {
+            lease.ready.completeExceptionally(IllegalStateException("Controller output worker stopped"))
+        }
+    }
+
+    private fun withdrawControllerSlotLocked(number: Short, activeMask: Short, wasReported: Boolean): Int {
+        motionSender.reset(number, clearDemand = true)
+        stateSender.reset(number)
+        hapticsCoordinator.retireController(number)
+        gyroManager.retireController(number)
+        if (number.toInt() == 0) {
+            defaultContext.setMouseEmulation(false)
+            defaultContext.inputMap = 0
+            defaultContext.leftTrigger = 0
+            defaultContext.rightTrigger = 0
+            defaultContext.leftStickX = 0
+            defaultContext.leftStickY = 0
+            defaultContext.rightStickX = 0
+            defaultContext.rightStickY = 0
+            defaultContext.physRightStickX = 0
+            defaultContext.physRightStickY = 0
+            defaultContext.gyroRightStickX = 0
+            defaultContext.gyroRightStickY = 0
+            defaultContext.controllerArrival.reset()
+        }
+        if (wasReported) {
+            val result = conn.sendControllerInputChecked(number, (activeMask.toInt() or (1 shl number.toInt())).toShort())
+            if (result != 0) return result
+        }
+        val result = conn.sendControllerInputChecked(number, activeMask)
+        if (result == 0) {
+            controllerArrivalMetadata[number.toInt()] = null
+            sentControllerArrivalMetadata[number.toInt()] = null
+        }
+        return result
+    }
+
+    private fun removeInitialControllerSource(source: String) {
+        synchronized(arrivalMetadataLock) {
+            val slot = initialControllerSlots.remove(source) ?: return
+            withdrawInitialControllerSlot(if (prefConfig.multiController) slot.toShort() else 0)
+        }
+    }
+
+    private fun withdrawInitialControllerSlot(number: Short, retryDelayMs: Long = 50L) {
+        synchronized(arrivalMetadataLock) {
+            if (stopped || isControllerSlotEnabled(number)) return
+            val result = withdrawControllerSlotLocked(number, getActiveControllerMask(),
+                sentControllerArrivalMetadata[number.toInt()] != null)
+            if (result != 0) {
+                // The source is gone, so no later report can retry this withdrawal.
+                // Recheck the mask on retry in case a new source has reused the slot.
+                mainThreadHandler.postDelayed({
+                    withdrawInitialControllerSlot(number, (retryDelayMs * 2).coerceAtMost(2000L))
+                }, retryDelayMs)
+            }
+        }
+    }
+
+    // Publish a stable structure for deferred motion checks; never enumerate SparseArray on that worker.
+    private fun updateInputDeviceContext(id: Int, context: InputDeviceContext?) = synchronized(inputDeviceContexts) {
+        if (context == null) inputDeviceContexts.remove(id) else inputDeviceContexts.put(id, context)
+        inputDeviceContextSnapshot = (0 until inputDeviceContexts.size()).map { inputDeviceContexts.valueAt(it) }
+    }
+
+    private fun localControllerContexts(): List<GenericControllerContext> =
+        inputDeviceContextSnapshot + driverControllerContexts.values
+
+    private fun restoreUsbForwarding(lease: UsbForwardingLease, devicePresent: Boolean) {
+        check(Looper.myLooper() == mainThreadHandler.looper)
+        if (lease.restored) return
+        usbHandoff.release(lease.token)
+        if (stopped) { lease.restored = true; return }
+        // Android identity is shared by identical USB devices. The last lease restores it.
+        val identityStillPresent = devicePresent ||
+            (activityContext.getSystemService(Context.USB_SERVICE) as? UsbManager)?.deviceList?.values?.any {
+                it.vendorId == lease.token.identity.vendorId && it.productId == lease.token.identity.productId
+            } == true
+        if (identityStillPresent && !usbHandoff.blocks(lease.token.identity)) {
+            for (id in inputManager.inputDeviceIds) {
+                val device = inputManager.getInputDevice(id) ?: continue
+                if (device.vendorId != lease.token.identity.vendorId || device.productId != lease.token.identity.productId) continue
+                if (!hasJoystickAxes(device) && !hasGamepadButtons(device)) continue
+                val context = inputDeviceContexts.get(id)?.takeIf(::isContextUsable)
+                    ?: createInputDeviceContextForDevice(device)
+                synchronized(lightsSessionLock) { updateInputDeviceContext(id, context) }
+                synchronized(arrivalMetadataLock) {
+                    assignControllerNumberIfNeeded(context)
+                    sendControllerInputPacketLocked(context)
+                }
+            }
+        }
+        // A detached physical device gets no synthetic arrival. New driver reports declare
+        // their own freshly-created context when the service's restore task runs.
+        if (devicePresent) retryPendingControllerArrivals()
+        refreshSystemWaveformRoutes()
+        gyroManager.onControllerSourceChanged(0)
+        gyroManager.onSensorsReenabled()
+        hapticsCoordinator.refreshPrimaryController()
+        lease.restored = true
+    }
+
+    override fun onInputDeviceAdded(deviceId: Int) {
+        registerRumbleContextIfNeeded(deviceId)
+        refreshSystemWaveformRoutes()
+        hapticsCoordinator.refreshPrimaryController()
+    }
+
+    private fun registerRumbleContextIfNeeded(deviceId: Int) {
+        if (inputDeviceContexts.get(deviceId) != null) return
+        val device = InputDevice.getDevice(deviceId) ?: return
+        if (isUsbForwarded(device)) return
+        // No isExternal gate: built-in gamepads (e.g. Switch OLED Joy-Con) must be registered
+        // during discovery so rumble works before their first input event.
+        if ((device.sources and InputDevice.SOURCE_GAMEPAD) == 0 &&
+            (device.sources and InputDevice.SOURCE_JOYSTICK) == 0
+        ) {
+            return
+        }
+        if ((getMotionRangeForJoystickAxis(device, MotionEvent.AXIS_X) == null ||
+                getMotionRangeForJoystickAxis(device, MotionEvent.AXIS_Y) == null) &&
+            !(joyConSide(device.vendorId, device.productId) == JoyConSide.RIGHT && hasJoystickAxes(device))
+        ) {
+            return
+        }
+
+        val context = createInputDeviceContextForDevice(device)
+        if (hapticsCoordinator.hasRumbleCapability(context) || context.joyCon?.combineEnabled == true) {
+            updateInputDeviceContext(deviceId, context)
+            hapticsCoordinator.onSinkChanged(context.controllerNumber)
+        }
+    }
+
+    override fun onInputDeviceRemoved(deviceId: Int) {
+        removeInitialControllerSource(inputSource(deviceId))
+        systemWaveformRoutes.entries.filter { it.value.inputId == deviceId }.forEach {
+            invalidateSystemWaveformRoute(it.key, it.value)
+        }
+        val context = inputDeviceContexts.get(deviceId)
+        if (context != null) {
+            val wasController0GyroSource = contextWasController0GyroSource(context)
+            mainThreadHandler.post {
+                (gestures as? GameMenuAxisSourceLifecycle)?.releaseControllerMenuAxisSource(deviceId)
+            }
+            LimeLog.info("Removed controller: " + context.name + " (" + deviceId + ")")
+            releaseControllerNumber(context)
+            // destroy() and the map removal must be atomic with respect to the LED
+            // command thread: it re-validates under lightsSessionLock that the context
+            // is still published before opening a session, so destroy-before-remove
+            // would otherwise let it open a session on a dying context that nothing
+            // will ever close.
+            synchronized(lightsSessionLock) {
+                context.destroy()
+                updateInputDeviceContext(deviceId, null)
+            }
+            joyConSupport.peer(context)?.takeIf { it.assignedControllerNumber }?.let {
+                refreshControllerArrival(it)
+                // Destroying the removed half may release a local menu capture.
+                sendControllerInputPacket(it)
+                it.enableSensors()
+            }
+            if (wasController0GyroSource) {
+                gyroManager.onControllerSourceChanged(context.controllerNumber)
+                gyroManager.onSensorsReenabled()
+            }
+            hapticsCoordinator.refreshPrimaryController()
+            hapticsCoordinator.clearControllerIfUnavailable(context.controllerNumber)
+        }
+        refreshSystemWaveformRoutes()
+    }
+
+    // This can happen when gaining/losing input focus with some devices.
+    // Input devices that have a trackpad may gain/lose AXIS_RELATIVE_X/Y.
+    override fun onInputDeviceChanged(deviceId: Int) {
+        val device = InputDevice.getDevice(deviceId) ?: return
+        if (isUsbForwarded(device)) return
+
+        // If we don't have a context for this device, we don't need to update anything
+        val existingContext = inputDeviceContexts.get(deviceId) ?: return
+        if (existingContext.inputDevice?.let {
+                it.vendorId != device.vendorId || it.productId != device.productId || it.descriptor != device.descriptor
+            } == true) {
+            systemWaveformRoutes.entries.filter { it.value.inputId == deviceId }.forEach {
+                invalidateSystemWaveformRoute(it.key, it.value)
+            }
+        }
+        val wasController0GyroSource = contextWasController0GyroSource(existingContext)
+
+        LimeLog.info("Device changed: " + existingContext.name + " (" + deviceId + ")")
+
+        // Migrate the existing context into this new one by moving any stateful elements.
+        // Publish the new context under lightsSessionLock so the LED command thread can't
+        // open a session on the old context while it is being migrated and destroyed.
+        val newContext = createInputDeviceContextForDevice(device)
+        synchronized(lightsSessionLock) {
+            newContext.migrateContext(existingContext)
+            updateInputDeviceContext(deviceId, newContext)
+        }
+        refreshSystemWaveformRoutes()
+        if (wasController0GyroSource || contextWasController0GyroSource(newContext)) {
+            gyroManager.onControllerSourceChanged(newContext.controllerNumber)
+            gyroManager.onSensorsReenabled()
+        }
+        hapticsCoordinator.refreshPrimaryController()
+        hapticsCoordinator.onSinkChanged(newContext.controllerNumber)
+        hapticsCoordinator.clearControllerIfUnavailable(existingContext.controllerNumber)
+    }
+
+    // ========== Lifecycle ==========
+
+    fun stop() {
+        if (stopped) {
+            return
+        }
+
+        // Flush rumble while device contexts and HOST fallback paths are still available.
+        systemWaveformRoutes.values.forEach { it.sink.stop() }
+        systemWaveformRoutes.clear()
+        directWaveformRouteIds.clear()
+        waveformCapabilities.clear()
+        hapticsCoordinator.stop()
+
+        // Stop new device contexts from being created or used
+        withControllerInputLock {
+            stopped = true
+            motionSender.close()
+        }
+
+        // Unregister our input device callbacks
+        inputManager.unregisterInputDeviceListener(this)
+
+        for (i in 0 until inputDeviceContexts.size()) {
+            inputDeviceContexts.valueAt(i).destroy()
+        }
+
+        directDualSenseBluetoothTransport?.close()
+        directDualSenseBluetoothTransport = null
+
+        val driverContextsToDestroy = synchronized(driverControllerContextsLifecycleLock) {
+            driverControllerContexts.values.toList().also { driverControllerContexts.clear() }
+        }
+        driverContextsToDestroy.forEach(DriverControllerContext::destroy)
+
+        if (startWheelOwnerGate.clear()) {
+            mainThreadHandler.post { gestures.hideStartHoldWheel() }
+        }
+
+        gyroManager.onStreamStopped()
+        // 清理 defaultContext 上可能注册的手机陀螺仪传感器
+        gyroManager.registerDeviceGyroForDefaultContext(false)
+        defaultContext.destroy()
+
+    }
+
+    fun destroy() {
+        if (!stopped) {
+            stop()
+        }
+
+        sceManager.stop()
+        backgroundHandlerThread.quitSafely()
+    }
+
+    internal fun onDriverShortcutLongPress(context: DriverControllerContext) {
+        if (!isContextUsable(context) || !startWheelOwnerGate.tryClaim(context)) return
+        val update = context.shortcutState.onLongPressTimeout(
+            android.os.SystemClock.uptimeMillis(),
+            prefConfig.enableStartKeyMenu
+        )
+        if (!update.actions.contains(DriverControllerShortcutStateMachine.Action.SHOW_WHEEL)) {
+            startWheelOwnerGate.release(context)
+        }
+        handleDriverShortcutUpdate(context, update)
+        if (update.sendNeutralState) {
+            sendNeutralControllerState(context)
+        }
+    }
+
+    internal fun onSystemStartLongPress(context: InputDeviceContext) {
+        if (!isContextUsable(context) || !startWheelOwnerGate.tryClaim(context)) return
+        val update = context.startGesture.onLongPressTimeout(
+            SystemClock.uptimeMillis(),
+            prefConfig.enableStartKeyMenu
+        )
+        if (!update.actions.contains(StartGestureReducer.EventAction.SHOW_WHEEL)) {
+            startWheelOwnerGate.release(context)
+        }
+        handleSystemStartGestureUpdate(context, update)
+    }
+
+    internal fun resetSystemStartGesture(context: InputDeviceContext) {
+        mainThreadHandler.removeCallbacks(context.startLongPressRunnable)
+        handleSystemStartGestureUpdate(context, context.startGesture.reset())
+        if (startWheelOwnerGate.release(context)) {
+            gestures.hideStartHoldWheel()
+        }
+    }
+
+    private fun handleSystemStartGestureUpdate(
+        context: InputDeviceContext,
+        update: StartGestureReducer.Update
+    ) {
+        for (action in update.actions) {
+            when (action) {
+                StartGestureReducer.EventAction.SCHEDULE_LONG_PRESS -> {
+                    mainThreadHandler.removeCallbacks(context.startLongPressRunnable)
+                    mainThreadHandler.postDelayed(
+                        context.startLongPressRunnable,
+                        START_DOWN_TIME_MOUSE_MODE_MS.toLong()
+                    )
+                }
+                StartGestureReducer.EventAction.CANCEL_LONG_PRESS ->
+                    mainThreadHandler.removeCallbacks(context.startLongPressRunnable)
+                StartGestureReducer.EventAction.SHOW_WHEEL -> {
+                    if (startWheelOwnerGate.isOwner(context)) {
+                        gestures.showStartHoldWheel()
+                        performStartWheelHaptic()
+                    }
+                }
+                StartGestureReducer.EventAction.HIDE_WHEEL -> {
+                    if (startWheelOwnerGate.release(context)) {
+                        gestures.hideStartHoldWheel()
+                    }
+                }
+                StartGestureReducer.EventAction.SELECTION_CHANGED ->
+                    run {
+                        if (startWheelOwnerGate.isOwner(context)) {
+                            gestures.updateStartHoldWheelSelection(update.selectedAction)
+                            performStartWheelHaptic()
+                        }
+                    }
+                StartGestureReducer.EventAction.COMMIT_ACTION -> when (update.committedAction) {
+                    StartWheelAction.MOUSE -> context.toggleMouseEmulation()
+                    StartWheelAction.KEYBOARD -> gestures.toggleKeyboard()
+                    StartWheelAction.PERFORMANCE -> onTogglePerformanceOverlay()
+                    StartWheelAction.MENU -> Unit
+                    StartWheelAction.CONTINUE, null -> Unit
+                }.also { performStartWheelHaptic() }
+                StartGestureReducer.EventAction.OPEN_GAME_MENU -> {
+                    val opened = gestures.showGameMenu(context)
+                    update.menuOpenRequestId?.let { requestId ->
+                        handleSystemStartGestureUpdate(
+                            context,
+                            context.startGesture.onGameMenuOpenResult(requestId, opened)
+                        )
+                    }
+                }
+                StartGestureReducer.EventAction.EXIT_STREAM -> onExitStream()
+            }
+        }
+        if (update.wheelVisible && startWheelOwnerGate.isOwner(context)) {
+            gestures.updateStartHoldWheelSelection(update.selectedAction)
+        }
+        if (update.sendNeutralState) {
+            sendNeutralControllerState(context)
+        }
+    }
+
+    private fun updateSystemStartReleaseState(context: InputDeviceContext) {
+        if (context.startGesture.state() == StartGestureReducer.State.WAIT_FOR_RELEASE) {
+            val buttonFlags = context.inputMap or if (context.startGesture.isStartPressed()) {
+                ControllerPacket.PLAY_FLAG
+            } else {
+                0
+            }
+            handleSystemStartGestureUpdate(
+                context,
+                context.startGesture.onInputSnapshot(
+                    buttonFlags,
+                    leftStickX = context.leftStickX.toFloat() / 32766f,
+                    leftStickY = hostStickYToWheelAxis(context.leftStickY),
+                    rightStickX = context.rightStickX.toFloat() / 32766f,
+                    rightStickY = hostStickYToWheelAxis(context.rightStickY)
+                )
+            )
+        }
+    }
+
+    private fun performStartWheelHaptic() {
+        mainThreadHandler.post {
+            if (!stopped) {
+                activityContext.window.decorView.performHapticFeedback(
+                    HapticFeedbackConstants.KEYBOARD_TAP
+                )
+            }
+        }
+    }
+
+    internal fun releaseDriverShortcutState(context: DriverControllerContext) {
+        mainThreadHandler.removeCallbacks(context.shortcutLongPressRunnable)
+        val update = context.shortcutState.reset()
+        handleDriverShortcutUpdate(context, update)
+        if (startWheelOwnerGate.release(context)) {
+            mainThreadHandler.post { gestures.hideStartHoldWheel() }
+        }
+    }
+
+    fun disableSensors() {
+        for (i in 0 until inputDeviceContexts.size()) {
+            inputDeviceContexts.valueAt(i).disableSensors()
+        }
+    }
+
+    fun enableSensors() {
+        if (stopped) {
+            return
+        }
+
+        for (i in 0 until inputDeviceContexts.size()) {
+            inputDeviceContexts.valueAt(i).enableSensors()
+        }
+
+        // 如果陀螺仪模拟右摇杆功能已启用，需要重新激活
+        gyroManager.onSensorsReenabled()
+    }
+
+    // ========== Controller Number Management ==========
+
+    // Claim/release one bit without losing concurrent lifecycle updates; motion reads never lock.
+    private fun updateControllerSlot(number: Int, reserve: Boolean): Boolean {
+        val bit = 1 shl number
+        while (true) {
+            val current = currentControllers.get()
+            if (reserve && (current and bit) != 0) return false
+            val updated = if (reserve) current or bit else current and bit.inv()
+            if (currentControllers.compareAndSet(current, updated)) return true
+        }
+    }
+
+    private fun releaseControllerNumber(context: GenericControllerContext) {
+        // A split controller owns one reservation. Keep the surviving half and its held
+        // inputs alive, while excluding all state belonging to the disconnected half.
+        val peer = (context as? InputDeviceContext)?.let { joyConSupport.peer(it) }
+        if (peer != null && peer.assignedControllerNumber && context.assignedControllerNumber &&
+            peer.controllerNumber == context.controllerNumber
+        ) {
+            peer.reservedControllerNumber = peer.reservedControllerNumber || context.reservedControllerNumber
+            context.reservedControllerNumber = false
+            context.assignedControllerNumber = false
+            synchronized(arrivalMetadataLock) {
+                sendControllerInputPacketLocked(peer,
+                    forceNeutral = isControllerLocallyCaptured(peer.controllerNumber))
+            }
+            return
+        }
+        // If we reserved a controller number, remove that reservation
+        if (context.reservedControllerNumber) {
+            LimeLog.info("Controller number " + context.controllerNumber + " is now available")
+            updateControllerSlot(context.controllerNumber.toInt(), reserve = false)
+        }
+
+        val wasAssigned = context.assignedControllerNumber
+        context.assignedControllerNumber = false
+        context.reservedControllerNumber = false
+
+        // If this device was reported to the host, zero the values before removing.
+        // We must do this after clearing the currentControllers entry so this
+        // causes the device to be removed on the server PC.
+        //
+        // An assigned controller whose arrival is still pending has never sent a
+        // normal input packet. Sending a removal packet for it can create a legacy
+        // Xbox controller on hosts that keep controller 0 active.
+        if (wasAssigned || context.controllerArrival.isReported) {
+            synchronized(arrivalMetadataLock) {
+                val activeMask = getActiveControllerMask()
+                motionSender.reset(context.controllerNumber,
+                    clearDemand = (activeMask.toInt() and (1 shl context.controllerNumber.toInt())) == 0)
+                // A failed arrival may still have forwarded motion using an existing slot's demand.
+                if (!context.controllerArrival.isReported) {
+                    localControllerContexts().firstOrNull {
+                        isContextUsable(it) && it.assignedControllerNumber && it.controllerArrival.isReported &&
+                            it.controllerNumber == context.controllerNumber
+                    }?.let { survivor ->
+                        sendControllerInputPacketLocked(survivor,
+                            forceNeutral = isControllerLocallyCaptured(survivor.controllerNumber))
+                    }
+                    return
+                }
+                conn.sendControllerInput(
+                    context.controllerNumber, activeMask,
+                    0,
+                    0.toByte(), 0.toByte(),
+                    0.toShort(), 0.toShort(),
+                    0.toShort(), 0.toShort()
+                )
+
+                stateSender.reset(context.controllerNumber)
+
+                val controllerNumber = context.controllerNumber.toInt() and 0xFF
+                if ((activeMask.toInt() and (1 shl controllerNumber)) == 0) {
+                    // The host removed this slot, so a reconnect must send a fresh arrival event.
+                    sentControllerArrivalMetadata[controllerNumber] = null
+                }
+            }
+        }
+    }
+
+    private fun contextWasController0GyroSource(context: GenericControllerContext): Boolean =
+        context.controllerNumber.toInt() == 0 &&
+            (context.assignedControllerNumber || context.controllerGyroRoutingParticipated)
+
+    private fun isAssociatedJoystick(originalDevice: InputDevice?, possibleAssociatedJoystick: InputDevice?): Boolean {
+        if (possibleAssociatedJoystick == null) {
+            return false
+        }
+
+        // This can't be an associated joystick if it's not a joystick
+        if ((possibleAssociatedJoystick.sources and InputDevice.SOURCE_JOYSTICK) != InputDevice.SOURCE_JOYSTICK) {
+            return false
+        }
+
+        // Make sure the device names *don't* match in order to prevent us from accidentally matching
+        // on another of the exact same device.
+        if (possibleAssociatedJoystick.name == originalDevice?.name) {
+            return false
+        }
+
+        // Make sure the descriptor matches. This can match in cases where two of the exact same
+        // input device are connected, so we perform the name check to exclude that case.
+        if (possibleAssociatedJoystick.descriptor != originalDevice?.descriptor) {
+            return false
+        }
+
+        return true
+    }
+
+    // Called before sending input but after we've determined that this
+    // is definitely a controller (not a keyboard, mouse, or something else)
+    private fun assignControllerNumberIfNeeded(context: GenericControllerContext): Boolean {
+        if (context.assignedControllerNumber) {
+            return false
+        }
+        val wasUnassignedController0GyroSource =
+            context.controllerNumber.toInt() == 0 && context.controllerGyroRoutingParticipated
+
+        if (context is InputDeviceContext) {
+            joyConSupport.refreshPairing(context)
+            val peer = joyConSupport.peer(context)
+            LimeLog.info(context.name + " (" + context.id + ") needs a controller number assigned")
+            if (peer != null && peer.assignedControllerNumber) {
+                context.controllerNumber = peer.controllerNumber
+                context.setMouseEmulation(peer.mouseEmulationActive)
+                context.gyroReportRateHz = peer.gyroReportRateHz
+                context.accelReportRateHz = peer.accelReportRateHz
+                context.enableSensors()
+                LimeLog.info("Joined Joy-Con ${context.id} with ${peer.id} as controller ${peer.controllerNumber}")
+            } else if (!context.external) {
+                LimeLog.info("Built-in buttons hardcoded as controller 0")
+                context.controllerNumber = 0
+            } else if (prefConfig.multiController && context.hasJoystickAxes) {
+                context.controllerNumber = 0
+
+                LimeLog.info("Reserving the next available controller number")
+                for (i in slotOrder(context)) {
+                    if (updateControllerSlot(i, reserve = true)) {
+
+                        // Take this value out of the initial gamepad set
+                        source(context)?.let { initialControllerSlots.consume(it, i) }
+
+                        context.controllerNumber = i.toShort()
+                        context.reservedControllerNumber = true
+                        break
+                    }
+                }
+            } else if (!context.hasJoystickAxes) {
+                // If this device doesn't have joystick axes, it may be an input device associated
+                // with another joystick (like a PS4 touchpad). We'll propagate that joystick's
+                // controller number to this associated device.
+
+                context.controllerNumber = 0
+
+                // For the DS4 case, the associated joystick is the next device after the touchpad.
+                // We'll try the opposite case too, just to be a little future-proof.
+                var associatedDevice = InputDevice.getDevice(context.id + 1)
+                if (!isAssociatedJoystick(context.inputDevice, associatedDevice)) {
+                    associatedDevice = InputDevice.getDevice(context.id - 1)
+                    if (!isAssociatedJoystick(context.inputDevice, associatedDevice)) {
+                        LimeLog.info("No associated joystick device found")
+                        associatedDevice = null
+                    }
+                }
+
+                if (associatedDevice != null) {
+                    var associatedDeviceContext = inputDeviceContexts.get(associatedDevice.id)
+
+                    // Create a new context for the associated device if one doesn't exist
+                    if (associatedDeviceContext == null) {
+                        associatedDeviceContext = createInputDeviceContextForDevice(associatedDevice)
+                        updateInputDeviceContext(associatedDevice.id, associatedDeviceContext)
+                    }
+
+                    // Assign a controller number for the associated device if one isn't assigned
+                    if (!associatedDeviceContext.assignedControllerNumber) {
+                        assignControllerNumberIfNeeded(associatedDeviceContext)
+                    }
+
+                    // Propagate the associated controller number
+                    context.controllerNumber = associatedDeviceContext.controllerNumber
+
+                    LimeLog.info("Propagated controller number from " + associatedDeviceContext.name)
+                }
+            } else {
+                LimeLog.info("Not reserving a controller number")
+                context.controllerNumber = 0
+            }
+
+            // If the gamepad doesn't have motion sensors, use the on-device sensors as a fallback for player 1
+            if (prefConfig.gamepadMotionSensorsFallbackToDevice && context.controllerNumber.toInt() == 0 && context.sensorManager == null) {
+                context.sensorManager = deviceSensorManager
+            }
+        } else {
+            if (prefConfig.multiController) {
+                context.controllerNumber = 0
+
+                LimeLog.info("Reserving the next available controller number")
+                for (i in slotOrder(context)) {
+                    if (updateControllerSlot(i, reserve = true)) {
+
+                        // Take this value out of the initial gamepad set
+                        source(context)?.let { initialControllerSlots.consume(it, i) }
+
+                        context.controllerNumber = i.toShort()
+                        context.reservedControllerNumber = true
+                        break
+                    }
+                }
+            } else {
+                LimeLog.info("Not reserving a controller number")
+                context.controllerNumber = 0
+            }
+        }
+
+        LimeLog.info("Assigned as controller " + context.controllerNumber)
+        context.assignedControllerNumber = true
+        source(context)?.let { initialControllerSlots.consume(it, context.controllerNumber.toInt()) }
+        if (context.controllerNumber.toInt() == 0) {
+            gyroManager.onController0OwnerChanged(releaseDeviceGyro = true)
+        } else if (wasUnassignedController0GyroSource) {
+            context.controllerGyroRoutingParticipated = false
+            gyroManager.onController0OwnerChanged(releaseDeviceGyro = false)
+        }
+        hapticsCoordinator.refreshPrimaryController()
+        hapticsCoordinator.onSinkChanged(context.controllerNumber)
+
+        // Association depends on assignment, not the frequency of input packets.
+        if (context is InputDeviceContext) refreshSystemWaveformRoutes()
+
+        // Report attributes of this new controller to the host
+        reportControllerArrival(context)
+        if (context is InputDeviceContext) {
+            joyConSupport.peer(context)?.takeUnless { it.assignedControllerNumber }?.let {
+                assignControllerNumberIfNeeded(it)
+            }
+        }
+        return true
+    }
+
+    private fun reportControllerArrival(context: GenericControllerContext): Boolean =
+        synchronized(context.controllerArrival) {
+            if (!isContextUsable(context)) return@synchronized false
+            if (context.controllerArrival.isReported) {
+                return@synchronized true
+            }
+
+            val result = if (context === defaultContext) synchronized(arrivalMetadataLock) {
+                if (!isControllerSlotEnabled(0)) -2 else sendControllerArrivalMetadataLocked(
+                    0, controllerArrivalMetadata[0] ?: ControllerArrivalMetadata(
+                        MoonBridge.LI_CTYPE_XBOX, STANDARD_GAMEPAD_BUTTON_FLAGS, 0))
+            } else context.sendControllerArrival()
+            context.controllerArrival.recordAttempt(result).also { reported ->
+                if (reported && context is InputDeviceContext) {
+                    mainThreadHandler.post { refreshDirectBluetoothWaveformRoutes() }
+                }
+            }
+        }
+
+    private fun slotOrder(context: GenericControllerContext): List<Int> =
+        initialControllerSlots.allocationOrder(source(context))
+
+    /** Recompute capabilities after a paired half disappears, even if arrival was reported. */
+    private fun refreshControllerArrival(context: InputDeviceContext) {
+        synchronized(context.controllerArrival) {
+            context.controllerArrival.recordAttempt(context.sendControllerArrival())
+        }
+    }
+
+    internal fun retryPendingControllerArrivals(afterRetry: (() -> Unit)? = null) {
+        mainThreadHandler.post {
+            if (stopped) {
+                return@post
+            }
+
+            for (i in 0 until inputDeviceContexts.size()) {
+                val context = inputDeviceContexts.valueAt(i)
+                if (!context.assignedControllerNumber &&
+                    context.directDualSenseBluetoothOutput != null
+                ) {
+                    assignControllerNumberIfNeeded(context)
+                }
+                if (context.assignedControllerNumber &&
+                    !context.controllerArrival.isReported &&
+                    reportControllerArrival(context)
+                ) {
+                    sendControllerInputPacket(context)
+                }
+            }
+
+            // Driver contexts are owned by their transport threads and continuously
+            // report state, so they retry through sendControllerInputPacket().
+            // Don't force a redundant retry sweep from the main thread here.
+            afterRetry?.invoke()
+        }
+    }
+
+    // ========== Device Context Creation ==========
+
+    private fun createDriverControllerContextForDevice(device: AbstractController): DriverControllerContext {
+        val context = DriverControllerContext(this)
+
+        context.id = device.getControllerId()
+        context.device = device
+        context.usbDevicePath = UsbDriverService.devicePathForController(device)
+        context.external = true
+
+        context.vendorId = device.getVendorId()
+        context.productId = device.getProductId()
+
+        context.leftStickDeadzoneRadius = stickDeadzone.toFloat()
+        context.rightStickDeadzoneRadius = stickDeadzone.toFloat()
+        context.triggerDeadzone = 0.13f
+
+        return context
+    }
+
+    private fun shouldIgnoreBack(dev: InputDevice): Boolean {
+        val devName = dev.name
+
+        // The Serval has a Select button but the framework doesn't
+        // know about that because it uses a non-standard scancode.
+        if (devName.contains("Razer Serval")) {
+            return true
+        }
+
+        // Classify this device as a remote by name if it has no joystick axes
+        if (!hasJoystickAxes(dev) && devName.lowercase().contains("remote")) {
+            return true
+        }
+
+        // Otherwise, dynamically try to determine whether we should allow this
+        // back button to function for navigation.
+        //
+        // First, check if this is an internal device we're being called on.
+        if (!isExternal(dev)) {
+            val im = activityContext.getSystemService(Context.INPUT_SERVICE) as InputManager
+
+            var foundInternalGamepad = false
+            var foundInternalSelect = false
+            for (id in im.inputDeviceIds) {
+                val currentDev = im.getInputDevice(id)
+
+                // Ignore external devices
+                if (currentDev == null || isExternal(currentDev)) {
+                    continue
+                }
+
+                // Note that we are explicitly NOT excluding the current device we're examining here,
+                // since the other gamepad buttons may be on our current device and that's fine.
+                if (currentDev.hasKeys(KeyEvent.KEYCODE_BUTTON_SELECT)[0]) {
+                    foundInternalSelect = true
+                }
+
+                // We don't check KEYCODE_BUTTON_A here, since the Shield Android TV has a
+                // virtual mouse device that claims to have KEYCODE_BUTTON_A. Instead, we rely
+                // on the SOURCE_GAMEPAD flag to be set on gamepad devices.
+                if (hasGamepadButtons(currentDev)) {
+                    foundInternalGamepad = true
+                }
+            }
+
+            // Allow the back button to function for navigation if we either:
+            // a) have no internal gamepad (most phones)
+            // b) have an internal gamepad but also have an internal select button (GPD XD)
+            // but not:
+            // c) have an internal gamepad but no internal select button (NVIDIA SHIELD Portable)
+            return !foundInternalGamepad || foundInternalSelect
+        } else {
+            // For external devices, we want to pass through the back button if the device
+            // has no gamepad axes or gamepad buttons.
+            return !hasJoystickAxes(dev) && !hasGamepadButtons(dev)
+        }
+    }
+
+    private fun createInputDeviceContextForDevice(dev: InputDevice): InputDeviceContext {
+        val context = InputDeviceContext(this,
+            JoyConDeviceState.create(dev.vendorId, dev.productId, prefConfig.combineJoyCons))
+        val devName = dev.name
+
+        LimeLog.info("Creating controller context for device: $devName")
+        LimeLog.info("Vendor ID: " + dev.vendorId)
+        LimeLog.info("Product ID: " + dev.productId)
+        LimeLog.info(dev.toString())
+
+        context.inputDevice = dev
+        context.name = devName
+        context.id = dev.id
+        context.external = isExternal(dev)
+
+        context.vendorId = dev.vendorId
+        context.productId = dev.productId
+
+        directDualSenseBluetoothTransport?.let { transport ->
+            if (DirectDualSenseBluetoothOutput.supports(dev)) {
+                context.directDualSenseBluetoothOutput =
+                    DirectDualSenseBluetoothOutput(dev, transport) {
+                        mainThreadHandler.post {
+                            if (!stopped && inputDeviceContexts.get(context.id) === context) {
+                                rumbleManager.handleDirectBluetoothSendFailure(context)
+                            }
+                        }
+                    }
+                LimeLog.info("Enabled direct Bluetooth output for $devName")
+            }
+        }
+
+        // These aren't always present in the Android key layout files, so they won't show up
+        // in our normal InputDevice.hasKeys() probing.
+        context.hasPaddles = MoonBridge.guessControllerHasPaddles(context.vendorId, context.productId)
+        context.hasShare = MoonBridge.guessControllerHasShareButton(context.vendorId, context.productId)
+
+        // Try to use the InputDevice's associated vibrators first
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && rumbleManager.hasQuadAmplitudeControlledRumbleVibrators(dev.vibratorManager)) {
+            context.vibratorManager = dev.vibratorManager
+            context.quadVibrators = true
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && rumbleManager.hasDualAmplitudeControlledRumbleVibrators(dev.vibratorManager)) {
+            context.vibratorManager = dev.vibratorManager
+            context.quadVibrators = false
+        } else if (dev.vibrator.hasVibrator()) {
+            context.vibrator = dev.vibrator
+        } else if (!context.external) {
+            // If this is an internal controller, try to use the device's vibrator
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && deviceVibratorManager != null &&
+                rumbleManager.hasQuadAmplitudeControlledRumbleVibrators(deviceVibratorManager)
+            ) {
+                context.vibratorManager = deviceVibratorManager
+                context.quadVibrators = true
+                context.borrowsDeviceVibrator = true
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && deviceVibratorManager != null &&
+                rumbleManager.hasDualAmplitudeControlledRumbleVibrators(deviceVibratorManager)
+            ) {
+                context.vibratorManager = deviceVibratorManager
+                context.quadVibrators = false
+                context.borrowsDeviceVibrator = true
+            } else if (deviceVibrator.hasVibrator()) {
+                context.vibrator = deviceVibrator
+                context.borrowsDeviceVibrator = true
+            }
+        }
+
+        // InputDevice sensors were added in Android 12, but Android 12 and 12L can crash on a
+        // background SensorThread after InputDeviceSensorManager observes a removed device.
+        // Merely accessing dev.sensorManager creates that manager, so keep it disabled by default
+        // on Android 12/12L. Only the explicit compatibility opt-in may touch it there.
+        // Device-level sensor fallback uses the regular SensorManager and remains safe.
+        // https://cs.android.com/android/_/android/platform/frameworks/base/+/8970010a5e9f3dc5c069f56b4147552accfcbbeb
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+            InputDeviceSensorPolicy.shouldUse(
+                Build.VERSION.SDK_INT,
+                prefConfig.gamepadMotionSensors,
+            )
+        ) {
+            val sensorManager = dev.sensorManager
+            if (sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER) != null ||
+                sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE) != null
+            ) {
+                context.sensorManager = sensorManager
+            }
+        }
+
+        // Check if this device has a usable RGB LED and cache that result
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            for (light in dev.lightsManager.lights) {
+                if (light.hasRgbControl()) {
+                    context.hasRgbLed = true
+                    break
+                }
+            }
+        }
+
+        // Detect if the gamepad has Mode and Select buttons according to the Android key layouts.
+        // We do this first because other codepaths below may override these defaults.
+        val buttons = dev.hasKeys(KeyEvent.KEYCODE_BUTTON_MODE, KeyEvent.KEYCODE_BUTTON_SELECT, KeyEvent.KEYCODE_BACK, 0)
+        context.hasMode = buttons[0]
+        context.hasSelect = buttons[1] || buttons[2]
+
+        context.touchpadXRange = dev.getMotionRange(MotionEvent.AXIS_X, InputDevice.SOURCE_TOUCHPAD)
+        context.touchpadYRange = dev.getMotionRange(MotionEvent.AXIS_Y, InputDevice.SOURCE_TOUCHPAD)
+        context.touchpadPressureRange = dev.getMotionRange(MotionEvent.AXIS_PRESSURE, InputDevice.SOURCE_TOUCHPAD)
+
+        context.leftStickXAxis = MotionEvent.AXIS_X
+        context.leftStickYAxis = MotionEvent.AXIS_Y
+        if ((getMotionRangeForJoystickAxis(dev, context.leftStickXAxis) != null &&
+            getMotionRangeForJoystickAxis(dev, context.leftStickYAxis) != null) ||
+            (joyConSide(dev.vendorId, dev.productId) == JoyConSide.RIGHT && hasJoystickAxes(dev))
+        ) {
+            // This is a gamepad
+            hasGameController = true
+            context.hasJoystickAxes = true
+        }
+
+        // This is hack to deal with the Nvidia Shield's modifications that causes the DS4 clickpad
+        // to work as a duplicate Select button instead of a unique button we can handle separately.
+        context.isDualShockStandaloneTouchpad =
+            context.vendorId == 0x054c && // Sony
+                    devName.endsWith(" Touchpad") &&
+                    dev.sources == (InputDevice.SOURCE_KEYBOARD or InputDevice.SOURCE_MOUSE)
+
+        val leftTriggerRange = getMotionRangeForJoystickAxis(dev, MotionEvent.AXIS_LTRIGGER)
+        val rightTriggerRange = getMotionRangeForJoystickAxis(dev, MotionEvent.AXIS_RTRIGGER)
+        val brakeRange = getMotionRangeForJoystickAxis(dev, MotionEvent.AXIS_BRAKE)
+        val gasRange = getMotionRangeForJoystickAxis(dev, MotionEvent.AXIS_GAS)
+        val throttleRange = getMotionRangeForJoystickAxis(dev, MotionEvent.AXIS_THROTTLE)
+        if (leftTriggerRange != null && rightTriggerRange != null) {
+            // Some controllers use LTRIGGER and RTRIGGER (like Ouya)
+            context.leftTriggerAxis = MotionEvent.AXIS_LTRIGGER
+            context.rightTriggerAxis = MotionEvent.AXIS_RTRIGGER
+        } else if (brakeRange != null && gasRange != null) {
+            // Others use GAS and BRAKE (like Moga)
+            context.leftTriggerAxis = MotionEvent.AXIS_BRAKE
+            context.rightTriggerAxis = MotionEvent.AXIS_GAS
+        } else if (brakeRange != null && throttleRange != null) {
+            // Others use THROTTLE and BRAKE (like Xiaomi)
+            context.leftTriggerAxis = MotionEvent.AXIS_BRAKE
+            context.rightTriggerAxis = MotionEvent.AXIS_THROTTLE
+        } else {
+            val rxRange = getMotionRangeForJoystickAxis(dev, MotionEvent.AXIS_RX)
+            val ryRange = getMotionRangeForJoystickAxis(dev, MotionEvent.AXIS_RY)
+            if (rxRange != null && ryRange != null && devName != null) {
+                if (dev.vendorId == 0x054c) { // Sony
+                    if (dev.hasKeys(KeyEvent.KEYCODE_BUTTON_C)[0]) {
+                        LimeLog.info("Detected non-standard DualShock 4 mapping")
+                        context.isNonStandardDualShock4 = true
+                    } else {
+                        LimeLog.info("Detected DualShock 4 (Linux standard mapping)")
+                        context.usesLinuxGamepadStandardFaceButtons = true
+                    }
+                }
+
+                if (context.isNonStandardDualShock4) {
+                    // The old DS4 driver uses RX and RY for triggers
+                    context.leftTriggerAxis = MotionEvent.AXIS_RX
+                    context.rightTriggerAxis = MotionEvent.AXIS_RY
+
+                    // DS4 has Select and Mode buttons (possibly mapped non-standard)
+                    context.hasSelect = true
+                    context.hasMode = true
+                } else {
+                    // If it's not a non-standard DS4 controller, it's probably an Xbox controller or
+                    // other sane controller that uses RX and RY for right stick and Z and RZ for triggers.
+                    context.rightStickXAxis = MotionEvent.AXIS_RX
+                    context.rightStickYAxis = MotionEvent.AXIS_RY
+
+                    // While it's likely that Z and RZ are triggers, we may have digital trigger buttons
+                    // instead. We must check that we actually have Z and RZ axes before assigning them.
+                    if (getMotionRangeForJoystickAxis(dev, MotionEvent.AXIS_Z) != null &&
+                        getMotionRangeForJoystickAxis(dev, MotionEvent.AXIS_RZ) != null
+                    ) {
+                        context.leftTriggerAxis = MotionEvent.AXIS_Z
+                        context.rightTriggerAxis = MotionEvent.AXIS_RZ
+                    }
+                }
+
+                // Triggers always idle negative on axes that are centered at zero
+                context.triggersIdleNegative = true
+            }
+        }
+
+        if (context.rightStickXAxis == -1 && context.rightStickYAxis == -1) {
+            val zRange = getMotionRangeForJoystickAxis(dev, MotionEvent.AXIS_Z)
+            val rzRange = getMotionRangeForJoystickAxis(dev, MotionEvent.AXIS_RZ)
+
+            // Most other controllers use Z and RZ for the right stick
+            if (zRange != null && rzRange != null) {
+                context.rightStickXAxis = MotionEvent.AXIS_Z
+                context.rightStickYAxis = MotionEvent.AXIS_RZ
+            } else {
+                val rxRange = getMotionRangeForJoystickAxis(dev, MotionEvent.AXIS_RX)
+                val ryRange = getMotionRangeForJoystickAxis(dev, MotionEvent.AXIS_RY)
+
+                // Try RX and RY now
+                if (rxRange != null && ryRange != null) {
+                    context.rightStickXAxis = MotionEvent.AXIS_RX
+                    context.rightStickYAxis = MotionEvent.AXIS_RY
+                }
+            }
+        }
+
+        // Some devices have "hats" for d-pads
+        val hatXRange = getMotionRangeForJoystickAxis(dev, MotionEvent.AXIS_HAT_X)
+        val hatYRange = getMotionRangeForJoystickAxis(dev, MotionEvent.AXIS_HAT_Y)
+        if (hatXRange != null && hatYRange != null) {
+            context.hatXAxis = MotionEvent.AXIS_HAT_X
+            context.hatYAxis = MotionEvent.AXIS_HAT_Y
+        }
+
+        if (joyConSupport.configureInput(context, dev)) hasGameController = true
+
+        if (context.leftStickXAxis != -1 && context.leftStickYAxis != -1) {
+            context.leftStickDeadzoneRadius = stickDeadzone.toFloat()
+        }
+
+        if (context.rightStickXAxis != -1 && context.rightStickYAxis != -1) {
+            context.rightStickDeadzoneRadius = stickDeadzone.toFloat()
+        }
+
+        if (context.leftTriggerAxis != -1 && context.rightTriggerAxis != -1) {
+            val ltRange = getMotionRangeForJoystickAxis(dev, context.leftTriggerAxis)
+            val rtRange = getMotionRangeForJoystickAxis(dev, context.rightTriggerAxis)
+
+            // It's important to have a valid deadzone so controller packet batching works properly
+            context.triggerDeadzone = Math.max(Math.abs(ltRange!!.flat), Math.abs(rtRange!!.flat))
+
+            // For triggers without (valid) deadzones, we'll use 13% (around XInput's default)
+            if (context.triggerDeadzone < 0.13f || context.triggerDeadzone > 0.30f) {
+                context.triggerDeadzone = 0.13f
+            }
+        }
+
+        // The ADT-1 controller needs a similar fixup to the ASUS Gamepad
+        if (dev.vendorId == 0x18d1 && dev.productId == 0x2c40) {
+            context.backIsStart = true
+            context.modeIsSelect = true
+            context.triggerDeadzone = 0.30f
+            context.hasSelect = true
+            context.hasMode = false
+        }
+
+        context.ignoreBack = shouldIgnoreBack(dev)
+
+        if (devName != null) {
+            // For the Nexus Player (and probably other ATV devices), we should
+            // use the back button as start since it doesn't have a start/menu button
+            // on the controller
+            if (devName.contains("ASUS Gamepad")) {
+                val hasStartKey = dev.hasKeys(KeyEvent.KEYCODE_BUTTON_START, KeyEvent.KEYCODE_MENU, 0)
+                if (!hasStartKey[0] && !hasStartKey[1]) {
+                    context.backIsStart = true
+                    context.modeIsSelect = true
+                    context.hasSelect = true
+                    context.hasMode = false
+                }
+
+                // The ASUS Gamepad has triggers that sit far forward and are prone to false presses
+                // so we increase the deadzone on them to minimize this
+                context.triggerDeadzone = 0.30f
+            }
+            // SHIELD controllers will use small stick deadzones
+            else if (devName.contains("SHIELD") || devName.contains("NVIDIA Controller")) {
+                // The big Nvidia button on the Shield controllers acts like a Search button. It
+                // summons the Google Assistant on the Shield TV. On my Pixel 4, it seems to do
+                // nothing, so we can hijack it to act like a mode button.
+                if (devName.contains("NVIDIA Controller v01.03") || devName.contains("NVIDIA Controller v01.04")) {
+                    context.searchIsMode = true
+                    context.hasMode = true
+                }
+            }
+            // The Serval has a couple of unknown buttons that are start and select. It also has
+            // a back button which we want to ignore since there's already a select button.
+            else if (devName.contains("Razer Serval")) {
+                context.isServal = true
+
+                // Serval has Select and Mode buttons (possibly mapped non-standard)
+                context.hasMode = true
+                context.hasSelect = true
+            }
+            // The Xbox One S Bluetooth controller has some mappings that need fixing up.
+            // However, Microsoft released a firmware update with no change to VID/PID
+            // or device name that fixed the mappings for Android. Since there's
+            // no good way to detect this, we'll use the presence of GAS/BRAKE axes
+            // that were added in the latest firmware. If those are present, the only
+            // required fixup is ignoring the select button.
+            else if (devName == "Xbox Wireless Controller") {
+                if (gasRange == null) {
+                    context.isNonStandardXboxBtController = true
+
+                    // Xbox One S has Select and Mode buttons (possibly mapped non-standard)
+                    context.hasMode = true
+                    context.hasSelect = true
+                }
+            }
+        }
+
+        // Thrustmaster Score A gamepad home button reports directly to android as
+        // KEY_HOMEPAGE event on another event channel
+        if (dev.vendorId == 0x044f && dev.productId == 0xb328) {
+            context.hasMode = false
+        }
+
+        LimeLog.info("Analog stick deadzone: " + context.leftStickDeadzoneRadius + " " + context.rightStickDeadzoneRadius)
+        LimeLog.info("Trigger deadzone: " + context.triggerDeadzone)
+
+        return context
+    }
+
+    // ========== Event Context Resolution ==========
+
+    fun getGameMenuNavigationAxisPairs(event: MotionEvent, includeRightStick: Boolean = true): List<Pair<Float, Float>>? {
+        val context = getContextForEvent(event) ?: return null
+        return readMenuNavigationAxisPairs(
+            mapping = MenuNavigationAxisMapping(
+                hatAxes = axisPairOrNull(context.hatXAxis, context.hatYAxis),
+                leftStickAxes = axisPairOrNull(context.leftStickXAxis, context.leftStickYAxis),
+                rightStickAxes = if (includeRightStick) axisPairOrNull(context.rightStickXAxis, context.rightStickYAxis) else null
+            ),
+            axisValue = event::getAxisValue
+        )
+    }
+
+    private fun axisPairOrNull(xAxis: Int, yAxis: Int): Pair<Int, Int>? =
+        if (xAxis != -1 && yAxis != -1) xAxis to yAxis else null
+
+    fun getMenuRightStickY(event: MotionEvent): Float {
+        val axis = getContextForEvent(event)?.rightStickYAxis ?: return 0f
+        return if (axis != -1) event.getAxisValue(axis) else 0f
+    }
+
+    private fun getContextForEvent(event: InputEvent): InputDeviceContext? {
+        // Don't return a context if we're stopped
+        if (stopped) {
+            return null
+        } else if (event.deviceId == 0) {
+            // Unknown devices use the default context
+            return defaultContext
+        } else if (event.device == null) {
+            // During device removal, sometimes we can get events after the
+            // input device has been destroyed. In this case we'll see a
+            // != 0 device ID but no device attached.
+            return null
+        }
+
+        // HACK for https://issuetracker.google.com/issues/163120692
+        if (Build.VERSION.SDK_INT == Build.VERSION_CODES.R) {
+            if (event.deviceId == -1) {
+                return defaultContext
+            }
+        }
+
+        // Return the existing context if it exists
+        var context = inputDeviceContexts.get(event.deviceId)
+        if (context != null) {
+            return context
+        }
+
+        // Otherwise create a new context
+        context = createInputDeviceContextForDevice(event.device)
+        updateInputDeviceContext(event.deviceId, context)
+
+        return context
+    }
+
+    // ========== Input Helpers ==========
+
+    private fun maxByMagnitude(a: Byte, b: Byte): Byte {
+        val absA = Math.abs(a.toInt())
+        val absB = Math.abs(b.toInt())
+        return if (absA > absB) a else b
+    }
+
+    private fun maxByMagnitude(a: Short, b: Short): Short {
+        val absA = Math.abs(a.toInt())
+        val absB = Math.abs(b.toInt())
+        return if (absA > absB) a else b
+    }
+
+    internal fun getActiveControllerMask(): Short {
+        val local = localControllerContexts().filter { isContextUsable(it) && it.assignedControllerNumber }
+            .fold(0) { mask, context -> mask or (1 shl context.controllerNumber.toInt()) }
+        val screen = if (prefConfig.onscreenController || prefConfig.enableCrownFeatures || prefConfig.screenDs5Touchpad) 1 else 0
+        return usbHandoff.activeMask(prefConfig.multiController, currentControllers.get(), initialControllers.toInt(), local, screen)
+    }
+
+    /**
+     * Apply a runtime change of the screen DS5 touchpad setting. Callers must update
+     * [PreferenceConfiguration.screenDs5Touchpad] first: it drives both the decoration
+     * in [sendControllerArrivalMetadataLocked] and bit 0 of the active mask.
+     *
+     * Enabling (re-)declares controller 0 as a DualSense, reusing the cached metadata
+     * when a physical pad already owns player 1. Disabling releases the reserved slot
+     * when nothing else keeps player 1 active, or re-declares the base metadata so the
+     * host drops the DualSense identity.
+     */
+    fun setScreenDs5TouchpadEnabled(enabled: Boolean): Int {
+        if (!enabled) {
+            screenDs5TouchpadPressed = false
+        }
+        synchronized(arrivalMetadataLock) {
+            val baseMetadata = controllerArrivalMetadata[0]
+            val activeMask = getActiveControllerMask()
+            val arrivalBase = baseMetadata ?: ControllerArrivalMetadata(MoonBridge.LI_CTYPE_XBOX, 0, 0)
+            val targetMetadata = decorateControllerArrivalMetadata(0, arrivalBase)
+
+            // Sunshine rejects an arrival for an allocated controller number. Remove slot 0
+            // before changing its host-visible profile, then allow the fresh arrival below.
+            if (sentControllerArrivalMetadata[0] != targetMetadata &&
+                ScreenDs5ControllerPolicy.shouldRemovePrimaryController(
+                    activeMask,
+                    sentControllerArrivalMetadata[0] != null,
+                )
+            ) {
+                val removalResult = conn.sendControllerInputChecked(
+                    0,
+                    ScreenDs5ControllerPolicy.withoutPrimaryController(activeMask),
+                    0, 0, 0, 0, 0, 0, 0,
+                )
+                if (removalResult != 0) return removalResult
+                stateSender.reset(0)
+                motionSender.reset(0, clearDemand = true)
+                sentControllerArrivalMetadata[0] = null
+            }
+
+            if (!enabled && (activeMask.toInt() and 1) == 0) {
+                controllerArrivalMetadata[0] = null
+                return 0
+            }
+            return sendControllerArrivalMetadataLocked(
+                0,
+                arrivalBase
+            )
+        }
+    }
+
+    /** Merge the screen clickpad state into controller 0 without replacing other inputs. */
+    fun setScreenDs5TouchpadPressed(pressed: Boolean) {
+        if (screenDs5TouchpadPressed == pressed || stopped) return
+        screenDs5TouchpadPressed = pressed
+        sendControllerInputPacket(defaultContext)
+    }
+
+    internal fun sendControllerArrivalEvent(
+        controllerNumber: Byte,
+        type: Byte,
+        supportedButtonFlags: Int,
+        capabilities: Short
+    ): Int {
+        val index = controllerNumber.toInt() and 0xFF
+        if (index !in controllerArrivalMetadata.indices) return -1
+        if (!isControllerSlotEnabled(index.toShort())) return -2
+
+        val metadata = ControllerArrivalMetadata(type, supportedButtonFlags, capabilities)
+        synchronized(arrivalMetadataLock) {
+            controllerArrivalMetadata[index] = metadata
+            return sendControllerArrivalMetadataLocked(index, metadata)
+        }
+    }
+
+    private fun sendControllerArrivalMetadataLocked(
+        controllerNumber: Int,
+        baseMetadata: ControllerArrivalMetadata
+    ): Int {
+        var metadata = decorateControllerArrivalMetadata(controllerNumber, baseMetadata)
+        if (prefConfig.hostGamepadSelection == HostGamepadSelection.AUTOMATIC &&
+            (0 until inputDeviceContexts.size()).any {
+                val context = inputDeviceContexts.valueAt(it)
+                val device = context.inputDevice
+                context.controllerNumber.toInt() == controllerNumber && device != null &&
+                    waveformCapabilities.values.any { route ->
+                        route.device.vendorId == device.vendorId && route.device.productId == device.productId &&
+                            route.capability.output == HapticOutput.WAVEFORM_STREAM &&
+                            (route.capability.evidence != HapticEvidence.EXPERIMENTAL_PROTOCOL ||
+                                prefConfig.allowExperimentalHaptics)
+                    }
+            }) {
+            // Request authored host content independently of USB permission/output readiness.
+            metadata = metadata.copy(type = MoonBridge.LI_CTYPE_PS,
+                capabilities = (metadata.capabilities.toInt() or
+                    MoonBridge.LI_CCAP_PREFER_DS5.toInt()).toShort())
+        }
+
+        // Preserve explicit client intent on hosts that also understand the legacy arrival bit.
+        metadata = when (prefConfig.hostGamepadSelection) {
+            HostGamepadSelection.XBOX -> metadata.copy(
+                type = MoonBridge.LI_CTYPE_XBOX,
+                capabilities = (metadata.capabilities.toInt() and MoonBridge.LI_CCAP_PREFER_DS5.toInt().inv()).toShort())
+            HostGamepadSelection.DS4 -> metadata.copy(
+                type = MoonBridge.LI_CTYPE_PS,
+                capabilities = (metadata.capabilities.toInt() and MoonBridge.LI_CCAP_PREFER_DS5.toInt().inv()).toShort())
+            HostGamepadSelection.DS5 -> metadata.copy(
+                type = MoonBridge.LI_CTYPE_PS,
+                capabilities = (metadata.capabilities.toInt() or MoonBridge.LI_CCAP_PREFER_DS5.toInt()).toShort())
+            // Follow host selection without dropping the enabled screen touchpad capabilities.
+            HostGamepadSelection.HOST -> metadata
+            else -> metadata
+        }
+        if (sentControllerArrivalMetadata[controllerNumber] == metadata) {
+            hapticsCoordinator.controllerArrived(controllerNumber.toShort())
+            return 0
+        }
+
+        // Release an allocated slot before replacing a fallback profile with the
+        // physical controller profile. Sunshine rejects duplicate arrivals.
+        if (sentControllerArrivalMetadata[controllerNumber] != null) {
+            val removalResult = conn.sendControllerInputChecked(
+                controllerNumber.toShort(),
+                (getActiveControllerMask().toInt() and (1 shl controllerNumber).inv()).toShort(),
+                0, 0, 0, 0, 0, 0, 0,
+            )
+            if (removalResult != 0) return removalResult
+            stateSender.reset(controllerNumber.toShort())
+            motionSender.reset(controllerNumber.toShort(), clearDemand = true)
+            sentControllerArrivalMetadata[controllerNumber] = null
+        }
+
+        val result = conn.sendControllerArrivalEvent(
+            controllerNumber.toByte(), getActiveControllerMask(), metadata.type,
+            metadata.supportedButtonFlags, metadata.capabilities
+        )
+        if (result == 0) {
+            sentControllerArrivalMetadata[controllerNumber] = metadata
+            hapticsCoordinator.controllerArrived(controllerNumber.toShort())
+            stateSender.reset(controllerNumber.toShort())
+        }
+        return result
+    }
+
+    private fun decorateControllerArrivalMetadata(
+        controllerNumber: Int,
+        baseMetadata: ControllerArrivalMetadata,
+    ): ControllerArrivalMetadata {
+        return if (controllerNumber == 0 && prefConfig.screenDs5Touchpad) {
+            baseMetadata.copy(
+                type = MoonBridge.LI_CTYPE_PS,
+                // A bare virtual declaration carries no buttons of its own; a screen
+                // DS5 must still advertise a normal gamepad or the host creates a
+                // DualSense with no face buttons (matches the HarmonyOS client).
+                supportedButtonFlags = baseMetadata.supportedButtonFlags or
+                    STANDARD_GAMEPAD_BUTTON_FLAGS or ControllerPacket.TOUCHPAD_FLAG,
+                capabilities = (baseMetadata.capabilities.toInt() or
+                    MoonBridge.LI_CCAP_ANALOG_TRIGGERS.toInt() or
+                    MoonBridge.LI_CCAP_RUMBLE.toInt() or
+                    MoonBridge.LI_CCAP_TOUCHPAD.toInt() or
+                    MoonBridge.LI_CCAP_PREFER_DS5.toInt()).toShort(),
+            )
+        } else {
+            baseMetadata
+        }
+    }
+
+    internal fun sendControllerInputPacket(originalContext: GenericControllerContext) {
+        if (isControllerLocallyCaptured(originalContext.controllerNumber)) return
+        synchronized(arrivalMetadataLock) {
+            sendControllerInputPacketLocked(originalContext)
+        }
+    }
+
+    internal fun withControllerInputLock(action: () -> Unit) {
+        synchronized(arrivalMetadataLock) { action() }
+    }
+
+    internal fun isControllerLocallyCaptured(controllerNumber: Short): Boolean =
+        inputDeviceContextSnapshot.any {
+            it.controllerNumber == controllerNumber && it.isLocalInputCaptureActive()
+        } || driverControllerContexts.values.any {
+            it.controllerNumber == controllerNumber && it.isLocalInputCaptureActive()
+        }
+
+    private fun sendControllerInputPacketLocked(
+        originalContext: GenericControllerContext,
+        forceNeutral: Boolean = false
+    ) {
+        if (!isContextUsable(originalContext)) return
+        if (originalContext === defaultContext && !isControllerSlotEnabled(0)) return
+        val newlyAssigned = assignControllerNumberIfNeeded(originalContext)
+        if (!originalContext.controllerArrival.isReported) {
+            // assignControllerNumberIfNeeded() already made the first attempt. If
+            // the input stream wasn't ready yet, keep the input state but don't let
+            // a legacy controller packet create an Xbox device before our metadata.
+            if (newlyAssigned || !reportControllerArrival(originalContext)) {
+                return
+            }
+        }
+        hapticsCoordinator.noteControllerInput(originalContext)
+
+        // Take the context's controller number and fuse all inputs with the same number
+        val controllerNumber = originalContext.controllerNumber
+        var inputMap = 0
+        var leftTrigger: Byte = 0
+        var rightTrigger: Byte = 0
+        var leftStickX: Short = 0
+        var leftStickY: Short = 0
+        var rightStickX: Short = 0
+        var rightStickY: Short = 0
+
+        // In order to properly handle controllers that are split into multiple devices,
+        // we must aggregate all controllers with the same controller number into a single
+        // device before we send it.
+        if (!forceNeutral) {
+            for (i in 0 until inputDeviceContexts.size()) {
+                val context: GenericControllerContext = inputDeviceContexts.valueAt(i)
+                if (context.assignedControllerNumber &&
+                    context.controllerNumber == controllerNumber &&
+                    context.mouseEmulationActive == originalContext.mouseEmulationActive
+                ) {
+                    inputMap = inputMap or context.inputMap
+                    leftTrigger = maxByMagnitude(leftTrigger, context.leftTrigger)
+                    rightTrigger = maxByMagnitude(rightTrigger, context.rightTrigger)
+                    leftStickX = maxByMagnitude(leftStickX, context.leftStickX)
+                    leftStickY = maxByMagnitude(leftStickY, context.leftStickY)
+                    rightStickX = maxByMagnitude(rightStickX, context.rightStickX)
+                    rightStickY = maxByMagnitude(rightStickY, context.rightStickY)
+                }
+            }
+            for (context: GenericControllerContext in driverControllerContexts.values) {
+                if (context.assignedControllerNumber &&
+                    context.controllerNumber == controllerNumber &&
+                    context.mouseEmulationActive == originalContext.mouseEmulationActive
+                ) {
+                    inputMap = inputMap or context.inputMap
+                    leftTrigger = maxByMagnitude(leftTrigger, context.leftTrigger)
+                    rightTrigger = maxByMagnitude(rightTrigger, context.rightTrigger)
+                    leftStickX = maxByMagnitude(leftStickX, context.leftStickX)
+                    leftStickY = maxByMagnitude(leftStickY, context.leftStickY)
+                    rightStickX = maxByMagnitude(rightStickX, context.rightStickX)
+                    rightStickY = maxByMagnitude(rightStickY, context.rightStickY)
+                }
+            }
+            if (defaultContext.controllerNumber == controllerNumber) {
+                inputMap = inputMap or defaultContext.inputMap
+                leftTrigger = maxByMagnitude(leftTrigger, defaultContext.leftTrigger)
+                rightTrigger = maxByMagnitude(rightTrigger, defaultContext.rightTrigger)
+                leftStickX = maxByMagnitude(leftStickX, defaultContext.leftStickX)
+                leftStickY = maxByMagnitude(leftStickY, defaultContext.leftStickY)
+                rightStickX = maxByMagnitude(rightStickX, defaultContext.rightStickX)
+                rightStickY = maxByMagnitude(rightStickY, defaultContext.rightStickY)
+            }
+            if (controllerNumber.toInt() == 0 && prefConfig.screenDs5Touchpad && screenDs5TouchpadPressed) {
+                inputMap = inputMap or ControllerPacket.TOUCHPAD_FLAG
+            }
+        }
+
+        if (originalContext.mouseEmulationActive) {
+            val changedMask = inputMap xor originalContext.mouseEmulationLastInputMap
+            originalContext.mouseEmulationLastInputMap = inputMap
+            updateEmulatedMouseButtonsLocked(originalContext,
+                if (forceNeutral) 0 else originalContext.inputMap and MOUSE_BUTTON_MASK)
+            if (prefConfig.controllerMouseDpadArrows) {
+                updateEmulatedDpadKeysLocked(originalContext,
+                    if (forceNeutral) 0 else originalContext.inputMap and MOUSE_DPAD_MASK)
+            } else {
+                updateEmulatedDpadKeysLocked(originalContext, 0)
+                if ((changedMask and ControllerPacket.UP_FLAG) != 0 &&
+                    (inputMap and ControllerPacket.UP_FLAG) != 0) conn.sendMouseScroll(1.toByte())
+                if ((changedMask and ControllerPacket.DOWN_FLAG) != 0 &&
+                    (inputMap and ControllerPacket.DOWN_FLAG) != 0) conn.sendMouseScroll((-1).toByte())
+                if ((changedMask and ControllerPacket.RIGHT_FLAG) != 0 &&
+                    (inputMap and ControllerPacket.RIGHT_FLAG) != 0) conn.sendMouseHScroll(1.toByte())
+                if ((changedMask and ControllerPacket.LEFT_FLAG) != 0 &&
+                    (inputMap and ControllerPacket.LEFT_FLAG) != 0) conn.sendMouseHScroll((-1).toByte())
+            }
+
+            stateSender.submit(
+                controllerNumber, getActiveControllerMask(),
+                0, 0.toByte(), 0.toByte(),
+                0.toShort(), 0.toShort(), 0.toShort(), 0.toShort(), force = forceNeutral
+            )
+        } else {
+            updateEmulatedMouseButtonsLocked(originalContext, 0)
+            updateEmulatedDpadKeysLocked(originalContext, 0)
+            stateSender.submit(
+                controllerNumber, getActiveControllerMask(),
+                inputMap,
+                leftTrigger, rightTrigger,
+                leftStickX, leftStickY,
+                rightStickX, rightStickY, force = forceNeutral
+            )
+        }
+    }
+
+    // ========== Remapping ==========
+
+    // Return a valid keycode, -2 to consume, or -1 to not consume the event
+    // Device MAY BE NULL
+    private fun handleRemapping(context: InputDeviceContext, event: KeyEvent): Int {
+        context.joyCon?.let { joyCon ->
+            val mapped = joyCon.remapKey(event.keyCode, event.scanCode)
+            if (mapped != event.keyCode) return mapped
+        }
+        // Don't capture the back button if configured
+        if (context.ignoreBack) {
+            if (event.keyCode == KeyEvent.KEYCODE_BACK) {
+                return REMAP_IGNORE
+            }
+        }
+
+        // If we know this gamepad has a share button and receive an unmapped
+        // KEY_RECORD event, report that as a share button press.
+        if (context.hasShare) {
+            if (event.keyCode == KeyEvent.KEYCODE_UNKNOWN && event.scanCode == 167) {
+                return KeyEvent.KEYCODE_MEDIA_RECORD
+            }
+        }
+
+        // The Shield's key layout files map the DualShock 4 clickpad button to
+        // BUTTON_SELECT instead of something sane like BUTTON_1 as the standard AOSP
+        // mapping does. If we get a button from a Sony device reported as BUTTON_SELECT
+        // that matches the keycode used by hid-sony for the clickpad or it's from the
+        // separate touchpad input device, remap it to BUTTON_1 to match the current AOSP
+        // layout and trigger our touchpad button logic.
+        if (context.vendorId == 0x054c &&
+            event.keyCode == KeyEvent.KEYCODE_BUTTON_SELECT &&
+            (event.scanCode == 317 || context.isDualShockStandaloneTouchpad)
+        ) {
+            return KeyEvent.KEYCODE_BUTTON_1
+        }
+
+        // Override mode button for 8BitDo controllers
+        if (context.vendorId == 0x2dc8 && event.scanCode == 306) {
+            return KeyEvent.KEYCODE_BUTTON_MODE
+        }
+
+        // This mapping was adding in Android 10, then changed based on
+        // kernel changes (adding hid-nintendo) in Android 11. If we're
+        // on anything newer than Pie, just use the built-in mapping.
+        if ((context.vendorId == 0x057e && context.productId == 0x2009 && Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) || // Switch Pro controller
+            (context.vendorId == 0x0f0d && context.productId == 0x00c1) // HORIPAD for Switch
+        ) {
+            when (event.scanCode) {
+                0x130 -> return KeyEvent.KEYCODE_BUTTON_A
+                0x131 -> return KeyEvent.KEYCODE_BUTTON_B
+                0x132 -> return KeyEvent.KEYCODE_BUTTON_X
+                0x133 -> return KeyEvent.KEYCODE_BUTTON_Y
+                0x134 -> return KeyEvent.KEYCODE_BUTTON_L1
+                0x135 -> return KeyEvent.KEYCODE_BUTTON_R1
+                0x136 -> return KeyEvent.KEYCODE_BUTTON_L2
+                0x137 -> return KeyEvent.KEYCODE_BUTTON_R2
+                0x138 -> return KeyEvent.KEYCODE_BUTTON_SELECT
+                0x139 -> return KeyEvent.KEYCODE_BUTTON_START
+                0x13A -> return KeyEvent.KEYCODE_BUTTON_THUMBL
+                0x13B -> return KeyEvent.KEYCODE_BUTTON_THUMBR
+                0x13D -> return KeyEvent.KEYCODE_BUTTON_MODE
+            }
+        }
+
+        if (context.usesLinuxGamepadStandardFaceButtons) {
+            // Android's Generic.kl swaps BTN_NORTH and BTN_WEST
+            when (event.scanCode) {
+                304 -> return KeyEvent.KEYCODE_BUTTON_A
+                305 -> return KeyEvent.KEYCODE_BUTTON_B
+                307 -> return KeyEvent.KEYCODE_BUTTON_Y
+                308 -> return KeyEvent.KEYCODE_BUTTON_X
+            }
+        }
+
+        if (context.isNonStandardDualShock4) {
+            when (event.scanCode) {
+                304 -> return KeyEvent.KEYCODE_BUTTON_X
+                305 -> return KeyEvent.KEYCODE_BUTTON_A
+                306 -> return KeyEvent.KEYCODE_BUTTON_B
+                307 -> return KeyEvent.KEYCODE_BUTTON_Y
+                308 -> return KeyEvent.KEYCODE_BUTTON_L1
+                309 -> return KeyEvent.KEYCODE_BUTTON_R1
+                /*
+                **** Using analog triggers instead ****
+                310 -> return KeyEvent.KEYCODE_BUTTON_L2
+                311 -> return KeyEvent.KEYCODE_BUTTON_R2
+                */
+                312 -> return KeyEvent.KEYCODE_BUTTON_SELECT
+                313 -> return KeyEvent.KEYCODE_BUTTON_START
+                314 -> return KeyEvent.KEYCODE_BUTTON_THUMBL
+                315 -> return KeyEvent.KEYCODE_BUTTON_THUMBR
+                316 -> return KeyEvent.KEYCODE_BUTTON_MODE
+                else -> return REMAP_CONSUME
+            }
+        }
+        // If this is a Serval controller sending an unknown key code, it's probably
+        // the start and select buttons
+        else if (context.isServal && event.keyCode == KeyEvent.KEYCODE_UNKNOWN) {
+            when (event.scanCode) {
+                314 -> return KeyEvent.KEYCODE_BUTTON_SELECT
+                315 -> return KeyEvent.KEYCODE_BUTTON_START
+            }
+        } else if (context.isNonStandardXboxBtController) {
+            when (event.scanCode) {
+                306 -> return KeyEvent.KEYCODE_BUTTON_X
+                307 -> return KeyEvent.KEYCODE_BUTTON_Y
+                308 -> return KeyEvent.KEYCODE_BUTTON_L1
+                309 -> return KeyEvent.KEYCODE_BUTTON_R1
+                310 -> return KeyEvent.KEYCODE_BUTTON_SELECT
+                311 -> return KeyEvent.KEYCODE_BUTTON_START
+                312 -> return KeyEvent.KEYCODE_BUTTON_THUMBL
+                313 -> return KeyEvent.KEYCODE_BUTTON_THUMBR
+                139 -> return KeyEvent.KEYCODE_BUTTON_MODE
+                // Other buttons are mapped correctly
+            }
+
+            // The Xbox button is sent as MENU
+            if (event.keyCode == KeyEvent.KEYCODE_MENU) {
+                return KeyEvent.KEYCODE_BUTTON_MODE
+            }
+        } else if (context.vendorId == 0x0b05 && // ASUS
+            (context.productId == 0x7900 || // Kunai - USB
+                    context.productId == 0x7902) // Kunai - Bluetooth
+        ) {
+            // ROG Kunai has special M1-M4 buttons that are accessible via the
+            // joycon-style detachable controllers that we should map to Start
+            // and Select.
+            when (event.scanCode) {
+                264, 266 -> return KeyEvent.KEYCODE_BUTTON_START
+                265, 267 -> return KeyEvent.KEYCODE_BUTTON_SELECT
+            }
+        }
+
+        if (context.hatXAxis == -1 &&
+            context.hatYAxis == -1 &&
+            /* FIXME: There's no good way to know for sure if xpad is bound
+               to this device, so we won't use the name to validate if these
+               scancodes should be mapped to DPAD
+
+               context.isXboxController &&
+             */
+            event.keyCode == KeyEvent.KEYCODE_UNKNOWN
+        ) {
+            // If there's not a proper Xbox controller mapping, we'll translate the raw d-pad
+            // scan codes into proper key codes
+            when (event.scanCode) {
+                704 -> return KeyEvent.KEYCODE_DPAD_LEFT
+                705 -> return KeyEvent.KEYCODE_DPAD_RIGHT
+                706 -> return KeyEvent.KEYCODE_DPAD_UP
+                707 -> return KeyEvent.KEYCODE_DPAD_DOWN
+            }
+        }
+
+        // Past here we can fixup the keycode and potentially trigger
+        // another special case so we need to remember what keycode we're using
+        var keyCode = event.keyCode
+
+        // This is a hack for (at least) the "Tablet Remote" app
+        // which sends BACK with META_ALT_ON instead of KEYCODE_BUTTON_B
+        if (keyCode == KeyEvent.KEYCODE_BACK &&
+            !event.hasNoModifiers() &&
+            (event.flags and KeyEvent.FLAG_SOFT_KEYBOARD) != 0
+        ) {
+            keyCode = KeyEvent.KEYCODE_BUTTON_B
+        }
+
+        if (keyCode == KeyEvent.KEYCODE_BUTTON_START ||
+            keyCode == KeyEvent.KEYCODE_MENU
+        ) {
+            // Ensure that we never use back as start if we have a real start
+            context.backIsStart = false
+        } else if (keyCode == KeyEvent.KEYCODE_BUTTON_SELECT) {
+            // Don't use mode as select if we have a select
+            context.modeIsSelect = false
+        } else if (context.backIsStart && keyCode == KeyEvent.KEYCODE_BACK) {
+            // Emulate the start button with back
+            return KeyEvent.KEYCODE_BUTTON_START
+        } else if (context.modeIsSelect && keyCode == KeyEvent.KEYCODE_BUTTON_MODE) {
+            // Emulate the select button with mode
+            return KeyEvent.KEYCODE_BUTTON_SELECT
+        } else if (context.searchIsMode && keyCode == KeyEvent.KEYCODE_SEARCH) {
+            // Emulate the mode button with search
+            return KeyEvent.KEYCODE_BUTTON_MODE
+        }
+
+        return keyCode
+    }
+
+    private fun handleFlipFaceButtons(keyCode: Int): Int {
+        return when (keyCode) {
+            KeyEvent.KEYCODE_BUTTON_A -> KeyEvent.KEYCODE_BUTTON_B
+            KeyEvent.KEYCODE_BUTTON_B -> KeyEvent.KEYCODE_BUTTON_A
+            KeyEvent.KEYCODE_BUTTON_X -> KeyEvent.KEYCODE_BUTTON_Y
+            KeyEvent.KEYCODE_BUTTON_Y -> KeyEvent.KEYCODE_BUTTON_X
+            else -> keyCode
+        }
+    }
+
+    // ========== Deadzone & Axis Handling ==========
+
+    private fun populateCachedVector(x: Float, y: Float): Vector2d {
+        // Reinitialize our cached Vector2d object
+        inputVector.initialize(x, y)
+        return inputVector
+    }
+
+    private fun handleDeadZone(stickVector: Vector2d, deadzoneRadius: Float) {
+        if (stickVector.magnitude <= deadzoneRadius) {
+            // Deadzone
+            stickVector.initialize(0f, 0f)
+        }
+
+        // We're not normalizing here because we let the computer handle the deadzones.
+        // Normalizing can make the deadzones larger than they should be after the computer also
+        // evaluates the deadzone.
+    }
+
+    private fun handleAxisSet(
+        context: InputDeviceContext, lsX: Float, lsY: Float, rsX: Float,
+        rsY: Float, lt: Float, rt: Float, hatX: Float, hatY: Float
+    ) {
+        @Suppress("NAME_SHADOWING")
+        var lt = lt
+        @Suppress("NAME_SHADOWING")
+        var rt = rt
+
+        if (context.leftStickXAxis != -1 && context.leftStickYAxis != -1) {
+            val leftStickVector = populateCachedVector(lsX, lsY)
+
+            handleDeadZone(leftStickVector, context.leftStickDeadzoneRadius)
+
+            context.leftStickX = (leftStickVector.x * 0x7FFE).toInt().toShort()
+            context.leftStickY = (-leftStickVector.y * 0x7FFE).toInt().toShort()
+        }
+
+        // Handle physical right stick separately and then apply gyro fusion if needed
+        var physX: Short = 0
+        var physY: Short = 0
+        if (context.rightStickXAxis != -1 && context.rightStickYAxis != -1) {
+            val rightStickVector = populateCachedVector(rsX, rsY)
+
+            handleDeadZone(rightStickVector, context.rightStickDeadzoneRadius)
+
+            physX = (rightStickVector.x * 0x7FFE).toInt().toShort()
+            physY = (-rightStickVector.y * 0x7FFE).toInt().toShort()
+            // cache physical right stick and apply EPS denoising
+            context.physRightStickX = denoisePhys(physX)
+            context.physRightStickY = denoisePhys(physY)
+        }
+
+        if (context.leftTriggerAxis != -1 && context.rightTriggerAxis != -1) {
+            // Android sends an initial 0 value for trigger axes even if the trigger
+            // should be negative when idle. After the first touch, the axes will go back
+            // to normal behavior, so ignore triggersIdleNegative for each trigger until
+            // first touch.
+            if (lt != 0f) {
+                context.leftTriggerAxisUsed = true
+            }
+            if (rt != 0f) {
+                context.rightTriggerAxisUsed = true
+            }
+            if (context.triggersIdleNegative) {
+                if (context.leftTriggerAxisUsed) {
+                    lt = (lt + 1) / 2
+                }
+                if (context.rightTriggerAxisUsed) {
+                    rt = (rt + 1) / 2
+                }
+            }
+
+            if (lt <= context.triggerDeadzone) {
+                lt = 0f
+            }
+            if (rt <= context.triggerDeadzone) {
+                rt = 0f
+            }
+
+            context.leftTrigger = (lt * 0xFF).toInt().toByte()
+            context.rightTrigger = (rt * 0xFF).toInt().toByte()
+        }
+
+        // Handle gyro hold activation edge detection for analog triggers
+        val wasHold = context.gyroHoldActive
+        context.gyroHoldActive = gyroManager.computeHoldFromAnalog(lt, rt)
+
+        // Apply gyro fusion to right stick if needed
+        if (gyroManager.isRightStickMode && context.gyroHoldActive) {
+            // 融合策略：按轴叠加并限幅
+            val gx = context.gyroRightStickX
+            val gy = context.gyroRightStickY
+            context.rightStickX = clampShortToStickRange(physX + gx)
+            context.rightStickY = clampShortToStickRange(physY + gy)
+        } else {
+            context.rightStickX = physX
+            context.rightStickY = physY
+        }
+
+        val joyConDpad = context.joyCon?.dpad
+        if (joyConDpad != null) {
+            joyConDpad.hat(
+                if (context.hatXAxis != -1) hatX else 0f,
+                if (context.hatYAxis != -1) hatY else 0f
+            )
+            context.inputMap = joyConDpad.applyTo(context.inputMap)
+        } else if (context.hatXAxis != -1 && context.hatYAxis != -1) {
+            context.inputMap = context.inputMap and (ControllerPacket.LEFT_FLAG or ControllerPacket.RIGHT_FLAG).inv()
+            if (hatX < -0.5) {
+                context.inputMap = context.inputMap or ControllerPacket.LEFT_FLAG
+                context.hatXAxisUsed = true
+            } else if (hatX > 0.5) {
+                context.inputMap = context.inputMap or ControllerPacket.RIGHT_FLAG
+                context.hatXAxisUsed = true
+            }
+
+            context.inputMap = context.inputMap and (ControllerPacket.UP_FLAG or ControllerPacket.DOWN_FLAG).inv()
+            if (hatY < -0.5) {
+                context.inputMap = context.inputMap or ControllerPacket.UP_FLAG
+                context.hatYAxisUsed = true
+            } else if (hatY > 0.5) {
+                context.inputMap = context.inputMap or ControllerPacket.DOWN_FLAG
+                context.hatYAxisUsed = true
+            }
+        }
+
+        if (context.startGesture.state() == StartGestureReducer.State.WHEEL_VISIBLE) {
+            handleSystemStartWheelAxes(context)
+        }
+        if (wasHold && !context.gyroHoldActive) {
+            gyroManager.onGyroHoldDeactivated(context, restorePhysicalStick = false)
+        }
+        if (context.isLocalInputCaptureActive()) {
+            updateSystemStartReleaseState(context)
+            return
+        }
+        sendControllerInputPacket(context)
+    }
+
+    private fun handleSystemStartWheelAxes(context: InputDeviceContext) {
+        handleSystemStartGestureUpdate(
+            context,
+            context.startGesture.onSelection(
+                leftStickX = context.leftStickX.toFloat() / 32766f,
+                leftStickY = hostStickYToWheelAxis(context.leftStickY),
+                rightStickX = context.rightStickX.toFloat() / 32766f,
+                rightStickY = hostStickYToWheelAxis(context.rightStickY),
+                dpadFlags = context.inputMap
+            )
+        )
+    }
+
+    // Normalize the given raw float value into a 0.0-1.0f range
+    private fun normalizeRawValueWithRange(value: Float, range: InputDevice.MotionRange): Float {
+        @Suppress("NAME_SHADOWING")
+        var value = value
+        value = Math.max(value, range.min)
+        value = Math.min(value, range.max)
+
+        value -= range.min
+
+        return value / range.range
+    }
+
+    // ========== Touchpad Handling ==========
+
+    private fun sendTouchpadEventForPointer(context: InputDeviceContext, event: MotionEvent, touchType: Byte, pointerIndex: Int): Boolean {
+        val normalizedX = normalizeRawValueWithRange(event.getX(pointerIndex), context.touchpadXRange!!)
+        val normalizedY = normalizeRawValueWithRange(event.getY(pointerIndex), context.touchpadYRange!!)
+        val normalizedPressure = if (context.touchpadPressureRange != null)
+            normalizeRawValueWithRange(event.getPressure(pointerIndex), context.touchpadPressureRange!!)
+        else 0f
+
+        return conn.sendControllerTouchEvent(
+            context.controllerNumber.toByte(), touchType,
+            event.getPointerId(pointerIndex),
+            normalizedX, normalizedY, normalizedPressure
+        ) != MoonBridge.LI_ERR_UNSUPPORTED
+    }
+
+    fun tryHandleTouchpadEvent(event: MotionEvent): Boolean {
+        val eventDevice = event.device
+        val remappedDualSenseTouchpad = eventDevice != null &&
+            DirectDualSenseBluetoothOutput.isDualSenseProduct(
+                eventDevice.vendorId,
+                eventDevice.productId
+            ) &&
+            eventDevice.sources and InputDevice.SOURCE_TOUCHPAD == InputDevice.SOURCE_TOUCHPAD
+        val isTouchpad = event.source and InputDevice.SOURCE_TOUCHPAD ==
+            InputDevice.SOURCE_TOUCHPAD || remappedDualSenseTouchpad
+        val isMouse = event.source and InputDevice.SOURCE_MOUSE == InputDevice.SOURCE_MOUSE
+        if (!isTouchpad && !isMouse) {
+            return false
+        }
+
+        // Only get a context if one already exists. We want to ensure we don't report non-gamepads.
+        var context = inputDeviceContexts.get(event.deviceId)
+        if (context == null && isTouchpad && eventDevice?.vendorId == 0x054C) {
+            val directCandidates = ArrayList<InputDeviceContext>()
+            for (index in 0 until inputDeviceContexts.size()) {
+                val candidate = inputDeviceContexts.valueAt(index)
+                if (candidate.directDualSenseBluetoothOutput != null) {
+                    directCandidates.add(candidate)
+                }
+            }
+            context = directCandidates.firstOrNull {
+                it.inputDevice?.descriptor == eventDevice.descriptor
+            } ?: directCandidates.singleOrNull()
+        }
+        context ?: return false
+        if (context.isLocalInputCaptureActive()) return true
+        if (isTouchpad && eventDevice != null) {
+            context.touchpadXRange = context.touchpadXRange ?: eventDevice.getMotionRange(
+                MotionEvent.AXIS_X,
+                InputDevice.SOURCE_TOUCHPAD
+            )
+            context.touchpadYRange = context.touchpadYRange ?: eventDevice.getMotionRange(
+                MotionEvent.AXIS_Y,
+                InputDevice.SOURCE_TOUCHPAD
+            )
+            context.touchpadPressureRange = context.touchpadPressureRange ?: eventDevice.getMotionRange(
+                MotionEvent.AXIS_PRESSURE,
+                InputDevice.SOURCE_TOUCHPAD
+            )
+        }
+        if (!context.assignedControllerNumber) {
+            assignControllerNumberIfNeeded(context)
+        }
+        val nativeDirectDualSense = isTouchpad &&
+            context.directDualSenseBluetoothOutput != null
+
+        // When we're working with a mouse source instead of a touchpad, we're quite limited in
+        // what useful input we can provide via the controller API. The ABS_X/ABS_Y values are
+        // screen coordinates rather than touchpad coordinates. For now, we will just support
+        // the clickpad button and nothing else.
+        if (isMouse && !isTouchpad) {
+            // Unlike the touchpad where down and up refer to individual touches on the touchpad,
+            // down and up on a mouse indicates the state of the left mouse button.
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    context.inputMap = context.inputMap or ControllerPacket.TOUCHPAD_FLAG
+                    sendControllerInputPacket(context)
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    context.inputMap = context.inputMap and ControllerPacket.TOUCHPAD_FLAG.inv()
+                    sendControllerInputPacket(context)
+                }
+            }
+
+            return !prefConfig.gamepadTouchpadAsMouse
+        }
+
+        val touchType: Byte
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN ->
+                touchType = MoonBridge.LI_TOUCH_EVENT_DOWN
+
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP ->
+                touchType = if ((event.flags and MotionEvent.FLAG_CANCELED) != 0) {
+                    MoonBridge.LI_TOUCH_EVENT_CANCEL
+                } else {
+                    MoonBridge.LI_TOUCH_EVENT_UP
+                }
+
+            MotionEvent.ACTION_MOVE ->
+                touchType = MoonBridge.LI_TOUCH_EVENT_MOVE
+
+            MotionEvent.ACTION_CANCEL ->
+                // ACTION_CANCEL applies to *all* pointers in the gesture, so it maps to CANCEL_ALL
+                // rather than CANCEL. For a single pointer cancellation, that's indicated via
+                // FLAG_CANCELED on a ACTION_POINTER_UP.
+                // https://developer.android.com/develop/ui/views/touch-and-input/gestures/multi
+                touchType = MoonBridge.LI_TOUCH_EVENT_CANCEL_ALL
+
+            MotionEvent.ACTION_BUTTON_PRESS -> {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && event.actionButton == MotionEvent.BUTTON_PRIMARY) {
+                    context.inputMap = context.inputMap or ControllerPacket.TOUCHPAD_FLAG
+                    sendControllerInputPacket(context)
+                    return !prefConfig.gamepadTouchpadAsMouse // Report as unhandled event to trigger mouse handling
+                }
+                return false
+            }
+
+            MotionEvent.ACTION_BUTTON_RELEASE -> {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && event.actionButton == MotionEvent.BUTTON_PRIMARY) {
+                    context.inputMap = context.inputMap and ControllerPacket.TOUCHPAD_FLAG.inv()
+                    sendControllerInputPacket(context)
+                    return !prefConfig.gamepadTouchpadAsMouse // Report as unhandled event to trigger mouse handling
+                }
+                return false
+            }
+
+            else -> return false
+        }
+
+        // Bail if the user wants gamepad touchpads to control the mouse
+        //
+        // NB: We do this after processing ACTION_BUTTON_PRESS and ACTION_BUTTON_RELEASE
+        // because we want to still send the touchpad button via the gamepad even when
+        // configured to use the touchpad for mouse control.
+        if (prefConfig.gamepadTouchpadAsMouse && !nativeDirectDualSense) {
+            return false
+        }
+
+        // If we don't have X and Y ranges, we can't process this event
+        if (context.touchpadXRange == null || context.touchpadYRange == null) {
+            return false
+        }
+
+        if (event.actionMasked == MotionEvent.ACTION_MOVE) {
+            // Move events may impact all active pointers
+            for (i in 0 until event.pointerCount) {
+                if (!sendTouchpadEventForPointer(context, event, touchType, i)) {
+                    // Controller touch events are not supported by the host
+                    return false
+                }
+            }
+            return true
+        } else if (event.actionMasked == MotionEvent.ACTION_CANCEL) {
+            // Cancel impacts all active pointers
+            return conn.sendControllerTouchEvent(
+                context.controllerNumber.toByte(), MoonBridge.LI_TOUCH_EVENT_CANCEL_ALL,
+                0, 0f, 0f, 0f
+            ) != MoonBridge.LI_ERR_UNSUPPORTED
+        } else {
+            // Down and Up events impact the action index pointer
+            return sendTouchpadEventForPointer(context, event, touchType, event.actionIndex)
+        }
+    }
+
+    // ========== Motion Event Handling ==========
+
+    private val stickCenterStore = StickCenterStore(activityContext)
+
+    fun handleMotionEvent(event: MotionEvent): Boolean {
+        val context = getContextForEvent(event) ?: return true
+
+        var lsX = 0f; var lsY = 0f; var rsX = 0f; var rsY = 0f
+        var rt = 0f; var lt = 0f; var hatX = 0f; var hatY = 0f
+
+        // We purposefully ignore the historical values in the motion event as it makes
+        // the controller feel sluggish for some users.
+
+        if (context.leftStickXAxis != -1 && context.leftStickYAxis != -1) {
+            lsX = calibratedStickAxis(event, context.leftStickXAxis)
+            lsY = calibratedStickAxis(event, context.leftStickYAxis)
+        }
+
+        if (context.rightStickXAxis != -1 && context.rightStickYAxis != -1) {
+            rsX = calibratedStickAxis(event, context.rightStickXAxis)
+            rsY = calibratedStickAxis(event, context.rightStickYAxis)
+        }
+
+        if (context.leftTriggerAxis != -1 && context.rightTriggerAxis != -1) {
+            lt = event.getAxisValue(context.leftTriggerAxis)
+            rt = event.getAxisValue(context.rightTriggerAxis)
+        }
+
+        if (context.hatXAxis != -1 && context.hatYAxis != -1) {
+            hatX = event.getAxisValue(MotionEvent.AXIS_HAT_X)
+            hatY = event.getAxisValue(MotionEvent.AXIS_HAT_Y)
+        }
+
+        handleAxisSet(context, lsX, lsY, rsX, rsY, lt, rt, hatX, hatY)
+
+        return true
+    }
+
+    // ========== Mouse Emulation ==========
+
+    private fun updateEmulatedMouseButtonsLocked(context: GenericControllerContext, mask: Int) {
+        val changedMask = emulatedMouseButtonHolds.update(context, mask)
+        if ((changedMask and ControllerPacket.A_FLAG) != 0) {
+            if ((emulatedMouseButtonHolds.heldMask and ControllerPacket.A_FLAG) != 0) {
+                conn.sendMouseButtonDown(MouseButtonPacket.BUTTON_LEFT)
+            } else {
+                conn.sendMouseButtonUp(MouseButtonPacket.BUTTON_LEFT)
+            }
+        }
+        if ((changedMask and ControllerPacket.B_FLAG) != 0) {
+            if ((emulatedMouseButtonHolds.heldMask and ControllerPacket.B_FLAG) != 0) {
+                conn.sendMouseButtonDown(MouseButtonPacket.BUTTON_RIGHT)
+            } else {
+                conn.sendMouseButtonUp(MouseButtonPacket.BUTTON_RIGHT)
+            }
+        }
+    }
+
+    internal fun releaseEmulatedMouseButtons(context: GenericControllerContext) {
+        withControllerInputLock { updateEmulatedMouseButtonsLocked(context, 0) }
+    }
+
+    private fun sendEmulatedDpadKey(flag: Int, pressed: Boolean) {
+        val keyCode = when (flag) {
+            ControllerPacket.UP_FLAG -> KeyEvent.KEYCODE_DPAD_UP
+            ControllerPacket.DOWN_FLAG -> KeyEvent.KEYCODE_DPAD_DOWN
+            ControllerPacket.LEFT_FLAG -> KeyEvent.KEYCODE_DPAD_LEFT
+            ControllerPacket.RIGHT_FLAG -> KeyEvent.KEYCODE_DPAD_RIGHT
+            else -> return
+        }
+        conn.sendKeyboardInput(mouseKeyboardTranslator.translate(keyCode, -1),
+            if (pressed) KeyboardPacket.KEY_DOWN else KeyboardPacket.KEY_UP, 0, 0)
+    }
+
+    private fun updateEmulatedDpadKeysLocked(context: GenericControllerContext, mask: Int) {
+        val changedMask = emulatedDpadHolds.update(context, mask)
+        for (flag in MOUSE_DPAD_FLAGS) {
+            if ((changedMask and flag) != 0) {
+                sendEmulatedDpadKey(flag, (emulatedDpadHolds.heldMask and flag) != 0)
+            }
+        }
+    }
+
+    internal fun releaseEmulatedDpadKeys(context: GenericControllerContext) {
+        withControllerInputLock { updateEmulatedDpadKeysLocked(context, 0) }
+    }
+
+    private fun calibratedStickAxis(event: MotionEvent, axis: Int): Float {
+        val value = event.getAxisValue(axis)
+        val device = event.device ?: return value
+        return stickCenterStore.correct(device, axis, value)
+    }
+
+    private fun convertRawStickAxisToPixelMovement(stickX: Short, stickY: Short): Vector2d {
+        val vector = Vector2d()
+        vector.initialize(stickX.toFloat(), stickY.toFloat())
+        vector.scalarMultiply((1 / 32766.0f).toDouble())
+        vector.scalarMultiply(4.0)
+        if (vector.magnitude > 0) {
+            // Move faster as the stick is pressed further from center
+            vector.scalarMultiply(Math.pow(vector.magnitude, 2.0))
+        }
+        return vector
+    }
+
+    internal fun sendEmulatedMouseMove(context: GenericControllerContext, x: Short, y: Short) {
+        val vector = convertRawStickAxisToPixelMovement(x, y)
+        if (vector.magnitude >= 1) {
+            if (prefConfig.controllerMouseSpeedPercent == 100) {
+                conn.sendMouseMove(vector.x.toInt().toShort(), (-vector.y).toInt().toShort())
+            } else {
+                val scale = prefConfig.controllerMouseSpeedPercent / 100.0
+                val scaledX = vector.x * scale + context.mouseEmulationRemainderX
+                val scaledY = -vector.y * scale + context.mouseEmulationRemainderY
+                val moveX = scaledX.toInt()
+                val moveY = scaledY.toInt()
+                context.mouseEmulationRemainderX = scaledX - moveX
+                context.mouseEmulationRemainderY = scaledY - moveY
+                if (moveX != 0 || moveY != 0) {
+                    conn.sendMouseMove(moveX.toShort(), moveY.toShort())
+                }
+            }
+        }
+    }
+
+    internal fun sendEmulatedMouseScroll(x: Short, y: Short) {
+        val vector = convertRawStickAxisToPixelMovement(x, y)
+        if (vector.magnitude >= 1) {
+            conn.sendMouseHighResScroll(vector.y.toInt().toShort())
+            conn.sendMouseHighResHScroll(vector.x.toInt().toShort())
+        }
+    }
+
+    // ========== Button Handling ==========
+
+    private fun updateJoyConDpadKey(context: InputDeviceContext, keyCode: Int, pressed: Boolean): Boolean {
+        val dpad = context.joyCon?.dpad ?: return false
+        val flags = (ANDROID_TO_LI_BUTTON_MAP[keyCode] ?: 0) and ControllerDpadState.MASK
+        if (flags == 0) return false
+        dpad.key(keyCode, flags, pressed)
+        context.inputMap = dpad.applyTo(context.inputMap)
+        return true
+    }
+
+    fun handleButtonUp(event: KeyEvent): Boolean {
+        val context = getContextForEvent(event) ?: return true
+
+        val captureAtEntry = context.isLocalInputCaptureActive()
+        if (!captureAtEntry) {
+            updatePerformanceShortcut(context, event, pressed = false)
+        }
+        var keyCode = handleRemapping(context, event)
+        if (keyCode < 0) {
+            return (keyCode == REMAP_CONSUME)
+        }
+
+        if (prefConfig.flipFaceButtons) {
+            keyCode = handleFlipFaceButtons(keyCode)
+        }
+
+        val isStartKey = keyCode == KeyEvent.KEYCODE_BUTTON_START || keyCode == KeyEvent.KEYCODE_MENU
+
+        // If the button hasn't been down long enough, sleep for a bit before sending the up event
+        // This allows "instant" button presses (like OUYA's virtual menu button) to work. This
+        // path should not be triggered during normal usage.
+        val buttonDownTime = (event.eventTime - event.downTime).toInt()
+        if (buttonDownTime < MINIMUM_BUTTON_DOWN_TIME_MS) {
+            // Since our sleep time is so short (<= 25 ms), it shouldn't cause a problem doing this
+            // in the UI thread.
+            try {
+                Thread.sleep((MINIMUM_BUTTON_DOWN_TIME_MS - buttonDownTime).toLong())
+            } catch (e: InterruptedException) {
+                e.printStackTrace()
+
+                // InterruptedException clears the thread's interrupt status. Since we can't
+                // handle that here, we will re-interrupt the thread to set the interrupt
+                // status back to true.
+                Thread.currentThread().interrupt()
+            }
+        }
+
+        if (!updateJoyConDpadKey(context, keyCode, pressed = false)) when (keyCode) {
+            KeyEvent.KEYCODE_BUTTON_MODE ->
+                context.inputMap = context.inputMap and ControllerPacket.SPECIAL_BUTTON_FLAG.inv()
+            KeyEvent.KEYCODE_BUTTON_START, KeyEvent.KEYCODE_MENU -> {
+                // Sometimes we'll get a spurious key up event on controller disconnect.
+                // Make sure it's real by checking that the key is actually down before taking
+                // any action.
+                context.inputMap = context.inputMap and ControllerPacket.PLAY_FLAG.inv()
+            }
+            KeyEvent.KEYCODE_BACK, KeyEvent.KEYCODE_BUTTON_SELECT ->
+                context.inputMap = context.inputMap and ControllerPacket.BACK_FLAG.inv()
+            KeyEvent.KEYCODE_DPAD_LEFT -> {
+                if (context.hatXAxisUsed) return true
+                context.inputMap = context.inputMap and ControllerPacket.LEFT_FLAG.inv()
+            }
+            KeyEvent.KEYCODE_DPAD_RIGHT -> {
+                if (context.hatXAxisUsed) return true
+                context.inputMap = context.inputMap and ControllerPacket.RIGHT_FLAG.inv()
+            }
+            KeyEvent.KEYCODE_DPAD_UP -> {
+                if (context.hatYAxisUsed) return true
+                context.inputMap = context.inputMap and ControllerPacket.UP_FLAG.inv()
+            }
+            KeyEvent.KEYCODE_DPAD_DOWN -> {
+                if (context.hatYAxisUsed) return true
+                context.inputMap = context.inputMap and ControllerPacket.DOWN_FLAG.inv()
+            }
+            KeyEvent.KEYCODE_DPAD_UP_LEFT -> {
+                if (context.hatXAxisUsed && context.hatYAxisUsed) return true
+                context.inputMap = context.inputMap and (ControllerPacket.UP_FLAG or ControllerPacket.LEFT_FLAG).inv()
+            }
+            KeyEvent.KEYCODE_DPAD_UP_RIGHT -> {
+                if (context.hatXAxisUsed && context.hatYAxisUsed) return true
+                context.inputMap = context.inputMap and (ControllerPacket.UP_FLAG or ControllerPacket.RIGHT_FLAG).inv()
+            }
+            KeyEvent.KEYCODE_DPAD_DOWN_LEFT -> {
+                if (context.hatXAxisUsed && context.hatYAxisUsed) return true
+                context.inputMap = context.inputMap and (ControllerPacket.DOWN_FLAG or ControllerPacket.LEFT_FLAG).inv()
+            }
+            KeyEvent.KEYCODE_DPAD_DOWN_RIGHT -> {
+                if (context.hatXAxisUsed && context.hatYAxisUsed) return true
+                context.inputMap = context.inputMap and (ControllerPacket.DOWN_FLAG or ControllerPacket.RIGHT_FLAG).inv()
+            }
+            KeyEvent.KEYCODE_BUTTON_B ->
+                context.inputMap = context.inputMap and ControllerPacket.B_FLAG.inv()
+            KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_BUTTON_A ->
+                context.inputMap = context.inputMap and ControllerPacket.A_FLAG.inv()
+            KeyEvent.KEYCODE_BUTTON_X ->
+                context.inputMap = context.inputMap and ControllerPacket.X_FLAG.inv()
+            KeyEvent.KEYCODE_BUTTON_Y ->
+                context.inputMap = context.inputMap and ControllerPacket.Y_FLAG.inv()
+            KeyEvent.KEYCODE_BUTTON_L1 -> {
+                context.inputMap = context.inputMap and ControllerPacket.LB_FLAG.inv()
+                context.lastLbUpTime = event.eventTime
+            }
+            KeyEvent.KEYCODE_BUTTON_R1 -> {
+                context.inputMap = context.inputMap and ControllerPacket.RB_FLAG.inv()
+                context.lastRbUpTime = event.eventTime
+            }
+            KeyEvent.KEYCODE_BUTTON_THUMBL ->
+                context.inputMap = context.inputMap and ControllerPacket.LS_CLK_FLAG.inv()
+            KeyEvent.KEYCODE_BUTTON_THUMBR ->
+                context.inputMap = context.inputMap and ControllerPacket.RS_CLK_FLAG.inv()
+            KeyEvent.KEYCODE_MEDIA_RECORD -> // Xbox Series X Share button
+                context.inputMap = context.inputMap and ControllerPacket.MISC_FLAG.inv()
+            KeyEvent.KEYCODE_BUTTON_1 -> // PS4/PS5 touchpad button (prior to 4.10)
+                context.inputMap = context.inputMap and ControllerPacket.TOUCHPAD_FLAG.inv()
+            KeyEvent.KEYCODE_BUTTON_L2 -> {
+                if (context.leftTriggerAxisUsed) return true
+                context.leftTrigger = 0
+                gyroManager.updateGyroHoldFromDigital(context, KeyEvent.KEYCODE_BUTTON_L2, false)
+            }
+            KeyEvent.KEYCODE_BUTTON_R2 -> {
+                if (context.rightTriggerAxisUsed) return true
+                context.rightTrigger = 0
+                gyroManager.updateGyroHoldFromDigital(context, KeyEvent.KEYCODE_BUTTON_R2, false)
+            }
+            KeyEvent.KEYCODE_UNKNOWN -> {
+                // Paddles aren't mapped in any of the Android key layout files,
+                // so we need to handle the evdev key codes directly.
+                if (context.hasPaddles) {
+                    when (event.scanCode) {
+                        0x2c4 -> context.inputMap = context.inputMap and ControllerPacket.PADDLE1_FLAG.inv() // BTN_TRIGGER_HAPPY5
+                        0x2c5 -> context.inputMap = context.inputMap and ControllerPacket.PADDLE2_FLAG.inv() // BTN_TRIGGER_HAPPY6
+                        0x2c6 -> context.inputMap = context.inputMap and ControllerPacket.PADDLE3_FLAG.inv() // BTN_TRIGGER_HAPPY7
+                        0x2c7 -> context.inputMap = context.inputMap and ControllerPacket.PADDLE4_FLAG.inv() // BTN_TRIGGER_HAPPY8
+                        else -> return false
+                    }
+                } else {
+                    return false
+                }
+            }
+            else -> return false
+        }
+
+        if (!isStartKey && isWheelDpadKey(keyCode) &&
+            context.startGesture.state() == StartGestureReducer.State.WHEEL_VISIBLE
+        ) {
+            handleSystemStartWheelAxes(context)
+        }
+
+        if (isStartKey) {
+            handleSystemStartGestureUpdate(
+                context,
+                context.startGesture.onStartUp(
+                    event.eventTime,
+                    buttonFlags = context.inputMap,
+                    rightStickX = context.rightStickX.toFloat() / 32766f,
+                    rightStickY = hostStickYToWheelAxis(context.rightStickY),
+                    leftStickX = context.leftStickX.toFloat() / 32766f,
+                    leftStickY = hostStickYToWheelAxis(context.leftStickY)
+                )
+            )
+        }
+
+        if (captureAtEntry || context.isLocalInputCaptureActive()) {
+            updateSystemStartReleaseState(context)
+            return true
+        }
+
+        // Check if we're emulating the select button
+        if ((context.emulatingButtonFlags and EMULATING_SELECT) != 0) {
+            // If either start or LB is up, select comes up too
+            if ((context.inputMap and ControllerPacket.PLAY_FLAG) == 0 ||
+                (context.inputMap and ControllerPacket.LB_FLAG) == 0
+            ) {
+                context.inputMap = context.inputMap and ControllerPacket.BACK_FLAG.inv()
+                context.emulatingButtonFlags = context.emulatingButtonFlags and EMULATING_SELECT.inv()
+            }
+        }
+
+        // Check if we're emulating the special button
+        if ((context.emulatingButtonFlags and EMULATING_SPECIAL) != 0) {
+            // If either start or select and RB is up, the special button comes up too
+            if ((context.inputMap and ControllerPacket.PLAY_FLAG) == 0 ||
+                ((context.inputMap and ControllerPacket.BACK_FLAG) == 0 &&
+                        (context.inputMap and ControllerPacket.RB_FLAG) == 0)
+            ) {
+                context.inputMap = context.inputMap and ControllerPacket.SPECIAL_BUTTON_FLAG.inv()
+                context.emulatingButtonFlags = context.emulatingButtonFlags and EMULATING_SPECIAL.inv()
+            }
+        }
+
+        // Check if we're emulating the touchpad button
+        if ((context.emulatingButtonFlags and EMULATING_TOUCHPAD) != 0) {
+            // If either select or LB is up, touchpad comes up too
+            if ((context.inputMap and ControllerPacket.BACK_FLAG) == 0 ||
+                (context.inputMap and ControllerPacket.LB_FLAG) == 0
+            ) {
+                context.inputMap = context.inputMap and ControllerPacket.TOUCHPAD_FLAG.inv()
+                context.emulatingButtonFlags = context.emulatingButtonFlags and EMULATING_TOUCHPAD.inv()
+            }
+        }
+
+        sendControllerInputPacket(context)
+
+        updateSystemStartReleaseState(context)
+
+        if (context.pendingExit && context.inputMap == 0) {
+            // All buttons from the quit combo are lifted. Finish the activity now.
+            activityContext.finish()
+        }
+
+        return true
+    }
+
+    fun handleButtonDown(event: KeyEvent): Boolean {
+        val context = getContextForEvent(event) ?: return true
+
+        val captureAtEntry = context.isLocalInputCaptureActive()
+        if (!captureAtEntry) {
+            updatePerformanceShortcut(context, event, pressed = true)
+        }
+        var keyCode = handleRemapping(context, event)
+        if (keyCode < 0) {
+            return (keyCode == REMAP_CONSUME)
+        }
+
+        if (prefConfig.flipFaceButtons) {
+            keyCode = handleFlipFaceButtons(keyCode)
+        }
+
+        val isStartKey = keyCode == KeyEvent.KEYCODE_BUTTON_START || keyCode == KeyEvent.KEYCODE_MENU
+
+        if (!updateJoyConDpadKey(context, keyCode, pressed = true)) when (keyCode) {
+            KeyEvent.KEYCODE_BUTTON_MODE -> {
+                context.hasMode = true
+                context.inputMap = context.inputMap or ControllerPacket.SPECIAL_BUTTON_FLAG
+            }
+            KeyEvent.KEYCODE_BUTTON_START, KeyEvent.KEYCODE_MENU -> {
+                if (event.repeatCount == 0) {
+                    context.startDownTime = event.eventTime
+                }
+                context.inputMap = context.inputMap or ControllerPacket.PLAY_FLAG
+            }
+            KeyEvent.KEYCODE_BACK, KeyEvent.KEYCODE_BUTTON_SELECT -> {
+                context.hasSelect = true
+                context.inputMap = context.inputMap or ControllerPacket.BACK_FLAG
+            }
+            KeyEvent.KEYCODE_DPAD_LEFT -> {
+                if (context.hatXAxisUsed) return true
+                context.inputMap = context.inputMap or ControllerPacket.LEFT_FLAG
+            }
+            KeyEvent.KEYCODE_DPAD_RIGHT -> {
+                if (context.hatXAxisUsed) return true
+                context.inputMap = context.inputMap or ControllerPacket.RIGHT_FLAG
+            }
+            KeyEvent.KEYCODE_DPAD_UP -> {
+                if (context.hatYAxisUsed) return true
+                context.inputMap = context.inputMap or ControllerPacket.UP_FLAG
+            }
+            KeyEvent.KEYCODE_DPAD_DOWN -> {
+                if (context.hatYAxisUsed) return true
+                context.inputMap = context.inputMap or ControllerPacket.DOWN_FLAG
+            }
+            KeyEvent.KEYCODE_DPAD_UP_LEFT -> {
+                if (context.hatXAxisUsed && context.hatYAxisUsed) return true
+                context.inputMap = context.inputMap or ControllerPacket.UP_FLAG or ControllerPacket.LEFT_FLAG
+            }
+            KeyEvent.KEYCODE_DPAD_UP_RIGHT -> {
+                if (context.hatXAxisUsed && context.hatYAxisUsed) return true
+                context.inputMap = context.inputMap or ControllerPacket.UP_FLAG or ControllerPacket.RIGHT_FLAG
+            }
+            KeyEvent.KEYCODE_DPAD_DOWN_LEFT -> {
+                if (context.hatXAxisUsed && context.hatYAxisUsed) return true
+                context.inputMap = context.inputMap or ControllerPacket.DOWN_FLAG or ControllerPacket.LEFT_FLAG
+            }
+            KeyEvent.KEYCODE_DPAD_DOWN_RIGHT -> {
+                if (context.hatXAxisUsed && context.hatYAxisUsed) return true
+                context.inputMap = context.inputMap or ControllerPacket.DOWN_FLAG or ControllerPacket.RIGHT_FLAG
+            }
+            KeyEvent.KEYCODE_BUTTON_B ->
+                context.inputMap = context.inputMap or ControllerPacket.B_FLAG
+            KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_BUTTON_A ->
+                context.inputMap = context.inputMap or ControllerPacket.A_FLAG
+            KeyEvent.KEYCODE_BUTTON_X ->
+                context.inputMap = context.inputMap or ControllerPacket.X_FLAG
+            KeyEvent.KEYCODE_BUTTON_Y ->
+                context.inputMap = context.inputMap or ControllerPacket.Y_FLAG
+            KeyEvent.KEYCODE_BUTTON_L1 ->
+                context.inputMap = context.inputMap or ControllerPacket.LB_FLAG
+            KeyEvent.KEYCODE_BUTTON_R1 ->
+                context.inputMap = context.inputMap or ControllerPacket.RB_FLAG
+            KeyEvent.KEYCODE_BUTTON_THUMBL ->
+                context.inputMap = context.inputMap or ControllerPacket.LS_CLK_FLAG
+            KeyEvent.KEYCODE_BUTTON_THUMBR ->
+                context.inputMap = context.inputMap or ControllerPacket.RS_CLK_FLAG
+            KeyEvent.KEYCODE_MEDIA_RECORD -> // Xbox Series X Share button
+                context.inputMap = context.inputMap or ControllerPacket.MISC_FLAG
+            KeyEvent.KEYCODE_BUTTON_1 -> // PS4/PS5 touchpad button (prior to 4.10)
+                context.inputMap = context.inputMap or ControllerPacket.TOUCHPAD_FLAG
+            KeyEvent.KEYCODE_BUTTON_L2 -> {
+                if (context.leftTriggerAxisUsed) return true
+                context.leftTrigger = 0xFF.toByte()
+                gyroManager.updateGyroHoldFromDigital(context, KeyEvent.KEYCODE_BUTTON_L2, true)
+            }
+            KeyEvent.KEYCODE_BUTTON_R2 -> {
+                if (context.rightTriggerAxisUsed) return true
+                context.rightTrigger = 0xFF.toByte()
+                gyroManager.updateGyroHoldFromDigital(context, KeyEvent.KEYCODE_BUTTON_R2, true)
+            }
+            KeyEvent.KEYCODE_UNKNOWN -> {
+                // Paddles aren't mapped in any of the Android key layout files,
+                // so we need to handle the evdev key codes directly.
+                if (context.hasPaddles) {
+                    when (event.scanCode) {
+                        0x2c4 -> context.inputMap = context.inputMap or ControllerPacket.PADDLE1_FLAG // BTN_TRIGGER_HAPPY5
+                        0x2c5 -> context.inputMap = context.inputMap or ControllerPacket.PADDLE2_FLAG // BTN_TRIGGER_HAPPY6
+                        0x2c6 -> context.inputMap = context.inputMap or ControllerPacket.PADDLE3_FLAG // BTN_TRIGGER_HAPPY7
+                        0x2c7 -> context.inputMap = context.inputMap or ControllerPacket.PADDLE4_FLAG // BTN_TRIGGER_HAPPY8
+                        else -> return false
+                    }
+                } else {
+                    return false
+                }
+            }
+            else -> return false
+        }
+
+        if (!isStartKey && isWheelDpadKey(keyCode) &&
+            context.startGesture.state() == StartGestureReducer.State.WHEEL_VISIBLE
+        ) {
+            handleSystemStartWheelAxes(context)
+        }
+
+        if (captureAtEntry || context.isLocalInputCaptureActive()) {
+            updateSystemStartReleaseState(context)
+            return true
+        }
+
+        // Start+Back+LB+RB is the quit combo
+        if (context.inputMap == (ControllerPacket.BACK_FLAG or ControllerPacket.PLAY_FLAG or
+                    ControllerPacket.LB_FLAG or ControllerPacket.RB_FLAG)
+        ) {
+            // Wait for the combo to lift and then finish the activity
+            context.pendingExit = true
+        }
+
+        // Start+LB acts like select for controllers with one button
+        if (!context.hasSelect) {
+            if (context.inputMap == (ControllerPacket.PLAY_FLAG or ControllerPacket.LB_FLAG) ||
+                (context.inputMap == ControllerPacket.PLAY_FLAG &&
+                        event.eventTime - context.lastLbUpTime <= MAXIMUM_BUMPER_UP_DELAY_MS)
+            ) {
+                context.inputMap = context.inputMap and (ControllerPacket.PLAY_FLAG or ControllerPacket.LB_FLAG).inv()
+                context.inputMap = context.inputMap or ControllerPacket.BACK_FLAG
+
+                context.emulatingButtonFlags = context.emulatingButtonFlags or EMULATING_SELECT
+            }
+        } else if (context.needsClickpadEmulation) {
+            // Select+LB acts like the clickpad when we're faking a PS4 controller for motion support
+            if (context.inputMap == (ControllerPacket.BACK_FLAG or ControllerPacket.LB_FLAG) ||
+                (context.inputMap == ControllerPacket.BACK_FLAG &&
+                        event.eventTime - context.lastLbUpTime <= MAXIMUM_BUMPER_UP_DELAY_MS)
+            ) {
+                context.inputMap = context.inputMap and (ControllerPacket.BACK_FLAG or ControllerPacket.LB_FLAG).inv()
+                context.inputMap = context.inputMap or ControllerPacket.TOUCHPAD_FLAG
+
+                context.emulatingButtonFlags = context.emulatingButtonFlags or EMULATING_TOUCHPAD
+            }
+        }
+
+        // If there is a physical select button, we'll use Start+Select as the special button combo
+        // otherwise we'll use Start+RB.
+        if (!context.hasMode) {
+            if (context.hasSelect) {
+                if (context.inputMap == (ControllerPacket.PLAY_FLAG or ControllerPacket.BACK_FLAG)) {
+                    context.inputMap = context.inputMap and (ControllerPacket.PLAY_FLAG or ControllerPacket.BACK_FLAG).inv()
+                    context.inputMap = context.inputMap or ControllerPacket.SPECIAL_BUTTON_FLAG
+
+                    context.emulatingButtonFlags = context.emulatingButtonFlags or EMULATING_SPECIAL
+                }
+            } else {
+                if (context.inputMap == (ControllerPacket.PLAY_FLAG or ControllerPacket.RB_FLAG) ||
+                    (context.inputMap == ControllerPacket.PLAY_FLAG &&
+                            event.eventTime - context.lastRbUpTime <= MAXIMUM_BUMPER_UP_DELAY_MS)
+                ) {
+                    context.inputMap = context.inputMap and (ControllerPacket.PLAY_FLAG or ControllerPacket.RB_FLAG).inv()
+                    context.inputMap = context.inputMap or ControllerPacket.SPECIAL_BUTTON_FLAG
+
+                    context.emulatingButtonFlags = context.emulatingButtonFlags or EMULATING_SPECIAL
+                }
+            }
+        }
+
+        // We don't need to send repeat key down events, but the platform
+        // sends us events that claim to be repeats but they're from different
+        // devices, so we just send them all and deal with some duplicates.
+        sendControllerInputPacket(context)
+        if (isStartKey && event.repeatCount == 0) {
+            handleSystemStartGestureUpdate(
+                context,
+                context.startGesture.onStartDown(event.eventTime, prefConfig.enableStartKeyMenu)
+            )
+        }
+        return true
+    }
+
+    // ========== OSC / Virtual Controller ==========
+
+    fun reportOscState(
+        buttonFlags: Int,
+        leftStickX: Short, leftStickY: Short,
+        rightStickX: Short, rightStickY: Short,
+        leftTrigger: Byte, rightTrigger: Byte
+    ) {
+        defaultContext.leftStickX = leftStickX
+        defaultContext.leftStickY = leftStickY
+
+        // 更新物理右摇杆值（用于陀螺仪融合）
+        defaultContext.physRightStickX = rightStickX
+        defaultContext.physRightStickY = rightStickY
+
+        defaultContext.leftTrigger = leftTrigger
+        defaultContext.rightTrigger = rightTrigger
+
+        // 更新陀螺仪激活状态
+        val wasHold = defaultContext.gyroHoldActive
+        val leftTriggerFloat = (leftTrigger.toInt() and 0xFF) / 255.0f
+        val rightTriggerFloat = (rightTrigger.toInt() and 0xFF) / 255.0f
+        defaultContext.gyroHoldActive =
+            gyroManager.computeHoldFromAnalog(leftTriggerFloat, rightTriggerFloat)
+
+        if (wasHold && !defaultContext.gyroHoldActive) {
+            gyroManager.onGyroHoldDeactivated(defaultContext, restorePhysicalStick = false)
+        }
+
+        if (!gyroManager.isRightStickMode || !defaultContext.gyroHoldActive) {
+            defaultContext.rightStickX = rightStickX
+            defaultContext.rightStickY = rightStickY
+        }
+
+        defaultContext.inputMap = buttonFlags
+
+        sendControllerInputPacket(defaultContext)
+    }
+
+    // ========== USB Driver Callbacks ==========
+
+    private fun handleDriverShortcutUpdate(
+        context: DriverControllerContext,
+        update: DriverControllerShortcutStateMachine.Update
+    ) {
+        if (!isContextUsable(context)) return
+        val captureStarted = update.consumeAllInput && !context.touchCaptureActive
+        val captureEnded = !update.consumeAllInput && context.touchCaptureActive
+        context.touchCaptureActive = update.consumeAllInput
+        if (captureStarted || captureEnded) {
+            cancelForwardedDriverTouches(context)
+            context.device?.resetTouchState()
+        }
+        for (action in update.actions) {
+            when (action) {
+                DriverControllerShortcutStateMachine.Action.SCHEDULE_LONG_PRESS -> {
+                    mainThreadHandler.removeCallbacks(context.shortcutLongPressRunnable)
+                    mainThreadHandler.postDelayed(
+                        context.shortcutLongPressRunnable,
+                        START_DOWN_TIME_MOUSE_MODE_MS.toLong()
+                    )
+                }
+                DriverControllerShortcutStateMachine.Action.CANCEL_LONG_PRESS ->
+                    mainThreadHandler.removeCallbacks(context.shortcutLongPressRunnable)
+                DriverControllerShortcutStateMachine.Action.SHOW_WHEEL -> {
+                    mainThreadHandler.post {
+                        if (isContextUsable(context) && startWheelOwnerGate.isOwner(context)) {
+                            gestures.showStartHoldWheel()
+                            performStartWheelHaptic()
+                        }
+                    }
+                }
+                DriverControllerShortcutStateMachine.Action.HIDE_WHEEL -> {
+                    if (startWheelOwnerGate.release(context)) {
+                        mainThreadHandler.post { gestures.hideStartHoldWheel() }
+                    }
+                }
+                DriverControllerShortcutStateMachine.Action.TOGGLE_MOUSE_EMULATION ->
+                    mainThreadHandler.post {
+                        if (isContextUsable(context)) {
+                            context.toggleMouseEmulation()
+                            performStartWheelHaptic()
+                        }
+                    }
+                DriverControllerShortcutStateMachine.Action.TOGGLE_KEYBOARD ->
+                    mainThreadHandler.post {
+                        if (isContextUsable(context)) {
+                            gestures.toggleKeyboard()
+                            performStartWheelHaptic()
+                        }
+                    }
+                DriverControllerShortcutStateMachine.Action.TOGGLE_PERFORMANCE ->
+                    mainThreadHandler.post {
+                        if (isContextUsable(context)) {
+                            onTogglePerformanceOverlay()
+                            performStartWheelHaptic()
+                        }
+                    }
+                DriverControllerShortcutStateMachine.Action.UPDATE_SELECTION ->
+                    mainThreadHandler.post {
+                        if (isContextUsable(context) && startWheelOwnerGate.isOwner(context)) {
+                            gestures.updateStartHoldWheelSelection(update.selectedAction)
+                            performStartWheelHaptic()
+                        }
+                    }
+                DriverControllerShortcutStateMachine.Action.OPEN_GAME_MENU ->
+                    mainThreadHandler.post openMenu@{
+                        val requestId = update.menuOpenRequestId ?: return@openMenu
+                        if (!isContextUsable(context) ||
+                            !context.shortcutState.isMenuOpenRequestPending(requestId)
+                        ) {
+                            context.shortcutState.onGameMenuOpenResult(requestId, false)
+                            return@openMenu
+                        }
+                        val menuOpened = gestures.showGameMenuFromUsb(context)
+                        if (menuOpened) {
+                            context.menuAxisSnapshotState.reset()
+                            activateDriverMenuCapture(excludedContext = context)
+                        }
+                        val resultUpdate = context.shortcutState.onGameMenuOpenResult(requestId, menuOpened)
+                        handleDriverShortcutUpdate(context, resultUpdate)
+                        if (resultUpdate.sendNeutralState) {
+                            sendNeutralControllerState(context)
+                        }
+                    }
+                DriverControllerShortcutStateMachine.Action.EXIT_STREAM ->
+                    mainThreadHandler.post {
+                        if (isContextUsable(context) && !activityContext.isFinishing) onExitStream()
+                    }
+            }
+        }
+
+        for (buttonChange in update.menuButtonChanges) {
+            val keyCode = usbMenuKeyCode(buttonChange.buttonFlag) ?: continue
+            mainThreadHandler.post {
+                if (!isContextUsable(context)) return@post
+                val keyAction = if (buttonChange.pressed) KeyEvent.ACTION_DOWN else KeyEvent.ACTION_UP
+                val eventTime = SystemClock.uptimeMillis()
+                val downTime = if (buttonChange.pressed) {
+                    context.menuKeyDownTimes[buttonChange.buttonFlag] = eventTime
+                    eventTime
+                } else {
+                    context.menuKeyDownTimes.remove(buttonChange.buttonFlag) ?: eventTime
+                }
+                val event = KeyEvent(
+                    downTime,
+                    eventTime,
+                    keyAction,
+                    keyCode,
+                    0,
+                    0,
+                    usbGameMenuAxisSourceId(context.device?.getControllerId() ?: context.id),
+                    0
+                )
+                if (!gestures.dispatchUsbControllerMenuKey(event)) {
+                    context.menuKeyDownTimes.clear()
+                    context.shortcutState.onGameMenuUnavailable()
+                }
+            }
+        }
+    }
+
+    internal fun onDriverLocalCaptureEnded(context: DriverControllerContext) {
+        if (!context.touchCaptureActive) return
+        context.touchCaptureActive = false
+        cancelForwardedDriverTouches(context)
+        context.device?.resetTouchState()
+    }
+
+    private fun activateDriverMenuCapture(excludedContext: DriverControllerContext? = null) {
+        synchronized(driverControllerContextsLifecycleLock) {
+            if (stopped) return
+            for (context in driverControllerContexts.values) {
+                if (context === excludedContext) continue
+
+                context.menuAxisSnapshotState.reset()
+                val update = context.shortcutState.onGameMenuOpenedExternally()
+                handleDriverShortcutUpdate(context, update)
+                if (update.sendNeutralState) {
+                    sendNeutralControllerState(context)
+                }
+            }
+        }
+    }
+
+    fun onExternalGameMenuOpened() {
+        activateDriverMenuCapture()
+        for (i in 0 until inputDeviceContexts.size()) {
+            val context = inputDeviceContexts.valueAt(i)
+            handleSystemStartGestureUpdate(
+                context,
+                context.startGesture.onGameMenuOpenedExternally()
+            )
+        }
+    }
+
+    fun onExternalGameMenuDismissed() {
+        synchronized(driverControllerContextsLifecycleLock) {
+            if (stopped) return
+            driverControllerContexts.values.forEach(DriverControllerContext::onGameMenuDismissed)
+        }
+        for (i in 0 until inputDeviceContexts.size()) {
+            inputDeviceContexts.valueAt(i).startGesture.onGameMenuUnavailable()
+        }
+    }
+
+    private fun usbMenuKeyCode(buttonFlag: Int): Int? {
+        return when (buttonFlag) {
+            ControllerPacket.UP_FLAG -> KeyEvent.KEYCODE_DPAD_UP
+            ControllerPacket.DOWN_FLAG -> KeyEvent.KEYCODE_DPAD_DOWN
+            ControllerPacket.LEFT_FLAG -> KeyEvent.KEYCODE_DPAD_LEFT
+            ControllerPacket.RIGHT_FLAG -> KeyEvent.KEYCODE_DPAD_RIGHT
+            ControllerPacket.A_FLAG -> KeyEvent.KEYCODE_DPAD_CENTER
+            ControllerPacket.B_FLAG -> KeyEvent.KEYCODE_BACK
+            else -> null
+        }
+    }
+
+    private fun isWheelDpadKey(keyCode: Int): Boolean =
+        ((ANDROID_TO_LI_BUTTON_MAP[keyCode] ?: 0) and USB_MENU_DIRECTION_MASK) != 0
+
+    private fun sendNeutralControllerState(context: GenericControllerContext) {
+        motionSender.stopGyro(context.controllerNumber)
+        context.performanceOverlayShortcutState.reset()
+        if (context.gyroHoldActive) {
+            context.gyroHoldActive = false
+            gyroManager.onGyroHoldDeactivated(context)
+        }
+        if (context is InputDeviceContext) {
+            conn.sendControllerTouchEvent(
+                context.controllerNumber.toByte(),
+                MoonBridge.LI_TOUCH_EVENT_CANCEL_ALL,
+                0,
+                0f,
+                0f,
+                0f
+            )
+        }
+        synchronized(arrivalMetadataLock) {
+            sendControllerInputPacketLocked(context, forceNeutral = true)
+        }
+    }
+
+    override fun reportControllerState(
+        controllerId: Int, buttonFlags: Int,
+        leftStickX: Float, leftStickY: Float,
+        rightStickX: Float, rightStickY: Float,
+        leftTrigger: Float, rightTrigger: Float
+    ) {
+        @Suppress("NAME_SHADOWING")
+        var leftTrigger = leftTrigger
+        @Suppress("NAME_SHADOWING")
+        var rightTrigger = rightTrigger
+
+        val context = driverControllerContexts[controllerId] ?: return
+        if (!isContextUsable(context)) return
+        val shortcutUpdate = context.shortcutState.onButtonSnapshot(
+            buttonFlags,
+            android.os.SystemClock.uptimeMillis(),
+            prefConfig.enableStartKeyMenu
+        )
+        val localAxisUpdate = if (context.shortcutState.needsAxisUpdates()) {
+            context.shortcutState.onSelectionAxes(
+                leftStickX,
+                leftStickY,
+                rightStickX,
+                rightStickY
+            )
+        } else {
+            null
+        }
+        handleDriverShortcutUpdate(context, shortcutUpdate)
+        localAxisUpdate?.let { handleDriverShortcutUpdate(context, it) }
+
+        if (shortcutUpdate.consumeAllInput || localAxisUpdate?.consumeAllInput == true) {
+            if (context.shortcutState.isMenuActive()) {
+                val digitalDirectionPressed = buttonFlags and USB_MENU_DIRECTION_MASK != 0
+                val menuLeftX = if (digitalDirectionPressed) 0f else leftStickX
+                val menuLeftY = if (digitalDirectionPressed) 0f else leftStickY
+                val menuRightX = if (digitalDirectionPressed) 0f else rightStickX
+                val menuRightY = if (digitalDirectionPressed) 0f else rightStickY
+                val axisPairs = listOf(menuLeftX to menuLeftY, menuRightX to menuRightY)
+                if (context.menuAxisSnapshotState.update(axisPairs)) {
+                    mainThreadHandler.post {
+                        if (!isContextUsable(context) || !context.shortcutState.isMenuActive()) return@post
+                        if (!gestures.dispatchUsbControllerMenuAxes(
+                                controllerId,
+                                menuLeftX,
+                                menuLeftY,
+                                menuRightX,
+                                menuRightY
+                            )
+                        ) {
+                            context.shortcutState.onGameMenuUnavailable()
+                        }
+                    }
+                }
+            }
+            if (shortcutUpdate.sendNeutralState) {
+                sendNeutralControllerState(context)
+            }
+            if (localAxisUpdate?.sendNeutralState == true) {
+                sendNeutralControllerState(context)
+            }
+            return
+        }
+
+        updatePerformanceShortcut(context, buttonFlags)
+
+        // Gyro hold activation via analog LT/RT thresholds when mapped to L2/R2
+        val wasHold = context.gyroHoldActive
+        context.gyroHoldActive = gyroManager.computeHoldFromAnalog(leftTrigger, rightTrigger)
+        if (wasHold && !context.gyroHoldActive) {
+            // Ensure we immediately stop any residual gyro influence
+            gyroManager.onGyroHoldDeactivated(context)
+        }
+
+        val leftStickVector = populateCachedVector(leftStickX, leftStickY)
+
+        handleDeadZone(leftStickVector, context.leftStickDeadzoneRadius)
+
+        context.leftStickX = (leftStickVector.x * 0x7FFE).toInt().toShort()
+        context.leftStickY = (-leftStickVector.y * 0x7FFE).toInt().toShort()
+
+        // Fuse physical right stick with gyro input to avoid jitter.
+        // Strategy: if gyro-hold is active, take the component with larger magnitude per-axis.
+        // Otherwise, use physical stick only.
+        val physX: Short
+        val physY: Short
+        run {
+            val rsv = populateCachedVector(rightStickX, rightStickY)
+            handleDeadZone(rsv, context.rightStickDeadzoneRadius)
+            physX = (rsv.x * 0x7FFE).toInt().toShort()
+            physY = (-rsv.y * 0x7FFE).toInt().toShort()
+            // cache physical right stick and apply EPS denoising
+            context.physRightStickX = denoisePhys(physX)
+            context.physRightStickY = denoisePhys(physY)
+        }
+
+        if (gyroManager.isRightStickMode && context.gyroHoldActive) {
+            // 融合策略：按轴叠加并限幅
+            val gx = context.gyroRightStickX
+            val gy = context.gyroRightStickY
+            context.rightStickX = clampShortToStickRange(physX + gx)
+            context.rightStickY = clampShortToStickRange(physY + gy)
+        } else {
+            context.rightStickX = physX
+            context.rightStickY = physY
+        }
+
+        if (leftTrigger <= context.triggerDeadzone) {
+            leftTrigger = 0f
+        }
+        if (rightTrigger <= context.triggerDeadzone) {
+            rightTrigger = 0f
+        }
+
+        context.leftTrigger = (leftTrigger * 0xFF).toInt().toByte()
+        context.rightTrigger = (rightTrigger * 0xFF).toInt().toByte()
+
+        context.inputMap = buttonFlags
+
+        sendControllerInputPacket(context)
+
+    }
+
+    private fun updatePerformanceShortcut(
+        context: InputDeviceContext,
+        event: KeyEvent,
+        pressed: Boolean
+    ) {
+        val keyCode = context.joyCon?.remapKey(event.keyCode, event.scanCode) ?: event.keyCode
+        val flag = when (keyCode) {
+            KeyEvent.KEYCODE_BACK,
+            KeyEvent.KEYCODE_BUTTON_SELECT -> ControllerPacket.BACK_FLAG
+            KeyEvent.KEYCODE_BUTTON_L1 -> ControllerPacket.LB_FLAG
+            KeyEvent.KEYCODE_BUTTON_R1 -> ControllerPacket.RB_FLAG
+            KeyEvent.KEYCODE_BUTTON_X -> ControllerPacket.X_FLAG
+            else -> return
+        }
+        dispatchPerformanceShortcutIfTriggered(
+            context, context.performanceOverlayShortcutState.updateButton(flag, pressed)
+        )
+    }
+
+    private fun updatePerformanceShortcut(context: GenericControllerContext, buttonFlags: Int) {
+        dispatchPerformanceShortcutIfTriggered(
+            context, context.performanceOverlayShortcutState.updateSnapshot(buttonFlags)
+        )
+    }
+
+    private fun dispatchPerformanceShortcutIfTriggered(context: GenericControllerContext, triggered: Boolean) {
+        if (triggered) {
+            mainThreadHandler.post {
+                if (isContextUsable(context)) onTogglePerformanceOverlay()
+            }
+        }
+    }
+
+    override fun deviceRemoved(controller: AbstractController) {
+        val path = UsbDriverService.devicePathForController(controller)
+        val context = synchronized(driverControllerContextsLifecycleLock) {
+            val current = driverControllerContexts[controller.getControllerId()]
+            if (current != null && current.device !== controller) return
+            current?.also {
+                driverControllerContexts.remove(controller.getControllerId())
+            }
+        }
+        (context?.usbDevicePath ?: path)?.let { removeInitialControllerSource(usbSource(it)) }
+        if (context != null) {
+            val wasController0GyroSource = contextWasController0GyroSource(context)
+            LimeLog.info("Removed controller: " + controller.getControllerId())
+            mainThreadHandler.post {
+                (gestures as? GameMenuAxisSourceLifecycle)?.releaseControllerMenuAxisSource(
+                    usbGameMenuAxisSourceId(controller.getControllerId())
+                )
+            }
+            rumbleManager.forgetUsbDevice(controller)
+            releaseControllerNumber(context)
+            context.destroy()
+            if (wasController0GyroSource) {
+                gyroManager.onControllerSourceChanged(context.controllerNumber)
+                gyroManager.onSensorsReenabled()
+            }
+            hapticsCoordinator.refreshPrimaryController()
+            hapticsCoordinator.clearControllerIfUnavailable(context.controllerNumber)
+        }
+    }
+
+    override fun deviceAdded(controller: AbstractController) {
+        val context = createDriverControllerContextForDevice(controller)
+        synchronized(driverControllerContextsLifecycleLock) {
+            if (!isContextUsable(context)) {
+                context.destroy()
+                return
+            }
+            driverControllerContexts[controller.getControllerId()] = context
+        }
+        hapticsCoordinator.refreshPrimaryController()
+        hapticsCoordinator.onSinkChanged(context.controllerNumber)
+    }
+
+    override fun reportControllerMotion(controllerId: Int, motionType: Byte, x: Float, y: Float, z: Float) {
+        val context = driverControllerContexts[controllerId] ?: return
+        withControllerInputLock {
+            if (routeDriverMotion(context, motionType, x, y, z)) {
+                motionSender.submit(context.controllerNumber, motionType, x, y, z)
+            }
+        }
+    }
+
+    override fun reportControllerMotionFrame(
+        controllerId: Int, gx: Float, gy: Float, gz: Float, ax: Float, ay: Float, az: Float
+    ) {
+        val context = driverControllerContexts[controllerId] ?: return
+        withControllerInputLock {
+            if (!isContextUsable(context)) return@withControllerInputLock
+            val gyro = routeDriverMotion(context, MoonBridge.LI_MOTION_TYPE_GYRO, gx, gy, gz)
+            val accel = routeDriverMotion(context, MoonBridge.LI_MOTION_TYPE_ACCEL, ax, ay, az)
+            if (gyro && accel) {
+                motionSender.submitFrame(context.controllerNumber, gx, gy, gz, ax, ay, az)
+            } else {
+                if (gyro) motionSender.submit(context.controllerNumber, MoonBridge.LI_MOTION_TYPE_GYRO, gx, gy, gz)
+                else motionSender.pauseGyro(context.controllerNumber, onlyFromFrame = true)
+                if (accel) motionSender.submit(context.controllerNumber, MoonBridge.LI_MOTION_TYPE_ACCEL, ax, ay, az)
+            }
+        }
+    }
+
+    /** Local gyro consumers run on every source sample, before host forwarding. */
+    private fun routeDriverMotion(
+        context: DriverControllerContext, motionType: Byte, x: Float, y: Float, z: Float
+    ): Boolean {
+        if (!isContextUsable(context)) return false
+        if (context.shortcutState.isLocalInputCaptureActive()) return false
+
+        // 当启用"陀螺仪模拟右摇杆"或"陀螺仪模拟鼠标"时，拦截陀螺仪数据
+        if (motionType == MoonBridge.LI_MOTION_TYPE_GYRO) {
+            if (context.controllerNumber.toInt() == 0) {
+                context.controllerGyroRoutingParticipated = true
+            }
+            gyroManager.onControllerGyroSample(
+                x,
+                y,
+                z,
+                context.controllerNumber,
+                System.nanoTime()
+            )
+            if (gyroManager.isUsingDeviceGyroFallback(context.controllerNumber)) {
+                return false
+            }
+
+            // Without this an Android gamepad owning controller 0 would be fought by a USB
+            // driver reporting the same slot; host forwarding below still runs.
+            if (gyroManager.isAssistantSourceFor(context.controllerNumber)) {
+                if (gyroManager.isMouseMode && context.gyroHoldActive) {
+                    motionSender.pauseGyro(context.controllerNumber)
+                    // x=pitch(deg/s), y=roll, z=yaw → 横屏下 z→mouseX, x→mouseY，转回 rad/s
+                    gyroManager.applyGyroToMouse(z / 57.2957795f, x / 57.2957795f, System.nanoTime())
+                    return false
+                }
+                if (gyroManager.isRightStickMode && context.gyroHoldActive) {
+                    motionSender.pauseGyro(context.controllerNumber)
+                    // x=pitch, y=roll, z=yaw — pass yaw as X and pitch as Y to match
+                    // the same axis convention used in the device sensor listener (gz, gx)
+                    gyroManager.applyGyroToRightStick(context, z, x)
+                    return false
+                }
+            }
+        }
+
+        return true
+    }
+
+    override fun reportControllerBattery(controllerId: Int, batteryState: Byte, batteryPercentage: Byte) {
+        val context = driverControllerContexts[controllerId] ?: return
+        if (!isContextUsable(context)) return
+
+        // In multi-controller mode, wait until the controller number is assigned;
+        // dedup only after that so the assigned controller gets its initial state.
+        if (prefConfig.multiController && !context.assignedControllerNumber) {
+            return
+        }
+        if (context.lastReportedBatteryState == batteryState &&
+            context.lastReportedBatteryPercentage == batteryPercentage
+        ) {
+            return
+        }
+
+        // Cache only after a successful send so a failure (e.g. control stream
+        // not yet ready) is retried with the next report.
+        if (conn.sendControllerBatteryEvent(context.controllerNumber.toByte(), batteryState, batteryPercentage) == 0) {
+            context.lastReportedBatteryState = batteryState
+            context.lastReportedBatteryPercentage = batteryPercentage
+        }
+    }
+
+    override fun reportControllerTouch(
+        controllerId: Int,
+        eventType: Byte,
+        pointerId: Int,
+        x: Float,
+        y: Float
+    ) {
+        val context = driverControllerContexts[controllerId] ?: return
+        if (!isContextUsable(context)) return
+        if (prefConfig.multiController && !context.assignedControllerNumber) return
+        if (context.shortcutState.isLocalInputCaptureActive()) {
+            cancelForwardedDriverTouches(context)
+            return
+        }
+
+        // The Linux DS5 backend distinguishes contact/release via pressure.
+        val pressure = when (eventType) {
+            MoonBridge.LI_TOUCH_EVENT_DOWN, MoonBridge.LI_TOUCH_EVENT_MOVE -> 1f
+            else -> 0f
+        }
+        val result = conn.sendControllerTouchEvent(
+            context.controllerNumber.toByte(), eventType, pointerId, x, y, pressure
+        )
+        if (result == MoonBridge.LI_ERR_UNSUPPORTED) return
+
+        when (eventType) {
+            MoonBridge.LI_TOUCH_EVENT_DOWN, MoonBridge.LI_TOUCH_EVENT_MOVE ->
+                context.forwardedTouchPointerIds[pointerId] = true
+            MoonBridge.LI_TOUCH_EVENT_UP, MoonBridge.LI_TOUCH_EVENT_CANCEL ->
+                context.forwardedTouchPointerIds.remove(pointerId)
+            MoonBridge.LI_TOUCH_EVENT_CANCEL_ALL -> context.forwardedTouchPointerIds.clear()
+        }
+    }
+
+    private fun cancelForwardedDriverTouches(context: DriverControllerContext) {
+        if (context.forwardedTouchPointerIds.isNotEmpty()) {
+            context.forwardedTouchPointerIds.keys.toList().forEach { pointerId ->
+                conn.sendControllerTouchEvent(
+                    context.controllerNumber.toByte(), MoonBridge.LI_TOUCH_EVENT_CANCEL,
+                    pointerId, 0f, 0f, 0f
+                )
+            }
+        }
+        context.forwardedTouchPointerIds.clear()
+        context.device?.resetTouchState()
+    }
+
+    override fun isControllerReady(controllerId: Int): Boolean {
+        val context = driverControllerContexts[controllerId] ?: return false
+        if (!isContextUsable(context)) return false
+        if (prefConfig.multiController && !context.assignedControllerNumber) return false
+        return context.controllerArrival.isReported
+    }
+
+    override fun onDualSenseNativeHapticsSinkAvailable(
+        controllerId: Int,
+        sink: DualSenseNativeHapticsSink
+    ) {
+        val context = driverControllerContexts[controllerId]?.takeIf(::isContextUsable) ?: run {
+            sink.stop()
+            return
+        }
+        updateWaveformAvailability(controllerId, HapticAvailability.INITIALIZING)
+        hapticsCoordinator.attachWaveformHapticsSink(controllerId, context.controllerNumber, sink,
+            sourceActive = { isContextUsable(context) }) { state ->
+            updateWaveformAvailability(controllerId, state)
+        }
+    }
+
+    private data class SystemWaveformRoute(
+        val metadata: HapticRouteSnapshot, val sink: WaveformHapticsSink,
+        val reopen: () -> Unit,
+        var inputId: Int? = null, var player: Short? = null
+    )
+
+    internal fun releaseDirectBluetoothHaptics(inputId: Int) {
+        directWaveformRouteIds.remove(inputId)?.let { id ->
+            retiredWaveformRoutes.add(id)
+            waveformCapabilities.remove(id)
+            onSystemWaveformSinkGone(id)
+        }
+    }
+
+    private fun refreshDirectBluetoothWaveformRoutes() {
+        if (stopped || !prefConfig.allowExperimentalHaptics || !prefConfig.dualSenseDirectBluetooth) return
+        for (index in 0 until inputDeviceContexts.size()) {
+            val context = inputDeviceContexts.valueAt(index)
+            if (!isContextUsable(context) || !context.hasJoystickAxes) continue
+            val output = context.directDualSenseBluetoothOutput ?: continue
+            val previous = directWaveformRouteIds[context.id]?.let(systemWaveformRoutes::get)
+            if (previous?.player != null && previous.player != context.controllerNumber) {
+                releaseDirectBluetoothHaptics(context.id)
+            }
+            val id = directWaveformRouteIds.getOrPut(context.id) {
+                com.limelight.binding.input.driver.ControllerDriverIdAllocator.allocate()
+            }
+            val route = systemWaveformRoutes.getOrPut(id) {
+                val metadata = HapticRouteSnapshot(id, HapticDeviceIdentity(
+                    "android-bt:${context.id}", context.name ?: "DualSense", context.vendorId, context.productId,
+                    HapticTransport.BLUETOOTH), output.waveformCapability(HapticAvailability.INITIALIZING))
+                waveformCapabilities[id] = metadata
+                val sink = output.createHapticsSink {
+                    mainThreadHandler.post {
+                        if (directWaveformRouteIds[context.id] == id) {
+                            releaseDirectBluetoothHaptics(context.id)
+                        }
+                    }
+                }
+                SystemWaveformRoute(metadata, sink, {}, inputId = context.id)
+            }
+            if (route.player != null || !context.assignedControllerNumber ||
+                !context.controllerArrival.isReported || !output.isWaveformReady) continue
+            route.player = context.controllerNumber
+            hapticsCoordinator.attachWaveformHapticsSink(id, context.controllerNumber, route.sink,
+                sourceActive = { isContextUsable(context) }) { state ->
+                updateWaveformAvailability(id, state)
+                LimeLog.info("DualSense Bluetooth waveform: player=${context.controllerNumber} " +
+                    "state=$state pcmRequested=${conn.authoredPcmHapticsRequested}")
+            }
+        }
+    }
+
+    override fun onWaveformRouteChanged(route: HapticRouteSnapshot) {
+        if (stopped || route.id in retiredWaveformRoutes) return
+        val firstObservation = waveformCapabilities.put(route.id, route) == null
+        if (firstObservation) mainThreadHandler.post {
+            if (!stopped) for (i in 0 until inputDeviceContexts.size()) {
+                val context = inputDeviceContexts.valueAt(i)
+                val device = context.inputDevice ?: continue
+                if (device.vendorId == route.device.vendorId && device.productId == route.device.productId &&
+                    context.controllerArrival.isReported) refreshControllerArrival(context)
+            }
+        }
+    }
+
+    override fun onWaveformRouteGone(routeId: Int) {
+        retiredWaveformRoutes.add(routeId)
+        waveformCapabilities.remove(routeId)?.let { route ->
+            mainThreadHandler.post {
+                if (!stopped) for (i in 0 until inputDeviceContexts.size()) {
+                    val context = inputDeviceContexts.valueAt(i)
+                    val device = context.inputDevice ?: continue
+                    if (device.vendorId == route.device.vendorId && device.productId == route.device.productId &&
+                        context.controllerArrival.isReported) refreshControllerArrival(context)
+                }
+            }
+        }
+        onSystemWaveformSinkGone(routeId)
+    }
+
+    private fun updateWaveformAvailability(id: Int, state: HapticAvailability) {
+        waveformCapabilities.computeIfPresent(id) { _, route ->
+            // A late startup result cannot undo a lost player association or a disconnect.
+            val old = route.capability.availability
+            if ((state == HapticAvailability.READY && old != HapticAvailability.INITIALIZING) ||
+                (state == HapticAvailability.FAILED && old !in setOf(HapticAvailability.INITIALIZING, HapticAvailability.READY)))
+                route else route.copy(capability = route.capability.copy(availability = state))
+        }
+    }
+
+    fun waveformHapticsRoutes(): List<HapticRouteView> = waveformCapabilities.values
+        .sortedWith(compareBy({ it.device.name }, { it.device.instance }, { it.capability.backendId }))
+        .map { snapshot ->
+            val route = systemWaveformRoutes[snapshot.id]
+            val test = route?.sink?.channelTest
+            val visible = if (snapshot.capability.availability == HapticAvailability.READY &&
+                !conn.authoredPcmHapticsRequested) snapshot.copy(capability = snapshot.capability.copy(
+                    availability = HapticAvailability.NEEDS_RECONNECT)) else snapshot
+            HapticRouteView(visible, route?.player?.toInt(),
+                route?.inputId != null && test?.canTest == true, test?.isTesting == true)
+        }
+
+    fun testWaveformChannels(routeId: Int, cancel: Boolean) {
+        val route = systemWaveformRoutes[routeId] ?: return
+        if (cancel) route.sink.channelTest?.cancelTest()
+        else if (route.inputId != null) route.sink.channelTest?.testChannels()
+    }
+
+    fun cancelWaveformTests() {
+        systemWaveformRoutes.values.forEach { it.sink.channelTest?.cancelTest() }
+    }
+
+    override fun onSystemWaveformSinkAvailable(route: HapticRouteSnapshot, sink: WaveformHapticsSink,
+                                              onAssociationLost: () -> Unit) {
+        mainThreadHandler.post {
+            if (stopped || route.id in retiredWaveformRoutes || usbHandoff.blocksPath(route.device.instance)) { sink.stop(); return@post }
+            if (systemWaveformRoutes[route.id]?.sink === sink) return@post
+            waveformCapabilities.putIfAbsent(route.id, route)
+            systemWaveformRoutes[route.id] = SystemWaveformRoute(route, sink, onAssociationLost)
+            refreshSystemWaveformRoutes()
+        }
+    }
+
+    override fun onSystemWaveformSinkGone(routeId: Int) {
+        val detach = Runnable {
+            systemWaveformRoutes.remove(routeId)?.sink?.let(hapticsCoordinator::stopWaveformSinkAsync)
+            hapticsCoordinator.detachDs5HapticsSink(routeId)
+        }
+        if (Looper.myLooper() == mainThreadHandler.looper) detach.run() else mainThreadHandler.post(detach)
+    }
+
+    private fun invalidateSystemWaveformRoute(id: Int, route: SystemWaveformRoute) {
+        updateWaveformAvailability(id, HapticAvailability.NEEDS_ASSOCIATION)
+        onSystemWaveformSinkGone(id)
+        route.reopen()
+    }
+
+    private fun refreshSystemWaveformRoutes() {
+        if (Looper.myLooper() != mainThreadHandler.looper) {
+            mainThreadHandler.post { refreshSystemWaveformRoutes() }
+            return
+        }
+        if (stopped) return
+        for ((id, route) in systemWaveformRoutes) {
+            val identity = route.metadata.device
+            if (identity.transport != HapticTransport.USB) continue
+            if (usbHandoff.blocks(UsbControllerHandoff.Identity(identity.vendorId, identity.productId))) continue
+            val devices = InputDevice.getDeviceIds().asSequence().mapNotNull(InputDevice::getDevice).filter {
+                it.vendorId == identity.vendorId && it.productId == identity.productId &&
+                    (it.sources and InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK
+            }
+            val device = devices.singleOrNull()
+            if (device == null || route.inputId?.let { it != device.id } == true) {
+                updateWaveformAvailability(id, HapticAvailability.NEEDS_ASSOCIATION)
+                if (route.inputId != null) invalidateSystemWaveformRoute(id, route)
+                continue
+            }
+            val context = inputDeviceContexts.get(device.id) ?: continue
+            if (prefConfig.multiController && !context.assignedControllerNumber) continue
+            if (route.inputId == null) {
+                route.inputId = device.id
+                route.player = context.controllerNumber
+                updateWaveformAvailability(id, HapticAvailability.INITIALIZING)
+                hapticsCoordinator.attachWaveformHapticsSink(id, context.controllerNumber, route.sink,
+                    sourceActive = { isContextUsable(context) }) { state ->
+                    updateWaveformAvailability(id, state)
+                    // A failed attach leaves a finished sink bound to this route; ask the
+                    // transport owner to rebuild it. The service's creation pacing bounds
+                    // how often a persistently failing channel is rebuilt.
+                    if (state == HapticAvailability.FAILED) route.reopen()
+                }
+            } else if (route.player != context.controllerNumber) {
+                // A route cannot carry queued samples across a player reassignment.
+                invalidateSystemWaveformRoute(id, route)
+            }
+        }
+        refreshDirectBluetoothWaveformRoutes()
+    }
+
+    override fun onDualSenseNativeHapticsSinkGone(controllerId: Int) {
+        updateWaveformAvailability(controllerId, HapticAvailability.DISCONNECTED)
+        hapticsCoordinator.detachDs5HapticsSink(controllerId)
+    }
+
+    // ========== Sensor Management ==========
+
+    fun handleSetMotionEventState(
+        controllerNumber: Short,
+        motionType: Byte,
+        reportRateHz: Short,
+        isHostRequest: Boolean = true
+    ) {
+        // Reached from the host control-stream thread, the battery/sensor background
+        // thread and the main thread. Listener bookkeeping below is main-thread owned.
+        if (Looper.myLooper() !== mainThreadHandler.looper) {
+            hapticsCoordinator.runForControllerOutput(controllerNumber) {
+                handleSetMotionEventState(controllerNumber, motionType, reportRateHz, isHostRequest)
+            }
+            return
+        }
+
+        if (stopped || !isControllerSlotEnabled(controllerNumber)) {
+            return
+        }
+
+        // Report rate is restricted to <= 200 Hz without the HIGH_SAMPLING_RATE_SENSORS permission
+        val requestedReportRateHz = reportRateHz.toInt().coerceIn(0, 200).toShort()
+        // common-c records host forwarding demand before dispatching this callback.
+        // This method controls acquisition, including independent local assistance demand.
+        val fallbackHandled = motionType == MoonBridge.LI_MOTION_TYPE_GYRO &&
+            gyroManager.handleControllerGyroReportRate(
+                controllerNumber,
+                requestedReportRateHz,
+                isHostRequest = isHostRequest
+            )
+        val effectiveReportRateHz = if (motionType == MoonBridge.LI_MOTION_TYPE_GYRO) {
+            gyroManager.effectiveControllerGyroReportRate(
+                controllerNumber,
+                requestedReportRateHz
+            )
+        } else {
+            requestedReportRateHz
+        }
+
+        val sensorType = if (motionType == MoonBridge.LI_MOTION_TYPE_ACCEL) {
+            Sensor.TYPE_ACCELEROMETER
+        } else {
+            Sensor.TYPE_GYROSCOPE
+        }
+
+        // A gamepad often enumerates as several InputDevices sharing one controller number.
+        // Which device ID sorts first changes between connections, so select the context that
+        // actually owns the sensor rather than whichever one happens to come first.
+        // Unassigned contexts still report controller number 0, so they must be excluded there.
+        val matchingContexts = (0 until inputDeviceContexts.size())
+            .map { inputDeviceContexts.valueAt(it) }
+            .filter {
+                it.controllerNumber == controllerNumber &&
+                    (controllerNumber.toInt() != 0 ||
+                        it.assignedControllerNumber || it.controllerGyroRoutingParticipated)
+            }
+        if (matchingContexts.isEmpty()) {
+            return
+        }
+
+        // Store the desired report rate even if we don't have sensors. In some cases,
+        // input devices can be reconfigured at runtime which results in a change where
+        // sensors disappear and reappear. By storing the desired report rate, we can
+        // reapply the desired motion sensor configuration after they reappear.
+        for (deviceContext in matchingContexts) {
+            when (motionType) {
+                MoonBridge.LI_MOTION_TYPE_ACCEL -> deviceContext.accelReportRateHz = effectiveReportRateHz
+                MoonBridge.LI_MOTION_TYPE_GYRO -> deviceContext.gyroReportRateHz = effectiveReportRateHz
+            }
+        }
+
+        if (fallbackHandled) {
+            return
+        }
+
+        val target = if (effectiveReportRateHz.toInt() == 0) {
+            null
+        } else {
+            matchingContexts.sortedBy { if (joyConSupport.preferMotionSource(it)) 0 else 1 }
+                .firstOrNull { it.sensorManager?.getDefaultSensor(sensorType) != null }
+        }
+
+        if (target == null) {
+            for (deviceContext in matchingContexts) {
+                backgroundThreadHandler.removeCallbacks(deviceContext.enableSensorRunnable)
+                unregisterMotionListener(deviceContext, motionType)
+            }
+            return
+        }
+
+        backgroundThreadHandler.removeCallbacks(target.enableSensorRunnable)
+
+        val sm = target.sensorManager ?: return
+        val sensor = sm.getDefaultSensor(sensorType) ?: return
+        val listener = gyroManager.createSensorListener(
+            controllerNumber, motionType, sm === deviceSensorManager,
+            { current -> isContextUsable(target) &&
+                (if (motionType == MoonBridge.LI_MOTION_TYPE_GYRO) target.gyroListener else target.accelListener) === current }
+        )
+
+        if (motionType == MoonBridge.LI_MOTION_TYPE_GYRO && controllerNumber.toInt() == 0) {
+            target.controllerGyroRoutingParticipated = true
+        }
+
+        // Register before dropping anything, so a refused registration leaves the working
+        // listener in place instead of killing motion input outright.
+        if (sm.registerListener(listener, sensor, 1000000 / effectiveReportRateHz)) {
+            val replaced = mutableListOf<Pair<InputDeviceContext, SensorEventListener>>()
+            withControllerInputLock {
+                // Publish one owner atomically, including siblings sharing this slot.
+                for (deviceContext in matchingContexts) {
+                    detachMotionListener(deviceContext, motionType)?.let { replaced.add(deviceContext to it) }
+                }
+                when (motionType) {
+                    MoonBridge.LI_MOTION_TYPE_ACCEL -> target.accelListener = listener
+                    MoonBridge.LI_MOTION_TYPE_GYRO -> target.gyroListener = listener
+                }
+            }
+            replaced.forEach { (context, old) -> context.sensorManager?.unregisterListener(old) }
+            for (deviceContext in matchingContexts) {
+                backgroundThreadHandler.removeCallbacks(deviceContext.enableSensorRunnable)
+            }
+        } else if (motionType == MoonBridge.LI_MOTION_TYPE_GYRO) {
+            // A refused registration never delivers samples, so the phantom-gyro
+            // liveness detector can't rescue this one.
+            LimeLog.warning("Failed to register gyroscope for controller $controllerNumber")
+            gyroManager.onControllerGyroRegistrationFailed(controllerNumber)
+        } else {
+            LimeLog.warning("Failed to register accelerometer for controller $controllerNumber")
+        }
+    }
+
+    internal fun unregisterMotionListener(context: InputDeviceContext, motionType: Byte) {
+        detachMotionListener(context, motionType)?.let { context.sensorManager?.unregisterListener(it) }
+    }
+
+    private fun detachMotionListener(context: InputDeviceContext, motionType: Byte): SensorEventListener? =
+        synchronized(arrivalMetadataLock) {
+            when (motionType) {
+                MoonBridge.LI_MOTION_TYPE_ACCEL -> context.accelListener.also { context.accelListener = null }
+                MoonBridge.LI_MOTION_TYPE_GYRO -> context.gyroListener.also { context.gyroListener = null }
+                else -> null
+            }
+        }
+
+    // ========== Delegation to Managers ==========
+
+    fun setGyroAssistantMode(mode: GyroAssistantMode) =
+        gyroManager.setAssistantMode(mode)
+
+    fun onSensorsReenabled() =
+        gyroManager.onSensorsReenabled()
+
+    fun hasAnyController(): Boolean =
+        gyroManager.hasAnyController()
+
+    fun hasRumbleCapableController(): Boolean =
+        hapticsCoordinator.hasRumbleCapableController()
+
+    fun handleRumble(controllerNumber: Short, lowFreqMotor: Short, highFreqMotor: Short) =
+        hapticsCoordinator.submitHost(controllerNumber, lowFreqMotor, highFreqMotor)
+
+    fun handleTestRumble(controllerNumber: Short, lowFreqMotor: Short, highFreqMotor: Short) =
+        hapticsCoordinator.submitTest(controllerNumber, lowFreqMotor, highFreqMotor)
+
+    fun submitAudioHaptics(
+        continuousLow: Float,
+        continuousHigh: Float,
+        transientLow: Float,
+        transientHigh: Float,
+        transientDurationMs: Int,
+        hasTransient: Boolean,
+        continuousChanged: Boolean
+    ) = hapticsCoordinator.submitAudio(
+        continuousLow,
+        continuousHigh,
+        transientLow,
+        transientHigh,
+        transientDurationMs,
+        hasTransient,
+        continuousChanged
+    )
+
+    fun submitAudioRumble(
+        lowFrequency: Float,
+        highFrequency: Float,
+        durationMs: Int,
+        continuous: Boolean
+    ) = hapticsCoordinator.submitLegacyAudio(
+        lowFrequency,
+        highFrequency,
+        durationMs,
+        continuous
+    )
+
+    fun stopAudioRumble() =
+        hapticsCoordinator.stopAudio()
+
+    fun submitLegacyDeviceRumble(lowFrequency: Short, highFrequency: Short) =
+        hapticsCoordinator.submitLegacyDeviceRumble(lowFrequency, highFrequency)
+
+    fun playDeviceTouchHaptic(lowFrequency: Short, highFrequency: Short, durationMs: Int) =
+        hapticsCoordinator.playDeviceTouchHaptic(lowFrequency, highFrequency, durationMs)
+
+    fun setDeviceTouchAudioCallbacks(
+        onPreemptRequested: (() -> Boolean)?,
+        onFinished: (() -> Unit)?
+    ) = hapticsCoordinator.setDeviceTouchAudioCallbacks(onPreemptRequested, onFinished)
+
+    internal fun claimDeviceVibratorForAudio(): DeviceVibrationCoordinator.AudioClaimResult =
+        hapticsCoordinator.claimDeviceVibratorForAudio()
+
+    internal fun releaseDeviceVibratorFromAudio() =
+        hapticsCoordinator.releaseDeviceVibratorFromAudio()
+
+    fun refreshAudioRumbleWatchdog() =
+        hapticsCoordinator.refreshAudioWatchdog()
+
+    fun handleRumbleTriggers(controllerNumber: Short, leftTrigger: Short, rightTrigger: Short) =
+        hapticsCoordinator.submitHostTriggers(controllerNumber, leftTrigger, rightTrigger)
+
+    fun handleSetAdaptiveTriggers(
+        controllerNumber: Short,
+        eventFlags: Byte,
+        typeLeft: Byte,
+        typeRight: Byte,
+        left: ByteArray,
+        right: ByteArray
+    ) = hapticsCoordinator.submitHostAdaptiveTriggers(
+        controllerNumber,
+        eventFlags,
+        typeLeft,
+        typeRight,
+        left,
+        right
+    )
+
+    fun handleSetControllerLED(controllerNumber: Short, r: Byte, g: Byte, b: Byte) =
+        rumbleManager.handleSetControllerLED(controllerNumber, r, g, b)
+
+    fun handleDs5HapticsIr(frame: com.limelight.nvstream.Ds5HapticsIrFrame) =
+        hapticsCoordinator.submitDs5HapticsIr(frame)
+
+    fun handleDs5HapticsIrExtended(frame: com.limelight.nvstream.Ds5HapticsIrExtendedFrame) =
+        hapticsCoordinator.submitDs5HapticsIrExtended(frame)
+
+    fun handleDs5HapticsPcm(frame: Ds5HapticsPcmFrame) {
+        hapticsCoordinator.submitDs5HapticsPcm(frame)
+    }
+
+    fun handleDs5HapticsState(controllerNumber: Short, state: Ds5HapticsState) {
+        hapticsCoordinator.submitDs5HapticsState(controllerNumber, state)
+    }
+}

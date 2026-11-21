@@ -1,0 +1,3722 @@
+@file:Suppress("DEPRECATION")
+package com.limelight
+
+import java.io.File
+import java.io.FileNotFoundException
+import java.io.IOException
+import java.io.StringReader
+import java.net.UnknownHostException
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.atomic.AtomicReference
+import kotlin.math.roundToInt
+
+import com.bumptech.glide.Glide
+import com.bumptech.glide.load.DecodeFormat
+import com.bumptech.glide.load.engine.DiskCacheStrategy
+import com.bumptech.glide.load.resource.bitmap.DownsampleStrategy
+import android.graphics.drawable.Drawable
+import com.bumptech.glide.request.FutureTarget
+import com.bumptech.glide.request.RequestOptions
+import com.bumptech.glide.request.target.CustomTarget
+import com.bumptech.glide.request.target.Target
+import com.bumptech.glide.request.transition.Transition
+import com.bumptech.glide.signature.ObjectKey
+import com.limelight.ui.ThemedActivity
+import com.limelight.utils.AppTheme
+import com.limelight.unlock.HostUnlockCredentialStore
+import com.limelight.unlock.HostUnlockUi
+import com.limelight.binding.PlatformBinding
+import com.limelight.binding.crypto.AndroidCryptoProvider
+import com.limelight.computers.ComputerManagerService
+import com.limelight.computers.CenterDirectory
+import com.limelight.computers.PairStatePreflight
+import com.limelight.networkquality.NetworkQualitySheet
+import com.limelight.networkquality.StreamDeviceDisplay
+import com.limelight.networkquality.StreamNetworkQuality
+import com.limelight.networkquality.StreamNetworkQualityStore
+import com.limelight.networkquality.StreamNetworkRecommendation
+import com.limelight.networkquality.StreamNetworkTestResult
+import com.limelight.networkquality.supportsNetworkQualityProbe
+import com.limelight.dialogs.AddressSelectionDialog
+import com.limelight.grid.PcGridAdapter
+import com.limelight.grid.assets.DiskAssetLoader
+import com.limelight.nvstream.http.ComputerDetails
+import com.limelight.nvstream.http.NvApp
+import com.limelight.nvstream.http.NvHTTP
+import com.limelight.nvstream.http.PairingManager
+import com.limelight.nvstream.http.PairingManager.PairState
+import com.limelight.nvstream.wol.WakeOnLanSender
+import com.limelight.perfhud.PerfHudDensity
+import com.limelight.preferences.AddComputerManually
+import com.limelight.preferences.BackgroundSource
+import com.limelight.utils.background.PipwImages
+import com.limelight.utils.background.PipwImageStore
+import com.limelight.utils.background.BackgroundImageExport
+import com.limelight.preferences.CustomResolutionsStore
+import com.limelight.preferences.ResolutionValidator
+import com.limelight.preferences.GlPreferences
+import com.limelight.preferences.PreferenceConfiguration
+import com.limelight.preferences.StreamSettings
+import com.limelight.ui.AdapterFragment
+import com.limelight.ui.AdapterFragmentCallbacks
+import com.limelight.ui.CenterDeviceView
+import com.limelight.ui.FeatureGuideRegistry
+import com.limelight.ui.MoonWheelDrawable
+import com.limelight.ui.PixelMapBackgroundDrawable
+import com.limelight.ui.UiDismissKeyHandler
+import com.limelight.ui.ViewFeatureGuide
+import com.limelight.ui.ViewFeatureGuideStep
+import com.limelight.utils.AboutDialogLauncher
+import com.limelight.utils.AnalyticsManager
+import com.limelight.utils.AppDialogStyler
+import com.limelight.utils.AppActionSheet
+import com.limelight.utils.AppCacheManager
+import com.limelight.utils.BgAccent
+import com.limelight.utils.CacheHelper
+import com.limelight.utils.HostCacheKey
+import com.limelight.utils.ConfigurationSyncScheduler
+import com.limelight.utils.Dialog
+import com.limelight.utils.easytier.EasyTierController
+import com.limelight.utils.HelpLauncher
+import com.limelight.utils.Iperf3Tester
+import com.limelight.utils.NetHelper
+import com.limelight.utils.ServerHelper
+import com.limelight.utils.ShortcutHelper
+import com.limelight.utils.SpinnerDialog
+import com.limelight.utils.UiHelper
+import com.limelight.utils.UpdateManager
+import com.squareup.seismic.ShakeDetector
+
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runInterruptible
+import kotlinx.coroutines.withContext
+
+import com.google.zxing.integration.android.IntentIntegrator
+
+import org.json.JSONException
+import org.json.JSONObject
+import org.xmlpull.v1.XmlPullParserException
+
+import android.annotation.SuppressLint
+import android.app.ActivityManager
+import android.app.AlertDialog
+import android.content.BroadcastReceiver
+import android.content.ComponentName
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.content.ServiceConnection
+import android.content.SharedPreferences
+import android.content.res.ColorStateList
+import android.content.res.Configuration
+import android.graphics.Bitmap
+import android.graphics.Color
+import android.graphics.Typeface
+import android.graphics.drawable.ColorDrawable
+import android.hardware.SensorManager
+import android.net.Uri
+import android.net.VpnService
+import android.opengl.GLSurfaceView
+import android.os.Build
+import android.os.Bundle
+import android.os.Environment
+import android.os.Handler
+import android.os.IBinder
+import android.os.Looper
+import android.os.SystemClock
+import android.text.format.DateUtils
+import androidx.preference.PreferenceManager
+import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
+import android.animation.ObjectAnimator
+import android.animation.AnimatorSet
+import androidx.core.animation.doOnEnd
+import android.view.animation.DecelerateInterpolator
+import android.provider.Settings
+import android.view.GestureDetector
+import android.view.Gravity
+import android.view.KeyEvent
+import android.view.MotionEvent
+import android.view.View
+import android.view.ViewGroup
+import android.view.animation.AnimationUtils
+import android.view.animation.LayoutAnimationController
+import android.widget.AbsListView
+import android.widget.AdapterView
+import android.widget.GridView
+import android.widget.ImageButton
+import android.widget.ImageView
+import android.widget.LinearLayout
+import android.widget.EditText
+import android.widget.FrameLayout
+import android.widget.PopupWindow
+import android.widget.Space
+import android.widget.TextView
+import android.widget.Toast
+import androidx.annotation.RequiresApi
+
+import javax.microedition.khronos.egl.EGLConfig
+import javax.microedition.khronos.egl.EGL10
+import javax.microedition.khronos.opengles.GL10
+
+import jp.wasabeef.glide.transformations.BlurTransformation
+import jp.wasabeef.glide.transformations.ColorFilterTransformation
+import androidx.core.content.ContextCompat
+import androidx.core.content.edit
+import androidx.core.net.toUri
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+
+internal class PcViewExitGate(private val timeoutMillis: Long = 2_000L) {
+    private var armedUntil = 0L
+
+    fun requestExit(nowMillis: Long): Boolean {
+        if (armedUntil != 0L && nowMillis <= armedUntil) {
+            armedUntil = 0L
+            return true
+        }
+        armedUntil = nowMillis + timeoutMillis
+        return false
+    }
+
+    fun cancel() {
+        armedUntil = 0L
+    }
+}
+
+class PcView : ThemedActivity(), AdapterFragmentCallbacks, ShakeDetector.Listener, EasyTierController.VpnPermissionCallback {
+
+    // Constants
+    companion object {
+        private const val REFRESH_DEBOUNCE_DELAY = 150L
+        private const val STARTUP_UPDATE_CHECK_DELAY = 5000L
+        private const val STARTUP_DIALOG_GAP_DELAY = 250L
+        private const val SHAKE_DEBOUNCE_INTERVAL = 3000L
+        private const val MAX_DAILY_REFRESH = 7
+        private const val VPN_PERMISSION_REQUEST_CODE = 101
+        private const val ADD_COMPUTER_REQUEST_CODE = 102
+
+        private const val REFRESH_PREF_NAME = "RefreshLimit"
+        private const val REFRESH_COUNT_KEY = "refresh_count"
+        private const val REFRESH_DATE_KEY = "refresh_date"
+        private const val SCENE_PREF_NAME = "SceneConfigs"
+        private const val SCENE_KEY_PREFIX = "scene_"
+
+        // Menu item IDs
+        private const val PAIR_ID = 2
+        private const val UNPAIR_ID = 3
+        private const val WOL_ID = 4
+        private const val DELETE_ID = 5
+        private const val RESUME_ID = 6
+        private const val QUIT_ID = 7
+        private const val VIEW_DETAILS_ID = 8
+        private const val FULL_APP_LIST_ID = 9
+        private const val TEST_NETWORK_ID = 10
+        private const val GAMESTREAM_EOL_ID = 11
+        private const val SLEEP_ID = 12
+        private const val IPERF3_TEST_ID = 13
+        private const val SECONDARY_SCREEN_ID = 14
+        private const val DISABLE_IPV6_ID = 15
+        private const val OPEN_WEBUI_ID = 16
+        private const val MORE_ACTIONS_ID = 17
+        private const val NETWORK_QUALITY_ID = 18
+        private const val ADD_PC_MANUALLY_ID = 19
+        private const val ADD_PC_QR_SCAN_ID = 20
+        private const val AUTO_UNLOCK_ID = 21
+
+    }
+
+    // UI Components
+    private val hostUnlockUi by lazy { HostUnlockUi(this) }
+    private var noPcFoundLayout: View? = null
+    private lateinit var pcGridAdapter: PcGridAdapter
+    private var pcListView: AbsListView? = null
+    private var backgroundImageView: ImageView? = null
+    /** 当前主题 overlay 已使用的背景色相桶（用于检测背景刷新后的桶位变化）。 */
+    private var themedBgAccentBucket = Int.MIN_VALUE
+    private var topSafeArea: Space? = null
+
+    // State
+    private var isFirstLoad = true
+    private var freezeUpdates = false
+    private var runningPolling = false
+    private var inForeground = false
+    private var completeOnCreateCalled = false
+    private var pendingSplashFadeIn = true
+    private var backgroundSourceDialogShowing = false
+    private var startupUpdateCheckPending = false
+    private var startupUpdateCheckRan = false
+    private var lastShakeTime = 0L
+    private var activeSceneNumber: Int? = null
+    private var pendingAddedComputerUuid: String? = null
+    private val exitGate = PcViewExitGate()
+
+    // Helpers
+    private lateinit var shortcutHelper: ShortcutHelper
+    private var easyTierController: EasyTierController? = null
+    private var analyticsManager: AnalyticsManager? = null
+    private var shakeDetector: ShakeDetector? = null
+    private var currentAddressDialog: AddressSelectionDialog? = null
+    private var backgroundImageRefreshReceiver: BroadcastReceiver? = null
+
+    // Single Job owning the current async background load. Replacing it on every
+    // reload cancels any in-flight Glide work from the previous source so a late
+    // completion cannot overpaint the newer selection.
+    private var backgroundLoadJob: Job? = null
+    private val backgroundTargetLock = Any()
+    private var backgroundLoadGeneration = 0
+    private var backgroundFutureTarget: FutureTarget<Bitmap>? = null
+    /** 背景显示层的异步 Glide 请求（CustomTarget），换代时显式取消，防旧图迟到覆盖新图。 */
+    private var backgroundDisplayTarget: Target<Drawable>? = null
+    private var pipwBackgroundLease: PipwImageStore.Lease? = null
+    private var displayedBackgroundKey: String? = null
+    private var lastBackgroundSource: BackgroundSource? = null
+    private var backgroundPrefsListener: SharedPreferences.OnSharedPreferenceChangeListener? = null
+
+    // Managers
+    private var managerBinder: ComputerManagerService.ComputerManagerBinder? = null
+
+    // Handlers
+    private val refreshHandler = Handler(Looper.getMainLooper())
+    private var pendingRefreshRunnable: Runnable? = null
+
+    // 主线程作用域，用于收集 ComputerManagerService 的 Flow。onDestroy 时 cancel。
+    private val uiScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private var pollingCollectJob: Job? = null
+
+    lateinit var clientName: String
+
+    private val serviceConnection = object : ServiceConnection {
+        override fun onServiceConnected(className: ComponentName, binder: IBinder) {
+            val localBinder = binder as ComputerManagerService.ComputerManagerBinder
+
+            // 立即赋值并启动轮询，让 first-poll 的 SSL 握手与下面的预热并行——
+            // pollComputer 路径只依赖 idManager.uniqueId（service.onCreate 已同步初始化），
+            // 证书在 NvHTTP 第一次握手时才需要。原本在这里串行 waitForReady() +
+            // getClientCertificate() 会把证书 IO/RSA keygen 的 100~2000ms 全部摞在
+            // "PC 卡片亮起绿点" 的关键路径上，没必要。
+            //
+            // 即便预热慢于首次 tryPollIp，也只是把"加密初始化"这段时间从串行变成
+            // 与网络往返重叠，最坏情况持平、最佳情况节省整段证书时间。
+            managerBinder = localBinder
+            showPendingAddedComputer()
+            startComputerUpdates()
+
+            // 后台预热：等 DiscoveryService bind（mDNS 可能还没好），并把客户端证书
+            // 提到内存。这两件事都不在已知 PC 的 first-poll 关键路径上。
+            uiScope.launch(Dispatchers.IO) {
+                localBinder.waitForReady()
+                AndroidCryptoProvider(this@PcView).getClientCertificate()
+            }
+        }
+
+        override fun onServiceDisconnected(className: ComponentName) {
+            managerBinder = null
+            stopComputerUpdates()
+        }
+    }
+
+    // Lifecycle Methods
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        // Install the SplashScreen API BEFORE super.onCreate so the system can hand off
+        // the launch theme. On API 31+ this is the system SplashScreen; on lower APIs the
+        // androidx core-splashscreen backport shows the static icon over splash_bg and then
+        // hands control to postSplashScreenTheme (AppTheme).
+        val splashScreen = installSplashScreen()
+        themedBgAccentBucket = BgAccent.bucket(this)
+        // Hold the splash on screen until PcView's real content view is inflated
+        // (completeOnCreate -> initializeViews -> setContentView(activity_pc_view)).
+        // Without this, the system fires onExitAnimationListener as soon as the
+        // GL-detection surfaceView reports its first frame, which is just a tiny
+        // black surface — causing a visible "black flash" before the real UI.
+        // Safety cap: 1500ms — never block UI longer than that even on slow GL probes.
+        val splashDeadline = SystemClock.uptimeMillis() + 1500L
+        splashScreen.setKeepOnScreenCondition {
+            !completeOnCreateCalled && SystemClock.uptimeMillis() < splashDeadline
+        }
+        // 自定义退场：纯淡出 + 极轻微的放大（1f→1.04f），用 Decelerate 收尾。
+        // 之前的 AnticipateInterpolator(1.2f) + scale 1→1.15→0.7 是“反向回弹再急速缩小”
+        // 的弹射动画，与 PcView 内容淡入并行时观感非常跳。改为单调减速、轻位移，
+        // 让 splash 静静淡出、PcView 同步淡入，形成连贯的 cross-fade。
+        splashScreen.setOnExitAnimationListener { provider ->
+            val splashView = provider.view
+            // provider.iconView is declared non-null in androidx core-splashscreen,
+            // but on some OEM ROMs (e.g. Xiaomi HyperOS / Android 16) the system
+            // SplashScreenView.getIconView() returns null and the Kotlin intrinsic
+            // null-check (or the underlying NPE) crashes the launch. Guard it.
+            val icon: View? = try { provider.iconView } catch (_: Throwable) { null }
+            val animators = mutableListOf<android.animation.Animator>(
+                ObjectAnimator.ofFloat(splashView, View.ALPHA, 1f, 0f)
+            )
+            if (icon != null) {
+                animators += ObjectAnimator.ofFloat(icon, View.SCALE_X, 1f, 1.04f)
+                animators += ObjectAnimator.ofFloat(icon, View.SCALE_Y, 1f, 1.04f)
+                animators += ObjectAnimator.ofFloat(icon, View.ALPHA, 1f, 0f)
+            }
+            val set = AnimatorSet().apply {
+                duration = 280L
+                interpolator = DecelerateInterpolator(1.6f)
+                playTogether(animators)
+            }
+            set.doOnEnd { provider.remove() }
+            set.start()
+        }
+        super.onCreate(savedInstanceState)
+        ConfigurationSyncScheduler.runNow(this)
+
+        easyTierController = EasyTierController(this, this)
+        inForeground = true
+
+        val glPrefs = GlPreferences.readPreferences(this)
+        if (glPrefs.savedFingerprint != Build.FINGERPRINT || glPrefs.glRenderer.isEmpty()) {
+            initGlRenderer(glPrefs)
+        } else {
+            LimeLog.info("Cached GL Renderer: " + glPrefs.glRenderer)
+            completeOnCreate()
+        }
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        if (completeOnCreateCalled) {
+            initializeViews()
+        }
+        AboutDialogLauncher.onConfigurationChanged(this, newConfig)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        UiHelper.showDecoderCrashDialog(this)
+        inForeground = true
+        startComputerUpdates()
+
+        analyticsManager?.startUsageTracking()
+        startShakeDetector()
+    }
+
+    @Deprecated("Deprecated in Android")
+    override fun onBackPressed() {
+        requestPcViewExit()
+    }
+
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (event.action == KeyEvent.ACTION_DOWN &&
+            event.keyCode != KeyEvent.KEYCODE_BUTTON_B &&
+            event.keyCode != KeyEvent.KEYCODE_ESCAPE &&
+            event.keyCode != KeyEvent.KEYCODE_BACK
+        ) {
+            exitGate.cancel()
+        }
+
+        if (event.keyCode == KeyEvent.KEYCODE_BUTTON_B ||
+            event.keyCode == KeyEvent.KEYCODE_ESCAPE
+        ) {
+            if (super.dispatchKeyEvent(event)) {
+                exitGate.cancel()
+                return true
+            }
+            return UiDismissKeyHandler.handle(
+                event.action,
+                event.keyCode,
+                ::requestPcViewExit,
+                dismissOnBack = false
+            )
+        }
+        return super.dispatchKeyEvent(event)
+    }
+
+    private fun requestPcViewExit() {
+        if (centerHome?.let { it.visibility == View.VISIBLE && it.backToDevices() } == true) {
+            exitGate.cancel()
+            return
+        }
+        if (returnToCenterOnBack) {
+            exitGate.cancel()
+            showCenterHome()
+            return
+        }
+        if (exitGate.requestExit(SystemClock.uptimeMillis())) {
+            finish()
+        } else {
+            showToast(getString(R.string.pcview_press_back_again_to_exit))
+        }
+    }
+
+    override fun onPause() {
+        super.onPause()
+        exitGate.cancel()
+        inForeground = false
+        stopComputerUpdates()
+
+        analyticsManager?.stopUsageTracking()
+        stopShakeDetector()
+    }
+
+    override fun onStop() {
+        super.onStop()
+        Dialog.closeDialogs()
+    }
+
+    override fun onDestroy() {
+        AboutDialogLauncher.release(this)
+        UpdateManager.cleanup()
+        hostUnlockUi.release()
+        super.onDestroy()
+
+        uiScope.cancel()
+        easyTierController?.onDestroy()
+        if (managerBinder != null) {
+            unbindService(serviceConnection)
+        }
+        if (currentAddressDialog != null) {
+            currentAddressDialog?.dismiss()
+            currentAddressDialog = null
+        }
+        unregisterBackgroundReceiver()
+        unregisterBackgroundPrefsListener()
+        cancelPreviousBackgroundLoad()
+        pipwBackgroundLease?.close()
+        pipwBackgroundLease = null
+
+        analyticsManager?.cleanup()
+        if (pendingRefreshRunnable != null) {
+            refreshHandler.removeCallbacks(pendingRefreshRunnable!!)
+            pendingRefreshRunnable = null
+        }
+    }
+
+    // Initialization Methods
+
+    private fun initGlRenderer(glPrefs: GlPreferences) {
+        val surfaceView = GLSurfaceView(this)
+        // This surface only queries GL_RENDERER. The default chooser insists on
+        // RGB888 with no alpha and a depth buffer, which some devices lack.
+        surfaceView.setEGLConfigChooser { egl, display ->
+            val attributes = intArrayOf(
+                EGL10.EGL_RED_SIZE, 4,
+                EGL10.EGL_GREEN_SIZE, 4,
+                EGL10.EGL_BLUE_SIZE, 4,
+                EGL10.EGL_SURFACE_TYPE, EGL10.EGL_WINDOW_BIT,
+                EGL10.EGL_NONE
+            )
+            val configs = arrayOfNulls<EGLConfig>(1)
+            val count = IntArray(1)
+            check(egl.eglChooseConfig(display, attributes, configs, configs.size, count) && count[0] > 0) {
+                "No EGL window config available for renderer probe"
+            }
+            checkNotNull(configs[0])
+        }
+        surfaceView.setRenderer(object : GLSurfaceView.Renderer {
+            override fun onSurfaceCreated(gl10: GL10, eglConfig: EGLConfig) {
+                glPrefs.glRenderer = gl10.glGetString(GL10.GL_RENDERER)
+                glPrefs.savedFingerprint = Build.FINGERPRINT
+                glPrefs.writePreferences()
+                LimeLog.info("Fetched GL Renderer: " + glPrefs.glRenderer)
+                runOnUiThread { completeOnCreate() }
+            }
+
+            override fun onSurfaceChanged(gl10: GL10, i: Int, i1: Int) {}
+
+            override fun onDrawFrame(gl10: GL10) {}
+        })
+        setContentView(surfaceView)
+    }
+
+    @SuppressLint("UnspecifiedRegisterReceiverFlag")
+    private fun completeOnCreate() {
+        completeOnCreateCalled = true
+        shortcutHelper = ShortcutHelper(this)
+        UiHelper.setLocale(this)
+
+        analyticsManager = AnalyticsManager.getInstance(this)
+        analyticsManager?.logAppLaunch()
+        // 延后 5 秒再做更新检查，避免一打开 PcView 就被对话框打断浏览
+        scheduleStartupUpdateCheck()
+
+        bindService(Intent(this, ComputerManagerService::class.java), serviceConnection,
+            BIND_AUTO_CREATE
+        )
+
+        pcGridAdapter = PcGridAdapter(this, PreferenceConfiguration.readPreferences(this))
+        pcGridAdapter.setAvatarClickListener { computer, itemView -> handleAvatarClick(computer, itemView) }
+
+        initShakeDetector()
+        registerBackgroundReceiver()
+        registerBackgroundPrefsListener()
+        initializeViews()
+    }
+
+    private fun initializeViews() {
+        val loadGeneration = cancelPreviousBackgroundLoad()
+        setContentView(R.layout.activity_pc_view)
+        UiHelper.notifyNewRootView(this)
+
+        // PcView 根布局从 0 淡入，与 splash 退场同时开始，形成 cross-fade：
+        // - splash 退场 280ms，内容淡入 320ms + Decelerate，后者略长以接住视觉重量
+        // - splash_bg 与 advance_setting_background 同色，背景层不会闪烁
+        // - 仅首次 inflation 执行，旋转/配置变化不重复
+        if (pendingSplashFadeIn) {
+            pendingSplashFadeIn = false
+            findViewById<View>(R.id.pcViewRootLayout)?.let { root ->
+                root.alpha = 0f
+                root.animate()
+                    .alpha(1f)
+                    .setDuration(320L)
+                    .setInterpolator(DecelerateInterpolator(1.4f))
+                    .start()
+            }
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            setShouldDockBigOverlays(false)
+        }
+
+        topSafeArea = findViewById(R.id.topSafeArea)
+        topSafeArea?.let {
+            ViewCompat.setOnApplyWindowInsetsListener(it) { v, windowInsets ->
+                val insets = windowInsets.getInsets(WindowInsetsCompat.Type.systemBars())
+                v.layoutParams.height = insets.top
+                windowInsets
+            }
+        }
+
+        // Keep the edge-anchored scene rail clear of navigation bars and display cutouts.
+        findViewById<View>(R.id.scenePresetContainer)?.let { sceneRail ->
+            val initialParams = sceneRail.layoutParams as ViewGroup.MarginLayoutParams
+            val baseBottomMargin = initialParams.bottomMargin
+            val baseEndMargin = initialParams.marginEnd
+            ViewCompat.setOnApplyWindowInsetsListener(sceneRail) { v, windowInsets ->
+                val systemBars = windowInsets.getInsets(WindowInsetsCompat.Type.systemBars())
+                val displayCutout = windowInsets.getInsets(WindowInsetsCompat.Type.displayCutout())
+                val safeBottom = maxOf(systemBars.bottom, displayCutout.bottom)
+                val safeEnd = if (ViewCompat.getLayoutDirection(v) == ViewCompat.LAYOUT_DIRECTION_RTL) {
+                    maxOf(systemBars.left, displayCutout.left)
+                } else {
+                    maxOf(systemBars.right, displayCutout.right)
+                }
+                (v.layoutParams as ViewGroup.MarginLayoutParams).apply {
+                    bottomMargin = baseBottomMargin + safeBottom
+                    marginEnd = baseEndMargin + safeEnd
+                    v.layoutParams = this
+                }
+                windowInsets
+            }
+            ViewCompat.requestApplyInsets(sceneRail)
+        }
+
+        clientName = Settings.Global.getString(contentResolver, "device_name")
+            ?: Build.MODEL
+            ?: "Moonlight V+ Client"
+        backgroundImageView = findViewById(R.id.pcBackgroundImage)
+
+        loadBackgroundImage(loadGeneration)
+        setupBackgroundImageLongPress()
+        initSceneButtons()
+        // Surface any uncaught crash captured by CrashReporter on a previous run
+        // so the user can ship the log back to the dev with one tap.
+        com.limelight.crash.CrashReportPrompt.maybeShow(this)
+
+        pcGridAdapter.updateLayoutWithPreferences(this, PreferenceConfiguration.readPreferences(this))
+        setupButtons()
+        setupAdapterFragment()
+
+        noPcFoundLayout = findViewById(R.id.no_pc_found_layout)
+        addAddComputerCard()
+        updateNoPcFoundVisibility()
+        handleInitialLoad()
+        installCenterHome()
+        if (centerHome?.visibility != View.VISIBLE) {
+            maybeShowBackgroundSourceDialog()
+            maybeShowPcViewFeatureGuide()
+        }
+    }
+
+    private fun maybeShowPcViewFeatureGuide() {
+        ViewFeatureGuide.showWhenReady(
+            activity = this,
+            spec = FeatureGuideRegistry.PcViewDiscovery
+        ) {
+            val hostCard = currentGuideHostCard() ?: return@showWhenReady emptyList()
+
+            buildList {
+                add(ViewFeatureGuideStep(
+                    { currentGuideHostCard() },
+                    getString(R.string.pcview_guide_host_title),
+                    getString(R.string.pcview_guide_host_body)
+                ))
+                findViewById<View>(R.id.pcToolbarMenuButton)?.let {
+                    add(ViewFeatureGuideStep(
+                        it,
+                        getString(R.string.pcview_guide_more_title),
+                        getString(R.string.pcview_guide_more_body)
+                    ))
+                }
+                findViewById<View>(R.id.scenePresetContainer)?.let {
+                    add(ViewFeatureGuideStep(
+                        it,
+                        getString(R.string.pcview_guide_scene_title),
+                        getString(R.string.pcview_guide_scene_body)
+                    ))
+                }
+            }
+        }
+    }
+
+    private fun currentGuideHostCard(): View? {
+        val list = pcListView ?: return null
+        for (childIndex in 0 until list.childCount) {
+            val adapterPosition = list.firstVisiblePosition + childIndex
+            val item = pcGridAdapter.getItem(adapterPosition) as? ComputerObject ?: continue
+            if (!PcGridAdapter.isAddComputerCard(item)) {
+                return list.getChildAt(childIndex)
+            }
+        }
+        return null
+    }
+
+    private fun setupButtons() {
+        val settingsButton = findViewById<ImageButton>(R.id.settingsButton)
+        val aboutButton = findViewById<ImageButton>(R.id.aboutButton)
+        val easyTierButton = findViewById<ImageButton>(R.id.easyTierControlButton)
+        val toolbarMenuButton = findViewById<ImageButton>(R.id.pcToolbarMenuButton)
+
+        refreshAccentTintedToolbarIcons()
+        settingsButton.setOnClickListener { startActivity(Intent(this, StreamSettings::class.java)) }
+
+        aboutButton?.setOnClickListener { AboutDialogLauncher.show(this) }
+        easyTierButton?.setOnClickListener { showEasyTierControlDialog() }
+        findViewById<ImageButton>(R.id.centerDevicesButton)?.setOnClickListener { showCenterHome() }
+        toolbarMenuButton?.setOnClickListener { showPcToolbarMenu(it) }
+    }
+
+    private var centerDirectory: CenterDirectory? = null
+    private var centerJob: Job? = null
+    private var centerHome: CenterDeviceView? = null
+    private var registeredDevices = emptyList<CenterDirectory.Device>()
+    private var returnToCenterOnBack = false
+    private var legacyBarAppearance: Pair<Boolean, Boolean>? = null
+
+    private fun installCenterHome() {
+        val container = findViewById<FrameLayout>(android.R.id.content)
+        val legacy = findViewById<View>(R.id.pcViewRootLayout)
+        centerHome = CenterDeviceView(
+            context = this,
+            refresh = ::refreshCenterDevices,
+            centerSettings = ::openCenterSettings,
+            localNetwork = {
+                centerHome?.visibility = View.GONE
+                legacy.visibility = View.VISIBLE
+                val bars = WindowCompat.getInsetsController(window, window.decorView)
+                legacyBarAppearance?.let { (status, navigation) ->
+                    bars.isAppearanceLightStatusBars = status
+                    bars.isAppearanceLightNavigationBars = navigation
+                }
+                legacyBarAppearance = null
+                returnToCenterOnBack = true
+                ViewCompat.requestApplyInsets(legacy)
+                maybeShowBackgroundSourceDialog()
+                maybeShowPcViewFeatureGuide()
+            },
+            streamSettings = { startActivity(Intent(this, StreamSettings::class.java)) },
+            deviceAction = ::connectCenterDevice,
+        ).also { page ->
+            page.visibility = View.GONE
+            container.addView(page, FrameLayout.LayoutParams(-1, -1))
+        }
+        renderCenterHome()
+        if (!packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_LEANBACK) && !returnToCenterOnBack) {
+            showCenterHome()
+        }
+    }
+
+    private fun showCenterHome() {
+        val page = centerHome ?: return
+        val bars = WindowCompat.getInsetsController(window, window.decorView)
+        if (legacyBarAppearance == null) {
+            legacyBarAppearance = bars.isAppearanceLightStatusBars to bars.isAppearanceLightNavigationBars
+        }
+        bars.isAppearanceLightStatusBars = true
+        bars.isAppearanceLightNavigationBars = true
+        page.visibility = View.VISIBLE
+        findViewById<View>(R.id.pcViewRootLayout)?.visibility = View.INVISIBLE
+        ViewCompat.requestApplyInsets(page)
+        returnToCenterOnBack = false
+        if (centerDirectory != null) refreshCenterDevices()
+    }
+
+    private fun renderCenterHome(loading: Boolean = false) {
+        centerHome?.update(registeredDevices, centerDirectory != null, loading)
+    }
+
+    private fun refreshCenterDevices() {
+        if (centerJob?.isActive == true) return
+        val center = centerDirectory
+        if (center == null) openCenterSettings() else loadCenterDevices(center, signingIn = false)
+    }
+
+    private fun openCenterSettings() {
+        if (centerJob?.isActive == true) return
+        val session = centerDirectory
+        if (session != null) {
+            AlertDialog.Builder(this)
+                .setTitle(R.string.center_server)
+                .setMessage(session.url.toString())
+                .setNegativeButton(R.string.center_sign_out) { _, _ ->
+                    centerDirectory = null
+                    registeredDevices = emptyList()
+                    renderCenterHome()
+                }
+                .setPositiveButton(android.R.string.ok, null)
+                .show()
+            return
+        }
+        val savedUrl = getSharedPreferences("center", MODE_PRIVATE).getString("url", "")
+        val address = EditText(this).apply {
+            hint = getString(R.string.center_url)
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_URI
+            setSingleLine(true)
+            setText(savedUrl)
+        }
+        val key = EditText(this).apply {
+            hint = getString(R.string.center_key)
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
+            setSingleLine(true)
+        }
+        val fields = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dpToPx(24), dpToPx(8), dpToPx(24), 0)
+            addView(address)
+            addView(key)
+        }
+        AlertDialog.Builder(this)
+            .setTitle(R.string.center_devices)
+            .setView(fields)
+            .setNegativeButton(android.R.string.cancel, null)
+            .setPositiveButton(R.string.center_sign_in) { _, _ ->
+                val directory = runCatching { CenterDirectory(address.text.toString(), key.text.toString().trim()) }
+                    .getOrNull()
+                key.text.clear()
+                if (directory == null) showToast(getString(R.string.center_login_failed))
+                else loadCenterDevices(directory, signingIn = true)
+            }
+            .show()
+    }
+
+    private fun loadCenterDevices(directory: CenterDirectory, signingIn: Boolean) {
+        renderCenterHome(loading = true)
+        centerJob = uiScope.launch {
+            try {
+                registeredDevices = withContext(Dispatchers.IO) { directory.devices() }
+                centerDirectory = directory
+                if (signingIn) {
+                    getSharedPreferences("center", MODE_PRIVATE).edit { putString("url", directory.url.toString()) }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                showToast(getString(if (signingIn) R.string.center_login_failed else R.string.center_list_failed))
+            } finally {
+                if (!isDestroyed && !isFinishing) renderCenterHome()
+            }
+        }
+    }
+
+    private fun connectCenterDevice(device: CenterDirectory.Device, action: CenterDeviceView.Action) {
+        val directory = centerDirectory ?: return
+        if (!device.online || centerJob?.isActive == true) return
+        val binder = managerBinder ?: run {
+            showToast(getString(R.string.error_manager_not_running))
+            return
+        }
+        val spinner = SpinnerDialog.displayDialog(this, getString(R.string.center_devices),
+            getString(R.string.center_connecting), false)
+        centerJob = uiScope.launch {
+            try {
+                stopComputerUpdatesAndWait()
+                val connection = withContext(Dispatchers.IO) {
+                    val crypto = PlatformBinding.getCryptoProvider(this@PcView)
+                    directory.connect(device, binder.getUniqueId(), clientName, crypto).also {
+                        check(binder.saveCenterComputer(it.computer))
+                    }
+                }
+                when (action) {
+                    CenterDeviceView.Action.DESKTOP -> {
+                        val app = connection.app
+                        if (app != null) startQuickStreamWithNetworkCheck(app, connection.computer)
+                        else openAppList(connection.computer, newlyPaired = true, showHiddenGames = false)
+                    }
+                    CenterDeviceView.Action.APPS ->
+                        openAppList(connection.computer, newlyPaired = true, showHiddenGames = false)
+                    CenterDeviceView.Action.SECONDARY_SCREEN -> doSecondaryScreenStream(connection.computer)
+                    CenterDeviceView.Action.DEVICE_OPTIONS -> showHostActionSheet(connection.computer)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                showToast(getString(R.string.center_connect_failed))
+            } finally {
+                spinner.dismiss()
+                if (!isDestroyed && !isFinishing) startComputerUpdates()
+            }
+        }
+    }
+
+    private fun showPcToolbarMenu(anchor: View) {
+        val isLandscape = resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+        val popupWidth = dpToPx(if (isLandscape) 256 else 236)
+
+        lateinit var popup: PopupWindow
+        val menu = object : LinearLayout(this) {
+            override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+                if (UiDismissKeyHandler.handle(event.action, event.keyCode, popup::dismiss)) {
+                    return true
+                }
+                return super.dispatchKeyEvent(event)
+            }
+        }.apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dpToPx(4), dpToPx(6), dpToPx(4), dpToPx(6))
+            background = ContextCompat.getDrawable(this@PcView, R.drawable.pc_toolbar_menu_panel_bg)
+        }
+
+        popup = PopupWindow(menu, popupWidth, ViewGroup.LayoutParams.WRAP_CONTENT, true).apply {
+            isOutsideTouchable = true
+            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                elevation = dpToPx(8).toFloat()
+            }
+        }
+
+        addToolbarMenuItem(
+            menu,
+            R.drawable.ic_restore,
+            getString(R.string.pcview_toolbar_restore_session)
+        ) {
+            popup.dismiss()
+            restoreLastSession()
+        }
+
+        val showUnpaired = pcGridAdapter.isShowUnpairedDevices()
+        addToolbarMenuItem(
+            menu,
+            if (showUnpaired) R.drawable.ic_visibility_off else R.drawable.ic_visibility,
+            getString(
+                if (showUnpaired) R.string.pcview_toolbar_toggle_unpaired_hide
+                else R.string.pcview_toolbar_toggle_unpaired_show
+            )
+        ) {
+            popup.dismiss()
+            toggleUnpairedDevices()
+        }
+
+        addToolbarMenuItem(
+            menu,
+            R.drawable.ic_theme_mode,
+            getString(R.string.pcview_toolbar_theme),
+            getThemeSummary(),
+            accent = true
+        ) {
+            popup.dismiss()
+            showAppThemeSheet(this) { recreate() }
+        }
+
+        menu.measure(
+            View.MeasureSpec.makeMeasureSpec(popupWidth, View.MeasureSpec.EXACTLY),
+            View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
+        )
+
+        val anchorLocation = IntArray(2)
+        anchor.getLocationOnScreen(anchorLocation)
+        val screenWidth = resources.displayMetrics.widthPixels
+        val screenHeight = resources.displayMetrics.heightPixels
+        val menuHeight = menu.measuredHeight
+        val anchorLeft = anchorLocation[0]
+        val anchorTop = anchorLocation[1]
+        val anchorRight = anchorLeft + anchor.width
+        val anchorBottom = anchorTop + anchor.height
+
+        val popupX = if (isLandscape) {
+            anchorRight
+        } else {
+            anchorRight - popupWidth
+        }.coerceIn(0, (screenWidth - popupWidth).coerceAtLeast(0))
+        val desiredY = if (anchorBottom + menuHeight > screenHeight) {
+            anchorTop - menuHeight
+        } else {
+            anchorBottom
+        }
+        val popupY = desiredY.coerceIn(0, (screenHeight - menuHeight).coerceAtLeast(0))
+        popup.showAtLocation(anchor.rootView, Gravity.NO_GRAVITY, popupX, popupY)
+    }
+
+    private fun addToolbarMenuItem(
+        parent: LinearLayout,
+        iconRes: Int,
+        title: String,
+        subtitle: String? = null,
+        accent: Boolean = false,
+        onClick: () -> Unit
+    ) {
+        val iconColor = ColorStateList.valueOf(
+            if (accent) UiHelper.accentColor(this)
+            else ContextCompat.getColor(this, R.color.ui_shell_text_secondary)
+        )
+        val titleColor = ContextCompat.getColor(this, R.color.ui_shell_text_primary)
+        val subtitleColor = ContextCompat.getColor(this, R.color.ui_shell_text_secondary)
+
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            isClickable = true
+            isFocusable = true
+            background = ContextCompat.getDrawable(this@PcView, R.drawable.pc_toolbar_menu_item_bg)
+            minimumHeight = dpToPx(if (subtitle == null) 46 else 50)
+            setPadding(dpToPx(10), dpToPx(6), dpToPx(10), dpToPx(6))
+            setOnClickListener { onClick() }
+        }
+
+        row.addView(ImageView(this).apply {
+            setImageResource(iconRes)
+            imageTintList = iconColor
+        }, LinearLayout.LayoutParams(dpToPx(22), dpToPx(22)).apply {
+            marginEnd = dpToPx(10)
+        })
+
+        row.addView(LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(TextView(this@PcView).apply {
+                text = title
+                textSize = 14f
+                typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+                setTextColor(titleColor)
+                includeFontPadding = false
+            }, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ))
+            if (subtitle != null) {
+                addView(TextView(this@PcView).apply {
+                    text = subtitle
+                    textSize = 11f
+                    setTextColor(subtitleColor)
+                    includeFontPadding = false
+                    setPadding(0, dpToPx(3), 0, 0)
+                }, LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                ))
+            }
+        }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+
+        parent.addView(row, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply {
+            topMargin = dpToPx(1)
+            bottomMargin = dpToPx(1)
+        })
+    }
+
+    private fun getThemeSummary(): String = getString(
+        R.string.theme_summary,
+        getThemeModeLabel(AppTheme.getAppThemeMode(this)),
+        getString(if (AppTheme.getAccentMode(this) == AppTheme.ACCENT_MODE_BG)
+            R.string.theme_accent_background else R.string.theme_accent_pink),
+    )
+
+    /**
+     * 背景换桶后重染工具栏上以 ?attr/appAccent 着色的图标。
+     * 矢量在膨胀时一次性解析主题属性，主题 overlay 更新后不会自动重解析。
+     */
+    private fun refreshAccentTintedToolbarIcons() {
+        val tint = ColorStateList.valueOf(UiHelper.accentColor(this))
+        findViewById<ImageButton?>(R.id.settingsButton)?.setImageDrawable(
+            MoonWheelDrawable(
+                density = resources.displayMetrics.density,
+                graphiteColor = ContextCompat.getColor(this, R.color.ui_shell_text_primary),
+                accentColor = UiHelper.accentColor(this)
+            )
+        )
+        findViewById<ImageButton?>(R.id.aboutButton)?.imageTintList = tint
+        findViewById<ImageButton?>(R.id.easyTierControlButton)?.imageTintList = tint
+        findViewById<ImageButton?>(R.id.pcToolbarMenuButton)?.imageTintList =
+            ColorStateList.valueOf(ContextCompat.getColor(this, R.color.ui_shell_text_primary))
+    }
+
+    private fun getThemeModeLabel(mode: String): String {
+        return when (mode) {
+            AppTheme.THEME_MODE_LIGHT -> getString(R.string.pcview_theme_light)
+            AppTheme.THEME_MODE_DARK -> getString(R.string.pcview_theme_dark)
+            else -> getString(R.string.pcview_theme_follow_system)
+        }
+    }
+
+    private fun dpToPx(value: Int): Int {
+        return (value * resources.displayMetrics.density + 0.5f).toInt()
+    }
+
+    private fun setupAdapterFragment() {
+        fragmentManager.beginTransaction()
+                .replace(R.id.pcFragmentContainer, AdapterFragment())
+                .commitAllowingStateLoss()
+    }
+
+    private fun updateNoPcFoundVisibility() {
+        val isEmpty = pcGridAdapter.count == 0 ||
+                (pcGridAdapter.count == 1 && PcGridAdapter.isAddComputerCard(pcGridAdapter.getItem(0) as ComputerObject))
+        noPcFoundLayout?.visibility = if (isEmpty) View.VISIBLE else View.INVISIBLE
+    }
+
+    private fun handleInitialLoad() {
+        if (isFirstLoad) {
+            if (pendingRefreshRunnable != null) {
+                refreshHandler.removeCallbacks(pendingRefreshRunnable!!)
+                pendingRefreshRunnable = null
+            }
+            if (pcListView != null) {
+                pcGridAdapter.notifyDataSetChanged()
+            }
+        } else {
+            debouncedNotifyDataSetChanged()
+        }
+    }
+
+    // Background Image Methods
+    //
+    // Design (issue #263 follow-up refactor): `BackgroundSource` is the single
+    // authority over "where does the wallpaper come from" — it handles pref I/O,
+    // URL construction, TV detection, legacy migration, and broadcasting
+    // refreshes. This class just drives Glide against whatever target the
+    // source returns, and cancels any in-flight load on reload so a stale
+    // request can never overpaint a newer one.
+
+    private fun loadBackgroundImage(existingGeneration: Int? = null, isFromShake: Boolean = false) {
+        if (backgroundImageView == null) return
+
+        val loadGeneration = existingGeneration ?: cancelPreviousBackgroundLoad()
+
+        val orientation = resources.configuration.orientation
+        val resolved = BackgroundSource.resolveCurrentTarget(this, orientation)
+        if (loadGeneration != backgroundLoadGeneration) return
+        val source = resolved.source
+        val target = resolved.target
+        lastBackgroundSource = source
+        val guarded = PipwImages.handles(resolved)
+        val hadPipwBackground = pipwBackgroundLease != null
+        if (!guarded || pipwBackgroundLease?.key != resolved.cacheKey) {
+            pipwBackgroundLease?.close()
+            pipwBackgroundLease = null
+        }
+        if (guarded || hadPipwBackground) {
+            backgroundImageView?.setImageDrawable(null)
+            BgAccent.clear(this)
+            refreshBackgroundAccent(BgAccent.NO_BUCKET)
+        }
+
+        if (target == null) {
+            backgroundImageView?.setImageDrawable(
+                when (source) {
+                    BackgroundSource.Auto, BackgroundSource.Api -> PixelMapBackgroundDrawable(this)
+                    else -> null
+                }
+            )
+            BgAccent.clear(this)
+            refreshBackgroundAccent(BgAccent.NO_BUCKET)
+            return
+        }
+
+        backgroundLoadJob = uiScope.launch {
+            try {
+                val lease = if (guarded) {
+                    pipwBackgroundLease ?: PipwImages.get(this@PcView).acquire(resolved, orientation).also { pipwBackgroundLease = it }
+                } else null
+                val verified = lease?.await()
+                val bitmap = withContext(Dispatchers.IO) {
+                    decodeBackgroundBitmap(resolved, loadGeneration, verified)
+                }
+                if (isActive) {
+                    applyNewBackgroundAndAccent(bitmap, loadGeneration, resolved.cacheKey, guarded)
+                    if (isFromShake && loadGeneration == backgroundLoadGeneration) {
+                        showToast(getString(R.string.background_refreshed_with_remaining, getRemainingRefreshCount()))
+                    }
+                }
+            } catch (_: CancellationException) {
+                // Superseded by a newer load; nothing to do.
+            } catch (e: ExecutionException) {
+                if (guarded) LimeLog.warning("Pipw background decode failed") else handleGlideException(e)
+                if (isFromShake && loadGeneration == backgroundLoadGeneration) {
+                    showToast(getString(R.string.refresh_failed_network))
+                }
+            } catch (e: Exception) {
+                if (guarded) LimeLog.warning("Pipw background unavailable") else e.printStackTrace()
+                if (isFromShake && loadGeneration == backgroundLoadGeneration) {
+                    showToast(getString(R.string.refresh_failed_with_error, friendlyNetworkError(e)))
+                }
+            }
+        }
+    }
+
+    /** Glide target normalization: HTTP URLs go straight, filesystem paths become Files. */
+    private fun resolveGlideTarget(target: String): Any {
+        if (target.startsWith("http")) return target
+        val localFile = File(target)
+        return if (localFile.exists()) localFile
+        else target // let Glide surface the error
+    }
+
+    /**
+     * Local backgrounds never need more pixels than the display. Decoding a
+     * gallery image at its original dimensions can exceed Android's Canvas
+     * bitmap limit before the ImageView can scale it (issue #447).
+     */
+    private fun backgroundDecodeSize(): Pair<Int, Int> {
+        val metrics = resources.displayMetrics
+        return metrics.widthPixels.coerceAtLeast(1) to metrics.heightPixels.coerceAtLeast(1)
+    }
+
+    private fun decodeBackgroundBitmap(
+        resolved: BackgroundSource.ResolvedTarget,
+        loadGeneration: Int,
+        verified: File? = null
+    ): Bitmap {
+        val target = requireNotNull(resolved.target)
+        val (width, height) = backgroundDecodeSize()
+        val request = Glide.with(this@PcView as Context)
+            .asBitmap()
+            .load(verified ?: resolveGlideTarget(target))
+            .skipMemoryCache(true)
+            .signature(ObjectKey(resolved.cacheKey))
+            // Keep the exact response bytes so settings can reuse the image
+            // selected by random-image APIs instead of issuing a second draw.
+            .diskCacheStrategy(if (verified != null) DiskCacheStrategy.NONE else DiskCacheStrategy.DATA)
+            // 显示解码一律按屏幕尺寸降采样。随机图源可能返回 8K 级原图，
+            // 全分辨率位图塞进 ImageView 会触发 "Canvas: trying to draw too
+            // large bitmap" 崩溃；长按保存走 DATA 磁盘缓存独立重解码，不受影响。
+            .override(width, height)
+            .downsample(DownsampleStrategy.CENTER_INSIDE)
+
+        val futureTarget = if (resolved.source !== BackgroundSource.Local) {
+            request.submit()
+        } else {
+            request
+                .apply(
+                    RequestOptions()
+                        .format(DecodeFormat.PREFER_RGB_565)
+                )
+                .submit(width, height)
+        }
+
+        val retained = synchronized(backgroundTargetLock) {
+            if (loadGeneration != backgroundLoadGeneration) {
+                false
+            } else {
+                backgroundFutureTarget = futureTarget
+                true
+            }
+        }
+        if (!retained) {
+            futureTarget.cancel(true)
+            Glide.with(applicationContext).clear(futureTarget)
+            throw CancellationException("Background load was superseded")
+        }
+
+        return futureTarget.get()
+    }
+
+    /**
+     * Stops the previous decode after releasing both Glide targets. Returns a
+     * token that prevents an older request from replacing a newer wallpaper.
+     */
+    private fun cancelPreviousBackgroundLoad(): Int {
+        backgroundLoadJob?.cancel()
+        displayedBackgroundKey = null
+        backgroundImageView?.let { Glide.with(applicationContext).clear(it) }
+        backgroundDisplayTarget?.let { Glide.with(applicationContext).clear(it) }
+        backgroundDisplayTarget = null
+
+        val (generation, previousTarget) = synchronized(backgroundTargetLock) {
+            backgroundLoadGeneration += 1
+            backgroundLoadGeneration to backgroundFutureTarget.also {
+                backgroundFutureTarget = null
+            }
+        }
+        previousTarget?.let {
+            it.cancel(true)
+            Glide.with(applicationContext).clear(it)
+        }
+        return generation
+    }
+
+    /**
+     * 新背景位图落地：先提取主导色相并同步强调色（跟随壁纸模式下桶位变化时
+     * 重叠 overlay、重绑列表、重染工具栏图标——不能 recreate：随机图源每次
+     * 加载都是新图，recreate 会触发无限循环），再做模糊处理上屏。
+     * 所有背景加载路径（loadBackgroundImage / refreshBackgroundImage）都必须走这里，
+     * 否则强调色会落后背景一次刷新。
+     */
+    private suspend fun applyNewBackgroundAndAccent(bitmap: Bitmap, loadGeneration: Int, key: String, guarded: Boolean) {
+        // 先于模糊处理提取主导色相（源头图信息量最大）
+        val bucket = withContext(Dispatchers.Default) { BgAccent.extractHueBucket(bitmap) }
+        if (loadGeneration != backgroundLoadGeneration) return
+        BgAccent.saveBucket(this, bucket)
+        refreshBackgroundAccent(bucket)
+        applyBlurredBackground(bitmap, loadGeneration, key, guarded)
+    }
+
+    private fun refreshBackgroundAccent(bucket: Int) {
+        if (bucket == themedBgAccentBucket) return
+        themedBgAccentBucket = bucket
+        AppTheme.applyTo(this)
+        pcGridAdapter.notifyDataSetChanged()
+        refreshAccentTintedToolbarIcons()
+        findViewById<com.limelight.ui.HostSearchRadarView>(R.id.host_search_radar)?.refreshAccentColor()
+    }
+
+    private fun applyBlurredBackground(bitmap: Bitmap, loadGeneration: Int, key: String, guarded: Boolean) {
+        if (backgroundImageView == null) return
+        // 兜底钳制：任何路径传入的位图都不得超过 2 倍屏幕像素，防止 Canvas 崩溃
+        val metrics = resources.displayMetrics
+        val maxPixels = metrics.widthPixels.toLong() * metrics.heightPixels * 2
+        val bitmapPixels = bitmap.width.toLong() * bitmap.height
+        val safe = if (bitmapPixels > maxPixels) {
+            val scale = Math.sqrt(maxPixels.toDouble() / bitmapPixels)
+            Bitmap.createScaledBitmap(
+                bitmap,
+                (bitmap.width * scale).toInt().coerceAtLeast(1),
+                (bitmap.height * scale).toInt().coerceAtLeast(1),
+                true
+            )
+        } else {
+            bitmap
+        }
+        val displayTarget = object : CustomTarget<Drawable>() {
+            override fun onResourceReady(resource: Drawable, transition: Transition<in Drawable>?) {
+                // 代际守卫：旧代的慢速模糊完成后不得覆盖新一代背景
+                if (loadGeneration == backgroundLoadGeneration) {
+                    backgroundImageView?.setImageDrawable(resource)
+                    displayedBackgroundKey = key
+                }
+            }
+
+            override fun onLoadCleared(placeholder: Drawable?) {
+                if (loadGeneration == backgroundLoadGeneration) {
+                    backgroundImageView?.setImageDrawable(placeholder)
+                }
+            }
+        }
+        backgroundDisplayTarget = displayTarget
+        Glide.with(this as Context)
+                .load(safe)
+                .diskCacheStrategy(if (guarded) DiskCacheStrategy.NONE else DiskCacheStrategy.AUTOMATIC)
+                .skipMemoryCache(guarded)
+                .apply(RequestOptions.bitmapTransform(BlurTransformation(2, 3)))
+                .transform(ColorFilterTransformation(Color.argb(120, 0, 0, 0)))
+                .into(displayTarget)
+    }
+
+    private fun handleGlideException(e: ExecutionException) {
+        val cause = e.cause
+        if (cause != null) {
+            val msg = cause.message
+            if (msg != null && (msg.contains("HttpException") || msg.contains("SocketException") || msg.contains("MediaMetadataRetriever"))) {
+                LimeLog.warning("Background image download failed: $msg")
+                return
+            }
+        }
+        e.printStackTrace()
+    }
+
+    private fun setupBackgroundImageLongPress() {
+        backgroundImageView?.setOnLongClickListener {
+            saveImageWithPermissionCheck()
+            true
+        }
+    }
+
+    private fun scheduleStartupUpdateCheck(delayMs: Long = STARTUP_UPDATE_CHECK_DELAY) {
+        refreshHandler.postDelayed({ runStartupUpdateCheckWhenIdle() }, delayMs)
+    }
+
+    private fun runStartupUpdateCheckWhenIdle() {
+        if (startupUpdateCheckRan || isFinishing || isDestroyed) {
+            return
+        }
+        if (backgroundSourceDialogShowing) {
+            startupUpdateCheckPending = true
+            return
+        }
+
+        startupUpdateCheckPending = false
+        startupUpdateCheckRan = true
+        UpdateManager.checkForUpdatesOnStartup(this)
+    }
+
+    private fun resumePendingStartupUpdateCheck() {
+        if (!startupUpdateCheckPending || backgroundSourceDialogShowing) {
+            return
+        }
+        scheduleStartupUpdateCheck(STARTUP_DIALOG_GAP_DELAY)
+    }
+
+    /**
+     * First-launch background source picker (issue #263).
+     *
+     * - TV / Leanback devices: no dialog. Keep the offline V/+ map default.
+     * - Everyone else on a fresh install: one-time picker so nobody is
+     *   ambushed by animé wallpapers in public / at work.
+     * - Anyone who already picked, or who already saw+dismissed the dialog,
+     *   is skipped (idempotent).
+     */
+    private fun maybeShowBackgroundSourceDialog() {
+        if (BackgroundSource.isDialogShown(this)) return
+
+        // Running current() also runs the legacy migration once, so after this
+        // call `background_source` is authoritative.
+        val existing = BackgroundSource.current(this)
+        val prefs = PreferenceManager.getDefaultSharedPreferences(this)
+        if (prefs.contains(BackgroundSource.KEY_SOURCE) && existing !is BackgroundSource.Auto) {
+            // User already picked something explicit; just remember we're done.
+            BackgroundSource.markDialogShown(this)
+            return
+        }
+        if (BackgroundSource.isTvDevice(this)) {
+            BackgroundSource.setActive(this, BackgroundSource.Auto)
+            return
+        }
+
+        val choices = listOf(
+            BackgroundSource.Picsum to R.string.background_source_picsum,
+            BackgroundSource.Pipw   to R.string.background_source_pipw,
+            BackgroundSource.None   to R.string.background_source_none,
+        )
+
+        val dialog = AlertDialog.Builder(this, R.style.AppDialogStyle)
+            .setCustomTitle(createBackgroundSourceDialogHeader())
+            .setItems(choices.map { getString(it.second) }.toTypedArray()) { _, which ->
+                BackgroundSource.setActive(this, choices[which].first)
+            }
+            .setNegativeButton(R.string.background_source_dialog_later) { _, _ ->
+                // Defer: remember the nag, keep Auto default.
+                BackgroundSource.setActive(this, BackgroundSource.Auto)
+            }
+            .setOnCancelListener {
+                BackgroundSource.setActive(this, BackgroundSource.Auto)
+            }
+            .create()
+
+        dialog.setOnDismissListener {
+            backgroundSourceDialogShowing = false
+            resumePendingStartupUpdateCheck()
+        }
+        backgroundSourceDialogShowing = true
+        dialog.show()
+        AppDialogStyler.applySystemChoiceList(dialog, this)
+    }
+
+    private fun createBackgroundSourceDialogHeader(): View {
+        val density = resources.displayMetrics.density
+        fun dp(value: Int) = (value * density + 0.5f).toInt()
+        fun matchWrapParams() = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        )
+
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(dp(28), dp(22), dp(28), dp(8))
+            addView(TextView(this@PcView).apply {
+                text = getString(R.string.background_source_dialog_title)
+                gravity = Gravity.CENTER
+                setTypeface(typeface, Typeface.BOLD)
+                textSize = 20f
+                setTextColor(ContextCompat.getColor(this@PcView, R.color.app_dialog_title_color))
+                setShadowLayer(0f, 0f, 0f, Color.TRANSPARENT)
+            }, matchWrapParams())
+            addView(TextView(this@PcView).apply {
+                text = getString(R.string.background_source_dialog_message)
+                gravity = Gravity.CENTER
+                textSize = 14f
+                setLineSpacing(dp(2).toFloat(), 1f)
+                setPadding(0, dp(8), 0, 0)
+                setTextColor(ContextCompat.getColor(this@PcView, R.color.app_dialog_subtitle_color))
+                setShadowLayer(0f, 0f, 0f, Color.TRANSPARENT)
+            }, matchWrapParams())
+        }
+    }
+
+    private fun refreshBackgroundImage(isFromShake: Boolean) {
+        BackgroundSource.invalidateResolvedTarget()
+        loadBackgroundImage(isFromShake = isFromShake)
+    }
+
+    /** 把 Glide / 网络异常翻译成给用户看的简短提示，避免展示 stack trace 风格的英文。 */
+    private fun friendlyNetworkError(e: Throwable): String {
+        // 拆掉 ExecutionException 包装
+        val cause = (e as? ExecutionException)?.cause ?: e
+        val msg = cause.message ?: ""
+        return when {
+            cause is IOException -> getString(R.string.refresh_failed_network)
+            msg.contains("HttpException") || msg.contains("status code") ||
+            msg.contains("SocketException") || msg.contains("UnknownHost") ||
+            msg.contains("timeout", ignoreCase = true) ->
+                getString(R.string.refresh_failed_network)
+            else -> cause.javaClass.simpleName
+        }
+    }
+
+    // Image Save Methods
+
+    private fun saveImageWithPermissionCheck() {
+        val resolved = BackgroundSource.resolveCurrentTarget(
+            this,
+            resources.configuration.orientation
+        )
+        if (resolved.target == null || backgroundImageView?.drawable == null || displayedBackgroundKey != resolved.cacheKey) {
+            showToast(getString(R.string.image_not_loaded_please_retry))
+            return
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && !Environment.isExternalStorageManager()) {
+            showToast(getString(R.string.storage_permission_required))
+            requestStoragePermission()
+            return
+        }
+        showToast(getString(R.string.downloading_image_please_wait))
+        saveResolvedBackground(resolved)
+    }
+
+    @RequiresApi(Build.VERSION_CODES.R)
+    private fun requestStoragePermission() {
+        try {
+            val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION)
+            intent.data = "package:$packageName".toUri()
+            startActivity(intent)
+        } catch (e: Exception) {
+            startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
+        }
+    }
+
+    /**
+     * Save only the bytes belonging to the wallpaper currently on screen.
+     * A cache miss must never fall back to a fresh network request because
+     * random-image endpoints can return a different wallpaper for the same URL.
+     */
+    private fun saveResolvedBackground(resolved: BackgroundSource.ResolvedTarget) {
+        val snapshot = if (PipwImages.handles(resolved)) pipwBackgroundLease?.retainReady() else null
+        if (PipwImages.handles(resolved) && snapshot == null) {
+            showToast(getString(R.string.image_not_loaded_please_retry))
+            return
+        }
+        val saveJob = uiScope.launch {
+            try {
+                val verified = snapshot?.await()
+                val file = withContext(Dispatchers.IO) {
+                    if (verified != null) saveReviewedPipwImage(verified)
+                    else saveResolvedBackgroundFromCache(resolved)
+                }
+                refreshSystemPic(file)
+                showToast(getString(R.string.image_saved_successfully))
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                if (snapshot == null) e.printStackTrace() else LimeLog.warning("Pipw image export failed")
+                if (snapshot != null) showToast(getString(R.string.toast_image_save_failed))
+                else showToast(getString(R.string.image_save_failed_with_error, e.message))
+            } finally {
+                snapshot?.close()
+            }
+        }
+        saveJob.invokeOnCompletion { snapshot?.close() }
+    }
+
+    private fun saveResolvedBackgroundFromCache(
+        resolved: BackgroundSource.ResolvedTarget
+    ): File {
+        val target = requireNotNull(resolved.target)
+        val futureTarget = Glide.with(applicationContext)
+            .asBitmap()
+            .load(resolveGlideTarget(target))
+            .apply(
+                RequestOptions()
+                    .signature(ObjectKey(resolved.cacheKey))
+                    .diskCacheStrategy(DiskCacheStrategy.DATA)
+                    .onlyRetrieveFromCache(true)
+            )
+            .submit()
+
+        try {
+            return writeBitmapToFile(futureTarget.get())
+        } finally {
+            Glide.with(applicationContext).clear(futureTarget)
+        }
+    }
+
+    private fun backgroundSaveDirectory(): File {
+        val dir = File(
+            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES),
+            "vplus"
+        )
+        if (!dir.exists() && !dir.mkdirs()) {
+            throw IOException("Failed to create directory")
+        }
+        return dir
+    }
+
+    private fun saveReviewedPipwImage(verified: File): File {
+        val extension = PipwImages.imageExtension(verified)
+        return BackgroundImageExport.write(backgroundSaveDirectory(), extension) { output ->
+            verified.inputStream().use { it.copyTo(output) }
+        }
+    }
+
+    private fun writeBitmapToFile(bitmap: Bitmap): File {
+        return BackgroundImageExport.write(backgroundSaveDirectory(), "png") { outputStream ->
+            if (!bitmap.compress(Bitmap.CompressFormat.PNG, 100, outputStream)) {
+                throw IOException("Failed to encode bitmap")
+            }
+        }
+    }
+
+    private fun refreshSystemPic(file: File) {
+        val intent = Intent(Intent.ACTION_MEDIA_SCANNER_SCAN_FILE)
+        intent.data = Uri.fromFile(file)
+        sendBroadcast(intent)
+    }
+
+    // Shake Detection Methods
+
+    private fun initShakeDetector() {
+        shakeDetector = ShakeDetector(this)
+        shakeDetector?.setSensitivity(ShakeDetector.SENSITIVITY_MEDIUM)
+    }
+
+    private fun startShakeDetector() {
+        if (shakeDetector == null) return
+        try {
+            shakeDetector?.start(getSystemService(SENSOR_SERVICE) as SensorManager)
+        } catch (e: Exception) {
+            LimeLog.warning("shakeDetector start failed: " + e.message)
+        }
+    }
+
+    private fun stopShakeDetector() {
+        if (shakeDetector == null) return
+        try {
+            shakeDetector?.stop()
+        } catch (e: Exception) {
+            LimeLog.warning("shakeDetector stop failed: " + e.message)
+        }
+    }
+
+    override fun hearShake() {
+        // Procedural/empty backgrounds have nothing to refresh and consume no download quota.
+        if (BackgroundSource.resolveCurrentTarget(this, resources.configuration.orientation).target == null) return
+        val currentTime = System.currentTimeMillis()
+
+        if (currentTime - lastShakeTime < SHAKE_DEBOUNCE_INTERVAL) {
+            val remaining = (SHAKE_DEBOUNCE_INTERVAL - (currentTime - lastShakeTime)) / 1000
+            runOnUiThread { showToast(getString(R.string.please_wait_seconds, remaining)) }
+            return
+        }
+
+        if (!canRefreshToday()) {
+            runOnUiThread { showToast(getString(R.string.daily_limit_reached)) }
+            return
+        }
+
+        lastShakeTime = currentTime
+        incrementRefreshCount()
+        val remaining = getRemainingRefreshCount()
+
+        runOnUiThread {
+            showToast(getString(R.string.refreshing_with_remaining, remaining))
+            refreshBackgroundImage(true)
+        }
+    }
+
+    private fun getTodayDateString(): String {
+        return SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
+    }
+
+    private fun canRefreshToday(): Boolean {
+        val prefs = getSharedPreferences(REFRESH_PREF_NAME, MODE_PRIVATE)
+        val today = getTodayDateString()
+        val savedDate = prefs.getString(REFRESH_DATE_KEY, "")
+        val count = prefs.getInt(REFRESH_COUNT_KEY, 0)
+
+        if (today != savedDate) {
+            prefs.edit {
+                putString(REFRESH_DATE_KEY, today)
+                    .putInt(REFRESH_COUNT_KEY, 0)
+            }
+            return true
+        }
+        return count < MAX_DAILY_REFRESH
+    }
+
+    private fun getRemainingRefreshCount(): Int {
+        val prefs = getSharedPreferences(REFRESH_PREF_NAME, MODE_PRIVATE)
+        val today = getTodayDateString()
+        val savedDate = prefs.getString(REFRESH_DATE_KEY, "")
+        val count = prefs.getInt(REFRESH_COUNT_KEY, 0)
+
+        return if (today == savedDate) 0.coerceAtLeast(MAX_DAILY_REFRESH - count) else MAX_DAILY_REFRESH
+    }
+
+    private fun incrementRefreshCount() {
+        val prefs = getSharedPreferences(REFRESH_PREF_NAME, MODE_PRIVATE)
+        val today = getTodayDateString()
+        val savedDate = prefs.getString(REFRESH_DATE_KEY, "")
+        val count = if (today == savedDate) prefs.getInt(REFRESH_COUNT_KEY, 0) else 0
+
+        prefs.edit {
+            putString(REFRESH_DATE_KEY, today)
+                .putInt(REFRESH_COUNT_KEY, count + 1)
+        }
+    }
+
+    // Background Receiver Methods
+
+    @SuppressLint("UnspecifiedRegisterReceiverFlag")
+    private fun registerBackgroundReceiver() {
+        backgroundImageRefreshReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context, intent: Intent) {
+                if (BackgroundSource.ACTION_REFRESH == intent.action) {
+                    loadBackgroundImage()
+                }
+            }
+        }
+
+        val filter = IntentFilter(BackgroundSource.ACTION_REFRESH)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(backgroundImageRefreshReceiver, filter, RECEIVER_NOT_EXPORTED)
+        } else {
+            registerReceiver(backgroundImageRefreshReceiver, filter)
+        }
+    }
+
+    private fun unregisterBackgroundReceiver() {
+        if (backgroundImageRefreshReceiver != null) {
+            try {
+                unregisterReceiver(backgroundImageRefreshReceiver)
+            } catch (e: IllegalArgumentException) {
+                LimeLog.warning("Failed to unregister background receiver: " + e.message)
+            }
+        }
+    }
+
+    /**
+     * Live-reload the background when any related preference changes (ListPreference
+     * in Settings, EditTextPreference for custom API URL, or the local path written
+     * by LocalImagePickerPreference). This replaces the previous onResume-snapshot
+     * hack — as soon as the user confirms a change in Settings, we react.
+     */
+    private fun registerBackgroundPrefsListener() {
+        val prefs = PreferenceManager.getDefaultSharedPreferences(this)
+        backgroundPrefsListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+            when (key) {
+                BackgroundSource.KEY_SOURCE,
+                BackgroundSource.KEY_API_URL,
+                BackgroundSource.KEY_LOCAL_PATH -> loadBackgroundImage()
+            }
+        }
+        prefs.registerOnSharedPreferenceChangeListener(backgroundPrefsListener)
+    }
+
+    private fun unregisterBackgroundPrefsListener() {
+        backgroundPrefsListener?.let {
+            PreferenceManager.getDefaultSharedPreferences(this)
+                .unregisterOnSharedPreferenceChangeListener(it)
+        }
+        backgroundPrefsListener = null
+    }
+
+    // Computer Manager Methods
+
+    private fun startComputerUpdates() {
+        val binder = managerBinder ?: return
+        if (runningPolling || !inForeground) return
+
+        freezeUpdates = false
+        pollingCollectJob?.cancel()
+        pollingCollectJob = uiScope.launch {
+            binder.computerUpdates
+                .filter { !freezeUpdates }
+                .collect { details ->
+                    updateComputer(details)
+                    if (details.pairState == PairState.PAIRED) {
+                        shortcutHelper.createAppViewShortcutForOnlineHost(details)
+                    }
+                }
+        }
+        binder.startPolling()
+        runningPolling = true
+    }
+
+    private fun stopComputerUpdates() {
+        if (!runningPolling) return
+
+        freezeUpdates = true
+        pollingCollectJob?.cancel()
+        pollingCollectJob = null
+        managerBinder?.stopPolling()
+
+        runningPolling = false
+    }
+
+    private suspend fun stopComputerUpdatesAndWait() {
+        val binder = managerBinder
+        val shouldWait = binder != null && runningPolling
+        stopComputerUpdates()
+        if (shouldWait) {
+            runInterruptible(Dispatchers.IO) {
+                binder?.waitForPollingStopped()
+            }
+        }
+    }
+
+    private fun debouncedNotifyDataSetChanged() {
+        if (pendingRefreshRunnable != null) {
+            refreshHandler.removeCallbacks(pendingRefreshRunnable!!)
+        }
+
+        pendingRefreshRunnable = Runnable {
+            // FLIP 重排动画：对当前可见 item 在 notifyDataSetChanged 前后做位置 diff，
+            // 把"被搬走"的 view 先视觉上拉回旧位置，再 animate 到新位置，O(可见数) 开销。
+            animateReorderAndNotify()
+            pendingRefreshRunnable = null
+        }
+
+        refreshHandler.postDelayed(pendingRefreshRunnable!!, REFRESH_DEBOUNCE_DELAY)
+    }
+
+    private fun animateReorderAndNotify() {
+        val listView = pcListView
+        if (listView == null || isFirstLoad) {
+            pcGridAdapter.notifyDataSetChanged()
+            return
+        }
+
+        // 1. 快照可见 item 的顺序与位置：UUID -> (left, top)（含 translation 兼容上一轮 FLIP）
+        // 注意：GridView 同行交换 top 不变，必须同时记录 left 才能感知水平位移
+        // ⚠️ UUID 必须从 view.tag 反查（pc_grid_item 在 getView 中绑定），不能调 adapter.getItem(pos)
+        //     —— 调用方在 resort() 之后才进来，此时 itemList 已经是 NEW 顺序，但可见 children 还在旧布局
+        val firstVisible = listView.firstVisiblePosition
+        val visibleCount = listView.childCount
+        val oldPositions = HashMap<String, IntArray>(visibleCount)
+        val oldOrder = ArrayList<String>(visibleCount)
+        for (i in 0 until visibleCount) {
+            val v = listView.getChildAt(i)
+            val uuid = v.getTag(R.id.grid_text) as? String ?: continue
+            oldPositions[uuid] = intArrayOf(
+                v.left + v.translationX.toInt(),
+                v.top + v.translationY.toInt()
+            )
+            oldOrder.add(uuid)
+        }
+
+        pcGridAdapter.notifyDataSetChanged()
+
+        if (oldOrder.isEmpty()) return
+
+        // 早退：可见区 UUID 顺序未变 → 跳过 FLIP（绝大多数轮询通知都走这条路）
+        var orderChanged = false
+        for (i in oldOrder.indices) {
+            val pos = firstVisible + i
+            val item = pcGridAdapter.getItem(pos) as? ComputerObject
+            if (item?.details?.uuid != oldOrder[i]) {
+                orderChanged = true
+                break
+            }
+        }
+        if (!orderChanged) return
+
+        // 2. 下一帧布局完成时：把每个仍可见的旧 UUID 视图先拉到旧位置，再动画归零
+        listView.viewTreeObserver.addOnPreDrawListener(object : android.view.ViewTreeObserver.OnPreDrawListener {
+            override fun onPreDraw(): Boolean {
+                listView.viewTreeObserver.removeOnPreDrawListener(this)
+                for (i in 0 until listView.childCount) {
+                    val view = listView.getChildAt(i)
+                    val uuid = view.getTag(R.id.grid_text) as? String ?: continue
+                    val old = oldPositions[uuid] ?: continue
+                    val dx = old[0] - view.left
+                    val dy = old[1] - view.top
+                    if (dx == 0 && dy == 0) continue
+                    // 取消上一轮 FLIP 动画，避免叠加导致跳变
+                    view.animate().cancel()
+                    view.translationX = dx.toFloat()
+                    view.translationY = dy.toFloat()
+                    view.animate()
+                        .translationX(0f)
+                        .translationY(0f)
+                        .setDuration(280L)
+                        .setInterpolator(android.view.animation.PathInterpolator(0.2f, 0f, 0f, 1f))
+                        .start()
+                }
+                return true
+            }
+        })
+    }
+
+    private fun updateComputer(details: ComputerDetails) {
+        if (PcGridAdapter.ADD_COMPUTER_UUID == details.uuid) return
+
+        val existingEntry = findComputerByUuid(details.uuid)
+
+        if (existingEntry != null) {
+            existingEntry.details = details
+            pcGridAdapter.resort()
+        } else {
+            addNewComputer(details)
+        }
+
+        debouncedNotifyDataSetChanged()
+    }
+
+    private fun findComputerByUuid(uuid: String?): ComputerObject? {
+        for (i in 0 until pcGridAdapter.rawCount) {
+            val computer = pcGridAdapter.getRawItem(i)
+            if (!PcGridAdapter.isAddComputerCard(computer) && uuid != null && uuid == computer.details.uuid) {
+                return computer
+            }
+        }
+        return null
+    }
+
+    private fun addNewComputer(details: ComputerDetails) {
+        val newComputer = ComputerObject(details)
+        pcGridAdapter.addComputer(newComputer)
+
+        val isUnpaired = details.state == ComputerDetails.State.ONLINE
+                && details.pairState == PairState.NOT_PAIRED
+
+        if (isUnpaired && !pcGridAdapter.isShowUnpairedDevices()) {
+            pcGridAdapter.setShowUnpairedDevices(true)
+            showToast(getString(R.string.new_unpaired_device_shown))
+        }
+
+        noPcFoundLayout?.visibility = View.INVISIBLE
+
+        if (pcListView != null && !isFirstLoad) {
+            pcListView?.scheduleLayoutAnimation()
+        }
+    }
+
+    private fun removeComputer(details: ComputerDetails) {
+        if (PcGridAdapter.ADD_COMPUTER_UUID == details.uuid) return
+
+        managerBinder?.removeComputer(details)
+        DiskAssetLoader(this).deleteAssetsForComputer(details.uuid!!)
+
+        getSharedPreferences(AppView.HIDDEN_APPS_PREF_FILENAME, MODE_PRIVATE)
+                .edit {
+                    remove(details.uuid)
+                }
+        HostUnlockCredentialStore.remove(this, details.uuid)
+
+        for (i in 0 until pcGridAdapter.rawCount) {
+            val computer = pcGridAdapter.getRawItem(i)
+            if (!PcGridAdapter.isAddComputerCard(computer) && details == computer.details) {
+                shortcutHelper.disableComputerShortcut(details, getString(R.string.scut_deleted_pc))
+                pcGridAdapter.removeComputer(computer)
+                pcGridAdapter.notifyDataSetChanged()
+
+                if (countRealComputers() == 0) {
+                    noPcFoundLayout?.visibility = View.VISIBLE
+                }
+                break
+            }
+        }
+    }
+
+    private fun countRealComputers(): Int {
+        var count = 0
+        for (i in 0 until pcGridAdapter.rawCount) {
+            if (!PcGridAdapter.isAddComputerCard(pcGridAdapter.getRawItem(i))) {
+                count++
+            }
+        }
+        return count
+    }
+
+    private fun addAddComputerCard() {
+        for (i in 0 until pcGridAdapter.rawCount) {
+            if (PcGridAdapter.isAddComputerCard(pcGridAdapter.getRawItem(i))) {
+                return
+            }
+        }
+
+        val addDetails = ComputerDetails()
+        addDetails.uuid = PcGridAdapter.ADD_COMPUTER_UUID
+        try {
+            addDetails.name = getString(R.string.title_add_pc)
+        } catch (e: Exception) {
+            addDetails.name = getString(R.string.title_add_pc_choose)
+        }
+        addDetails.state = ComputerDetails.State.UNKNOWN
+
+        pcGridAdapter.addComputer(ComputerObject(addDetails))
+        pcGridAdapter.notifyDataSetChanged()
+
+        noPcFoundLayout?.visibility = View.INVISIBLE
+    }
+
+    // Toggle Unpaired Hosts
+
+    private fun toggleUnpairedDevices() {
+        val newState = !pcGridAdapter.isShowUnpairedDevices()
+        pcGridAdapter.setShowUnpairedDevices(newState)
+        showToast(if (newState) getString(R.string.unpaired_devices_shown) else getString(R.string.unpaired_devices_hidden))
+    }
+
+    // Scene Configuration Methods
+
+    private data class SceneConfiguration(
+            val width: Int,
+            val height: Int,
+            val isNativeResolution: Boolean,
+            val isCustomResolution: Boolean,
+            val fps: Int,
+            val bitrate: Int,
+            val enableAdaptiveBitrate: Boolean,
+            val abrMode: String,
+            val videoFormat: PreferenceConfiguration.FormatOption,
+            val framePacing: Int,
+            val stretchVideo: Boolean,
+            val enableSops: Boolean,
+            val unlockFps: Boolean,
+            val reduceRefreshRate: Boolean,
+            val fullRange: Boolean,
+            val enableHdr: Boolean,
+            val enableHdrHighBrightness: Boolean,
+            val hdrMode: Int,
+            val enablePerfOverlay: Boolean,
+            val perfOverlayLocked: Boolean,
+            val perfOverlayBgOpacity: Int,
+            val perfOverlayOrientation: PreferenceConfiguration.PerfOverlayOrientation,
+            val perfOverlayPosition: PreferenceConfiguration.PerfOverlayPosition,
+            val perfOverlayStyle: PerfHudDensity
+    ) {
+        fun applyTo(prefs: PreferenceConfiguration): PreferenceConfiguration {
+            prefs.width = width
+            prefs.height = height
+            prefs.isNativeResolution = isNativeResolution
+            prefs.isCustomResolution = isCustomResolution
+            prefs.fps = fps
+            prefs.bitrate = bitrate
+            prefs.enableAdaptiveBitrate = enableAdaptiveBitrate
+            prefs.abrMode = abrMode
+            prefs.videoFormat = videoFormat
+            prefs.framePacing = framePacing
+            prefs.stretchVideo = stretchVideo
+            prefs.enableSops = enableSops
+            prefs.unlockFps = unlockFps
+            prefs.reduceRefreshRate = reduceRefreshRate
+            prefs.fullRange = fullRange
+            prefs.enableHdr = enableHdr
+            prefs.enableHdrHighBrightness = enableHdrHighBrightness
+            prefs.hdrMode = hdrMode
+            prefs.enablePerfOverlay = enablePerfOverlay
+            prefs.perfOverlayLocked = perfOverlayLocked
+            prefs.perfOverlayBgOpacity = perfOverlayBgOpacity
+            prefs.perfOverlayOrientation = perfOverlayOrientation
+            prefs.perfOverlayPosition = perfOverlayPosition
+            prefs.perfOverlayStyle = perfOverlayStyle
+            return prefs
+        }
+
+        fun toJson(): JSONObject {
+            return JSONObject().apply {
+                put("width", width)
+                put("height", height)
+                put("isNativeResolution", isNativeResolution)
+                put("isCustomResolution", isCustomResolution)
+                put("fps", fps)
+                put("bitrate", bitrate)
+                put("enableAdaptiveBitrate", enableAdaptiveBitrate)
+                put("abrMode", abrMode)
+                put("videoFormat", videoFormat.name)
+                put("framePacing", framePacing)
+                put("stretchVideo", stretchVideo)
+                put("enableSops", enableSops)
+                put("unlockFps", unlockFps)
+                put("reduceRefreshRate", reduceRefreshRate)
+                put("fullRange", fullRange)
+                put("enableHdr", enableHdr)
+                put("enableHdrHighBrightness", enableHdrHighBrightness)
+                put("hdrMode", hdrMode)
+                put("enablePerfOverlay", enablePerfOverlay)
+                put("perfOverlayLocked", perfOverlayLocked)
+                put("perfOverlayBgOpacity", perfOverlayBgOpacity)
+                put("perfOverlayOrientation", perfOverlayOrientation.name)
+                put("perfOverlayPosition", perfOverlayPosition.name)
+                put("perfOverlayStyle", perfOverlayStyle.prefValue)
+            }
+        }
+
+        companion object {
+            fun fromPreferences(prefs: PreferenceConfiguration): SceneConfiguration {
+                return SceneConfiguration(
+                        width = prefs.width,
+                        height = prefs.height,
+                        isNativeResolution = prefs.isNativeResolution,
+                        isCustomResolution = prefs.isCustomResolution,
+                        fps = prefs.fps,
+                        bitrate = prefs.bitrate,
+                        enableAdaptiveBitrate = prefs.enableAdaptiveBitrate,
+                        abrMode = prefs.abrMode,
+                        videoFormat = prefs.videoFormat,
+                        framePacing = prefs.framePacing,
+                        stretchVideo = prefs.stretchVideo,
+                        enableSops = prefs.enableSops,
+                        unlockFps = prefs.unlockFps,
+                        reduceRefreshRate = prefs.reduceRefreshRate,
+                        fullRange = prefs.fullRange,
+                        enableHdr = prefs.enableHdr,
+                        enableHdrHighBrightness = prefs.enableHdrHighBrightness,
+                        hdrMode = prefs.hdrMode,
+                        enablePerfOverlay = prefs.enablePerfOverlay,
+                        perfOverlayLocked = prefs.perfOverlayLocked,
+                        perfOverlayBgOpacity = prefs.perfOverlayBgOpacity,
+                        perfOverlayOrientation = prefs.perfOverlayOrientation,
+                        perfOverlayPosition = prefs.perfOverlayPosition,
+                        perfOverlayStyle = prefs.perfOverlayStyle)
+            }
+
+            fun fromJson(json: JSONObject, fallback: PreferenceConfiguration): SceneConfiguration {
+                val width = json.optInt("width", fallback.width)
+                val height = json.optInt("height", fallback.height)
+                val resolutionMode = resolveSceneResolutionMode(
+                    json,
+                    width,
+                    height,
+                    PreferenceConfiguration.RESOLUTIONS.asList()
+                )
+                return SceneConfiguration(
+                        width = width,
+                        height = height,
+                        isNativeResolution = resolutionMode.isNative,
+                        isCustomResolution = resolutionMode.isCustom,
+                        fps = json.optInt("fps", fallback.fps),
+                        bitrate = json.optInt("bitrate", fallback.bitrate),
+                        enableAdaptiveBitrate = json.optBoolean("enableAdaptiveBitrate", fallback.enableAdaptiveBitrate),
+                        abrMode = json.optString("abrMode", fallback.abrMode),
+                        videoFormat = parseEnum(json.optString("videoFormat", fallback.videoFormat.name), fallback.videoFormat),
+                        framePacing = json.optInt("framePacing", fallback.framePacing),
+                        stretchVideo = json.optBoolean("stretchVideo", fallback.stretchVideo),
+                        enableSops = json.optBoolean("enableSops", fallback.enableSops),
+                        unlockFps = json.optBoolean("unlockFps", fallback.unlockFps),
+                        reduceRefreshRate = json.optBoolean("reduceRefreshRate", fallback.reduceRefreshRate),
+                        fullRange = json.optBoolean("fullRange", fallback.fullRange),
+                        enableHdr = json.optBoolean("enableHdr", fallback.enableHdr),
+                        enableHdrHighBrightness = json.optBoolean("enableHdrHighBrightness", fallback.enableHdrHighBrightness),
+                        hdrMode = json.optInt("hdrMode", fallback.hdrMode),
+                        enablePerfOverlay = json.optBoolean("enablePerfOverlay", fallback.enablePerfOverlay),
+                        perfOverlayLocked = json.optBoolean("perfOverlayLocked", fallback.perfOverlayLocked),
+                        perfOverlayBgOpacity = json.optInt("perfOverlayBgOpacity", fallback.perfOverlayBgOpacity),
+                        perfOverlayOrientation = parseEnum(json.optString("perfOverlayOrientation", fallback.perfOverlayOrientation.name), fallback.perfOverlayOrientation),
+                        perfOverlayPosition = parseEnum(json.optString("perfOverlayPosition", fallback.perfOverlayPosition.name), fallback.perfOverlayPosition),
+                        perfOverlayStyle = if (json.has("perfOverlayStyle")) {
+                            PerfHudDensity.fromPreference(json.optString("perfOverlayStyle"))
+                        } else {
+                            fallback.perfOverlayStyle
+                        })
+            }
+
+            private inline fun <reified T : Enum<T>> parseEnum(value: String, fallback: T): T {
+                return runCatching { enumValueOf<T>(value.uppercase(Locale.US)) }.getOrDefault(fallback)
+            }
+        }
+    }
+
+    private fun initSceneButtons() {
+        try {
+            val sceneButtonIds = intArrayOf(R.id.scene1Btn, R.id.scene2Btn, R.id.scene3Btn, R.id.scene4Btn, R.id.scene5Btn)
+
+            for (i in sceneButtonIds.indices) {
+                val sceneNumber = i + 1
+                val btn = findViewById<ImageButton>(sceneButtonIds[i])
+
+                if (btn == null) {
+                    LimeLog.warning("Scene button $sceneNumber not found!")
+                    continue
+                }
+
+                btn.isFocusable = true
+                btn.isFocusableInTouchMode = true
+                btn.nextFocusUpId = sceneButtonIds[(i - 1).coerceAtLeast(0)]
+                btn.nextFocusDownId = sceneButtonIds[(i + 1).coerceAtMost(sceneButtonIds.lastIndex)]
+                btn.setOnClickListener { applySceneConfiguration(sceneNumber) }
+                btn.setOnLongClickListener {
+                    showSaveConfirmationDialog(sceneNumber)
+                    true
+                }
+                btn.setOnKeyListener { _, keyCode, event ->
+                    if (keyCode != KeyEvent.KEYCODE_BUTTON_A) {
+                        false
+                    } else {
+                        if (event.action == KeyEvent.ACTION_UP) btn.performClick()
+                        true
+                    }
+                }
+            }
+            updateSceneButtonStates()
+        } catch (e: Exception) {
+            LimeLog.warning("Scene init failed: $e")
+        }
+    }
+
+    private fun updateSceneButtonStates() {
+        val sceneButtonIds = intArrayOf(R.id.scene1Btn, R.id.scene2Btn, R.id.scene3Btn, R.id.scene4Btn, R.id.scene5Btn)
+        val prefs = getSharedPreferences(SCENE_PREF_NAME, MODE_PRIVATE)
+
+        for (i in sceneButtonIds.indices) {
+            val sceneNumber = i + 1
+            val btn = findViewById<ImageButton>(sceneButtonIds[i]) ?: continue
+            val isConfigured = prefs.contains(SCENE_KEY_PREFIX + sceneNumber)
+            val isActive = activeSceneNumber == sceneNumber
+
+            btn.alpha = when {
+                isActive -> 1.0f
+                isConfigured -> 0.9f
+                else -> 0.68f
+            }
+            btn.imageTintList = ColorStateList.valueOf(when {
+                isActive -> Color.WHITE
+                isConfigured -> Color.argb(230, 255, 255, 255)
+                else -> Color.argb(190, 255, 255, 255)
+            })
+            btn.contentDescription = getString(
+                    if (isConfigured) R.string.scene_configured_content_description else R.string.scene_empty_content_description,
+                    sceneNumber)
+        }
+    }
+
+    @SuppressLint("DefaultLocale")
+    private fun applySceneConfiguration(sceneNumber: Int) {
+        try {
+            val prefs = getSharedPreferences(SCENE_PREF_NAME, MODE_PRIVATE)
+            val configJson = prefs.getString(SCENE_KEY_PREFIX + sceneNumber, null)
+
+            if (configJson == null) {
+                showUnconfiguredSceneDialog(sceneNumber)
+                return
+            }
+
+            val configPrefs = PreferenceConfiguration.readPreferences(this)
+            SceneConfiguration.fromJson(JSONObject(configJson), configPrefs).applyTo(configPrefs)
+
+            if (!configPrefs.writeScenePreferences(this)) {
+                showToast(getString(R.string.config_save_failed))
+                return
+            }
+
+            pcGridAdapter.updateLayoutWithPreferences(this, configPrefs)
+            activeSceneNumber = sceneNumber
+            updateSceneButtonStates()
+            showToast(getString(R.string.scene_config_applied, sceneNumber, configPrefs.width, configPrefs.height,
+                    configPrefs.fps, configPrefs.bitrate / 1000.0, configPrefs.videoFormat.toString(),
+                    if (configPrefs.enableHdr) "On" else "Off"))
+
+        } catch (e: Exception) {
+            LimeLog.warning("Scene apply failed: $e")
+            showToast(getString(R.string.config_apply_failed))
+        }
+    }
+
+    private fun showUnconfiguredSceneDialog(sceneNumber: Int) {
+        AlertDialog.Builder(this, R.style.AppDialogStyle)
+                .setTitle(getString(R.string.scene_empty_title, sceneNumber))
+                .setMessage(getString(R.string.scene_empty_message, sceneNumber))
+                .setPositiveButton(R.string.save_current_config_to_scene) { _, _ -> saveCurrentConfiguration(sceneNumber) }
+                .setNegativeButton(R.string.dialog_button_cancel, null)
+                .show()
+                .also { AppDialogStyler.installDismissKeys(it) }
+    }
+
+    private fun showSaveConfirmationDialog(sceneNumber: Int) {
+        AlertDialog.Builder(this, R.style.AppDialogStyle)
+                .setTitle(getString(R.string.save_to_scene, sceneNumber))
+                .setMessage(getString(R.string.overwrite_scene_config, sceneNumber))
+                .setPositiveButton(R.string.dialog_button_save) { _, _ -> saveCurrentConfiguration(sceneNumber) }
+                .setNegativeButton(R.string.dialog_button_cancel, null)
+                .show()
+                .also { AppDialogStyler.installDismissKeys(it) }
+    }
+
+    private fun saveCurrentConfiguration(sceneNumber: Int) {
+        saveConfigurationToScene(
+            sceneNumber,
+            PreferenceConfiguration.readPreferences(this),
+            markActive = true
+        )
+    }
+
+    private fun saveConfigurationToScene(
+        sceneNumber: Int,
+        preferences: PreferenceConfiguration,
+        markActive: Boolean
+    ): Boolean {
+        try {
+            val config = SceneConfiguration
+                    .fromPreferences(preferences)
+                    .toJson()
+
+            getSharedPreferences(SCENE_PREF_NAME, MODE_PRIVATE)
+                    .edit {
+                        putString(SCENE_KEY_PREFIX + sceneNumber, config.toString())
+                    }
+
+            if (markActive) {
+                activeSceneNumber = sceneNumber
+            }
+            updateSceneButtonStates()
+            showToast(getString(R.string.scene_saved_successfully, sceneNumber))
+            return true
+        } catch (e: JSONException) {
+            showToast(getString(R.string.config_save_failed))
+            return false
+        }
+    }
+
+    // PC Actions
+
+    private fun doPair(computer: ComputerDetails) {
+        if (computer.state == ComputerDetails.State.OFFLINE || computer.activeAddress == null) {
+            showToast(getString(R.string.pair_pc_offline))
+            return
+        }
+        if (managerBinder == null) {
+            showToast(getString(R.string.error_manager_not_running))
+            return
+        }
+
+        showToast(getString(R.string.pairing))
+        uiScope.launch {
+            var message: String?
+            var success = false
+
+            try {
+                stopComputerUpdatesAndWait()
+
+                val result = withContext(Dispatchers.IO) {
+                    val httpConn = NvHTTP(
+                            ServerHelper.getCurrentAddressFromComputer(computer),
+                            computer.httpsPort,
+                            (managerBinder?.getUniqueId() ?: ""),
+                            clientName,
+                            computer.serverCert,
+                            PlatformBinding.getCryptoProvider(this@PcView)
+                    )
+
+                    if (httpConn.getPairState() == PairState.PAIRED) {
+                        return@withContext Triple<String?, Boolean, Pair<String, String>?>(null, true, null)
+                    }
+
+                    val pinStr = PairingManager.generatePinString()
+                    withContext(Dispatchers.Main) {
+                        Dialog.displayDialog(this@PcView,
+                                getString(R.string.pair_pairing_title),
+                                getString(R.string.pair_pairing_msg) + " " + pinStr + "\n\n" + getString(R.string.pair_pairing_help),
+                                false)
+                    }
+
+                    val pm = httpConn.pairingManager
+                    val pairResult = pm.pair(httpConn.getServerInfo(true), pinStr)
+
+                    when (pairResult.state) {
+                        PairState.PIN_WRONG ->
+                            Triple<String?, Boolean, Pair<String, String>?>(getString(R.string.pair_incorrect_pin), false, null)
+                        PairState.FAILED ->
+                            Triple<String?, Boolean, Pair<String, String>?>(
+                                if (computer.runningGameId != 0) getString(R.string.pair_pc_ingame) else getString(R.string.pair_fail),
+                                false, null
+                            )
+                        PairState.ALREADY_IN_PROGRESS ->
+                            Triple<String?, Boolean, Pair<String, String>?>(getString(R.string.pair_already_in_progress), false, null)
+                        PairState.PAIRED -> {
+                            managerBinder?.getComputer(computer.uuid!!)!!.serverCert = pm.pairedCert
+                            Triple<String?, Boolean, Pair<String, String>?>(null, true, computer.uuid!! to pairResult.pairName)
+                        }
+                        else -> Triple<String?, Boolean, Pair<String, String>?>(null, false, null)
+                    }
+                }
+
+                message = result.first
+                success = result.second
+                result.third?.let { (uuid, pairName) ->
+                    getSharedPreferences("pair_name_map", MODE_PRIVATE)
+                            .edit {
+                                putString(uuid, pairName)
+                            }
+                    managerBinder?.invalidateStateForComputer(uuid)
+                }
+            } catch (e: UnknownHostException) {
+                message = getString(R.string.error_unknown_host)
+            } catch (e: FileNotFoundException) {
+                message = getString(R.string.error_404)
+            } catch (e: InterruptedException) {
+                message = getString(R.string.pair_fail)
+            } catch (e: XmlPullParserException) {
+                message = e.message
+            } catch (e: IOException) {
+                message = e.message
+            } finally {
+                Dialog.closeDialogs()
+            }
+
+            if (message != null) {
+                showToast(message)
+            }
+            if (success) {
+                doAppList(computer, newlyPaired = true, showHiddenGames = false)
+            } else {
+                startComputerUpdates()
+            }
+        }
+    }
+
+    private fun showAddComputerActionSheet() {
+        AppActionSheet.show(
+            context = this,
+            title = getString(R.string.title_add_pc_choose),
+            actions = listOf(
+                AppActionSheet.Action(
+                    id = ADD_PC_MANUALLY_ID,
+                    title = getString(R.string.addpc_manual),
+                    description = getString(R.string.addpc_manual_description),
+                    iconRes = R.drawable.ic_add_host_address,
+                    opensSubmenu = true
+                ),
+                AppActionSheet.Action(
+                    id = ADD_PC_QR_SCAN_ID,
+                    title = getString(R.string.addpc_qr_scan),
+                    description = getString(R.string.qr_scan_prompt),
+                    iconRes = R.drawable.ic_add_host_scan,
+                    opensSubmenu = true
+                )
+            ),
+            onAction = { action ->
+                when (action.id) {
+                    ADD_PC_MANUALLY_ID ->
+                    startActivityForResult(
+                        Intent(this, AddComputerManually::class.java),
+                        ADD_COMPUTER_REQUEST_CODE
+                    )
+                    ADD_PC_QR_SCAN_ID -> startQrScan()
+                }
+            }
+        )
+    }
+
+    private fun startQrScan() {
+        val integrator = IntentIntegrator(this)
+        integrator.setDesiredBarcodeFormats(IntentIntegrator.QR_CODE)
+        integrator.setPrompt(getString(R.string.qr_scan_prompt))
+        integrator.setBeepEnabled(false)
+        integrator.setOrientationLocked(false)
+        integrator.initiateScan()
+    }
+
+    private fun handleQrPairResult(url: String) {
+        val uri = url.toUri()
+        if ("moonlight" != uri.scheme || "pair" != uri.host) {
+            showToast(getString(R.string.qr_invalid_code))
+            return
+        }
+
+        val host = uri.getQueryParameter("host")
+        val portStr = uri.getQueryParameter("port")
+        val pin = uri.getQueryParameter("pin")
+
+        if (host == null || pin == null) {
+            showToast(getString(R.string.qr_invalid_code))
+            return
+        }
+
+        var port = NvHTTP.DEFAULT_HTTP_PORT
+        if (portStr != null) {
+            try { port = portStr.toInt() } catch (ignored: NumberFormatException) {}
+        }
+
+        showToast(getString(R.string.qr_pairing))
+        val finalPort = port
+        uiScope.launch {
+            var message: String?
+            var success = false
+            var pairedComputer: ComputerDetails? = null
+
+            try {
+                stopComputerUpdatesAndWait()
+
+                val result = withContext(Dispatchers.IO) {
+                    // Add the computer first
+                    val addDetails = ComputerDetails()
+                    addDetails.manualAddress = ComputerDetails.AddressTuple(host, finalPort)
+                    val added = managerBinder?.addComputerBlocking(addDetails) == true
+                    if (!added) {
+                        return@withContext QrPairResult(getString(R.string.addpc_fail), false, null, null)
+                    }
+
+                    // addComputerBlocking fills addDetails in-place (uuid, httpsPort, etc.)
+                    var computer = managerBinder?.getComputer(addDetails.uuid!!)
+                    if (computer == null) {
+                        computer = addDetails
+                    }
+
+                    val httpConn = NvHTTP(
+                        ServerHelper.getCurrentAddressFromComputer(computer),
+                        computer.httpsPort,
+                        (managerBinder?.getUniqueId() ?: ""),
+                        clientName,
+                        computer.serverCert,
+                        PlatformBinding.getCryptoProvider(this@PcView)
+                    )
+
+                    if (httpConn.getPairState() == PairState.PAIRED) {
+                        return@withContext QrPairResult(null, true, computer, null)
+                    }
+
+                    val pm = httpConn.pairingManager
+                    val pairResult = pm.pair(httpConn.getServerInfo(true), pin)
+                    when (pairResult.state) {
+                        PairState.PIN_WRONG ->
+                            QrPairResult(getString(R.string.pair_incorrect_pin), false, null, null)
+                        PairState.FAILED ->
+                            QrPairResult(getString(R.string.pair_fail), false, null, null)
+                        PairState.ALREADY_IN_PROGRESS ->
+                            QrPairResult(getString(R.string.pair_already_in_progress), false, null, null)
+                        PairState.PAIRED -> {
+                            managerBinder?.getComputer(computer.uuid!!)!!.serverCert = pm.pairedCert
+                            QrPairResult(null, true, computer, computer.uuid!! to pairResult.pairName)
+                        }
+                        else -> QrPairResult(null, false, null, null)
+                    }
+                }
+
+                message = result.message
+                success = result.success
+                pairedComputer = result.computer
+                result.saveName?.let { (uuid, pairName) ->
+                    getSharedPreferences("pair_name_map", MODE_PRIVATE)
+                        .edit {
+                            putString(uuid, pairName)
+                        }
+                    managerBinder?.invalidateStateForComputer(uuid)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                message = e.message
+            }
+
+            if (message != null) {
+                showToast(message)
+            }
+            if (success) {
+                showToast(getString(R.string.qr_pair_success))
+                if (pairedComputer != null) {
+                    doAppList(pairedComputer, newlyPaired = true, showHiddenGames = false)
+                } else {
+                    startComputerUpdates()
+                }
+            } else {
+                startComputerUpdates()
+            }
+        }
+    }
+
+    private data class QrPairResult(
+        val message: String?,
+        val success: Boolean,
+        val computer: ComputerDetails?,
+        val saveName: Pair<String, String>?
+    )
+
+    private fun findComputerByAddress(host: String): ComputerDetails? {
+        if (managerBinder == null) return null
+        for (i in 0 until pcGridAdapter.count) {
+            val obj = pcGridAdapter.getItem(i) as ComputerObject
+            if (PcGridAdapter.isAddComputerCard(obj)) continue
+            val d = obj.details
+            if (d.manualAddress != null && host == d.manualAddress?.address) return d
+            if (d.localAddress != null && host == d.localAddress?.address) return d
+            if (d.remoteAddress != null && host == d.remoteAddress?.address) return d
+        }
+        return null
+    }
+
+    private fun doWakeOnLan(computer: ComputerDetails) {
+        if (computer.state == ComputerDetails.State.ONLINE) {
+            showToast(getString(R.string.wol_pc_online))
+            return
+        }
+        if (computer.macAddress == null) {
+            showToast(getString(R.string.wol_no_mac))
+            return
+        }
+
+        uiScope.launch {
+            val message = withContext(Dispatchers.IO) {
+                try {
+                    WakeOnLanSender.sendWolPacket(computer)
+                    getString(R.string.wol_waking_msg)
+                } catch (e: IOException) {
+                    getString(R.string.wol_fail)
+                }
+            }
+            showToast(message)
+        }
+    }
+
+    private fun doUnpair(computer: ComputerDetails) {
+        if (computer.state == ComputerDetails.State.OFFLINE || computer.activeAddress == null) {
+            showToast(getString(R.string.error_pc_offline))
+            return
+        }
+        if (managerBinder == null) {
+            showToast(getString(R.string.error_manager_not_running))
+            return
+        }
+
+        showToast(getString(R.string.unpairing))
+        val binder = managerBinder!!
+        uiScope.launch {
+            val message = withContext(Dispatchers.IO) {
+                try {
+                    val httpConn = NvHTTP(
+                            ServerHelper.getCurrentAddressFromComputer(computer),
+                            computer.httpsPort,
+                            binder.getUniqueId(),
+                            clientName,
+                            computer.serverCert,
+                            PlatformBinding.getCryptoProvider(this@PcView)
+                    )
+
+                    if (httpConn.getPairState() == PairState.PAIRED) {
+                        httpConn.unpair()
+                        if (httpConn.getPairState() == PairState.NOT_PAIRED) {
+                            binder.markComputerNotPaired(computer, "Local unpair")
+                            getString(R.string.unpair_success)
+                        } else {
+                            getString(R.string.unpair_fail)
+                        }
+                    } else {
+                        getString(R.string.unpair_error)
+                    }
+                } catch (e: UnknownHostException) {
+                    getString(R.string.error_unknown_host)
+                } catch (e: FileNotFoundException) {
+                    getString(R.string.error_404)
+                } catch (e: XmlPullParserException) {
+                    e.message ?: getString(R.string.unpair_fail)
+                } catch (e: IOException) {
+                    e.message ?: getString(R.string.unpair_fail)
+                } catch (e: InterruptedException) {
+                    getString(R.string.error_interrupted)
+                }
+            }
+            showToast(message)
+        }
+    }
+
+    private fun doAppList(computer: ComputerDetails, newlyPaired: Boolean, showHiddenGames: Boolean) {
+        if (computer.state == ComputerDetails.State.OFFLINE) {
+            showToast(getString(R.string.error_pc_offline))
+            return
+        }
+        val binder = managerBinder
+        if (binder == null) {
+            showToast(getString(R.string.error_manager_not_running))
+            return
+        }
+
+        val target = prepareComputerWithAddress(computer)
+        if (target == null || target.activeAddress == null) {
+            showToast(getString(R.string.error_pc_offline))
+            return
+        }
+
+        if (PairStatePreflight.hasTrustedPairState(target)) {
+            openAppList(target, newlyPaired, showHiddenGames)
+            return
+        }
+
+        val spinner = SpinnerDialog.displayDialog(this,
+                resources.getString(R.string.applist_refresh_title),
+                resources.getString(R.string.applist_refresh_msg),
+                false)
+
+        uiScope.launch {
+            val isNotPaired = PairStatePreflight.isConfirmedNotPaired(target, binder, "Opening app list")
+
+            spinner.dismiss()
+            if (isFinishing || isDestroyed) {
+                return@launch
+            }
+
+            if (isNotPaired) {
+                showToast(getString(R.string.scut_not_paired))
+            } else {
+                openAppList(target, newlyPaired, showHiddenGames)
+            }
+        }
+    }
+
+    private fun openAppList(computer: ComputerDetails, newlyPaired: Boolean, showHiddenGames: Boolean) {
+        val i = Intent(this, AppView::class.java)
+        i.putExtra(AppView.NAME_EXTRA, computer.name)
+        i.putExtra(AppView.UUID_EXTRA, computer.uuid)
+        i.putExtra(AppView.NEW_PAIR_EXTRA, newlyPaired)
+        i.putExtra(AppView.SHOW_HIDDEN_APPS_EXTRA, showHiddenGames)
+
+        if (computer.activeAddress != null) {
+            i.putExtra(AppView.SELECTED_ADDRESS_EXTRA, computer.activeAddress?.address)
+            i.putExtra(AppView.SELECTED_PORT_EXTRA, computer.activeAddress?.port)
+        }
+
+        startActivity(i)
+    }
+
+    private fun doSecondaryScreenStream(computer: ComputerDetails) {
+        if (computer.state == ComputerDetails.State.OFFLINE || computer.activeAddress == null) {
+            showToast(getString(R.string.error_pc_offline))
+            return
+        }
+        if (computer.vddCapabilityVersion == 0) {
+            showToast(getString(R.string.error_vdd_unsupported))
+            return
+        }
+        if (managerBinder == null) {
+            showToast(getString(R.string.error_manager_not_running))
+            return
+        }
+
+        quickStartStreamWithScreenMode(computer, null, true, 4)
+    }
+
+    // Quick Start Stream Methods
+
+    private fun handleAvatarClick(computer: ComputerDetails, itemView: View) {
+        quickStartStream(computer, itemView, false)
+    }
+
+    private fun quickStartStream(computer: ComputerDetails, itemView: View?, isSecondaryScreen: Boolean) {
+        if (computer.state != ComputerDetails.State.ONLINE || computer.pairState != PairState.PAIRED) {
+            if (itemView != null) {
+                showHostActionSheet(computer)
+            }
+            return
+        }
+
+        if (managerBinder == null) {
+            showToast(getString(R.string.error_manager_not_running))
+            return
+        }
+
+        uiScope.launch {
+            val targetApp = withContext(Dispatchers.IO) {
+                if (computer.runningGameId != 0)
+                    getNvAppById(computer.runningGameId, computer.uuid!!)
+                else
+                    getDefaultQuickStartApp(computer)
+            }
+
+            if (targetApp == null) {
+                fallbackToAppList(computer)
+                return@launch
+            }
+
+            val targetComputer = prepareComputerWithAddress(computer)
+            if (targetComputer == null) {
+                showToast(getString(R.string.error_pc_offline))
+                return@launch
+            }
+            if (targetComputer.hasMultipleLanAddresses()) {
+                showAddressSelectionDialog(targetComputer)
+                return@launch
+            }
+            if (PairStatePreflight.isConfirmedNotPaired(targetComputer, managerBinder!!, "Quick start")) {
+                showToast(getString(R.string.scut_not_paired))
+                return@launch
+            }
+
+            startQuickStreamWithNetworkCheck(targetApp, targetComputer)
+        }
+    }
+
+    private fun startQuickStreamWithNetworkCheck(app: NvApp, computer: ComputerDetails) {
+        val binder = managerBinder ?: return
+        if (!computer.supportsNetworkQualityProbe()) {
+            ServerHelper.doStart(this, app, computer, binder)
+            return
+        }
+        val endpointIdentity = computer.activeAddress?.let { "${it.address}:${it.port}" }
+        val result = StreamNetworkQualityStore.load(this, computer.uuid, endpointIdentity)
+        val prefs = PreferenceConfiguration.readPreferences(this)
+        val recommendation = result?.recommendationFor(networkDeviceDisplay())
+        if (computer.runningGameId != 0 || result == null || recommendation == null ||
+            !result.shouldWarnForBitrate(prefs.bitrate, recommendation)
+        ) {
+            ServerHelper.doStart(this, app, computer, binder)
+            return
+        }
+
+        NetworkQualitySheet.showStartWarning(
+            context = this,
+            computerName = computer.name.orEmpty(),
+            currentBitrateKbps = prefs.bitrate,
+            recommendation = recommendation,
+            onContinue = { ServerHelper.doStart(this, app, computer, binder) },
+            onUseRecommendation = {
+                if (applyNetworkRecommendation(recommendation)) {
+                    ServerHelper.doStart(this, app, computer, binder)
+                }
+            }
+        )
+    }
+
+    private fun quickStartStreamWithScreenMode(computer: ComputerDetails, itemView: View?, isSecondaryScreen: Boolean, screenMode: Int) {
+        if (computer.state != ComputerDetails.State.ONLINE || computer.pairState != PairState.PAIRED) {
+            if (itemView != null) {
+                showHostActionSheet(computer)
+            }
+            return
+        }
+
+        if (managerBinder == null) {
+            showToast(getString(R.string.error_manager_not_running))
+            return
+        }
+
+        uiScope.launch {
+            val targetApp = withContext(Dispatchers.IO) {
+                if (computer.runningGameId != 0)
+                    getNvAppById(computer.runningGameId, computer.uuid!!)
+                else
+                    getDefaultQuickStartApp(computer)
+            }
+
+            if (targetApp == null) {
+                fallbackToAppList(computer)
+                return@launch
+            }
+
+            val targetComputer = prepareComputerWithAddress(computer)
+            if (targetComputer == null) {
+                showToast(getString(R.string.error_pc_offline))
+                return@launch
+            }
+            if (targetComputer.hasMultipleLanAddresses()) {
+                showAddressSelectionDialog(targetComputer)
+                return@launch
+            }
+            if (PairStatePreflight.isConfirmedNotPaired(targetComputer, managerBinder!!, "Secondary screen start")) {
+                showToast(getString(R.string.scut_not_paired))
+                return@launch
+            }
+
+            val intent = ServerHelper.createStartIntent(
+                this@PcView,
+                targetApp,
+                targetComputer,
+                managerBinder!!,
+                lastSettings = null,
+                useVdd = if (isSecondaryScreen) true else null
+            )
+            if (screenMode != -1) {
+                intent.putExtra(Game.EXTRA_SCREEN_COMBINATION_MODE, screenMode)
+            }
+            startActivity(intent)
+        }
+    }
+
+    private fun prepareComputerWithAddress(computer: ComputerDetails): ComputerDetails? {
+        val temp = ComputerDetails(computer)
+        if (temp.activeAddress == null) {
+            val best = temp.selectBestAddress() ?: return null
+            temp.activeAddress = best
+        }
+        return temp
+    }
+
+    private fun fallbackToAppList(computer: ComputerDetails) {
+        runOnUiThread {
+            showToast(getString(R.string.quick_start_load_app_list_first))
+            val target = prepareComputerWithAddress(computer)
+            doAppList(target ?: computer, newlyPaired = false, showHiddenGames = false)
+        }
+    }
+
+    // App Cache Methods
+
+    private fun getAppListFromCache(uuid: String): List<NvApp>? {
+        try {
+            val cacheKey = HostCacheKey.fromUuid(uuid) ?: return null
+            val rawAppList = CacheHelper.readInputStreamToString(
+                    CacheHelper.openCacheFileForInput(cacheDir, "applist", cacheKey))
+            return if (rawAppList.isEmpty()) null else NvHTTP.getAppListByReader(StringReader(rawAppList))
+        } catch (e: IOException) {
+            LimeLog.warning("Failed to read app list from cache: " + e.message)
+            return null
+        } catch (e: XmlPullParserException) {
+            LimeLog.warning("Failed to read app list from cache: " + e.message)
+            return null
+        }
+    }
+
+    private fun getDefaultQuickStartApp(computer: ComputerDetails): NvApp? {
+        if (computer.supportsDesktopSpecialApp) {
+            return NvApp(NvApp.DESKTOP_APP_NAME, NvApp.DESKTOP_APP_ID, false)
+        }
+
+        val appList = getAppListFromCache(computer.uuid!!)
+        return if (!appList.isNullOrEmpty()) appList[0] else null
+    }
+
+    private fun getNvAppById(appId: Int, uuid: String): NvApp? {
+        val appList = getAppListFromCache(uuid)
+        if (appList != null) {
+            for (app in appList) {
+                if (app.appId == appId) {
+                    AppCacheManager(this).saveAppInfo(uuid, app)
+                    return app
+                }
+            }
+        }
+        return AppCacheManager(this).getAppInfo(uuid, appId)
+    }
+
+    private fun restoreLastSession() {
+        if (managerBinder == null) {
+            showToast(getString(R.string.error_manager_not_running))
+            return
+        }
+
+        var target: ComputerDetails? = null
+        for (i in 0 until pcGridAdapter.rawCount) {
+            val computer = pcGridAdapter.getRawItem(i)
+            if (computer.details.state == ComputerDetails.State.ONLINE
+                    && computer.details.pairState == PairState.PAIRED
+                    && computer.details.runningGameId != 0) {
+                target = computer.details
+                break
+            }
+        }
+
+        if (target == null) {
+            showToast(getString(R.string.no_online_computer_with_running_game))
+            return
+        }
+
+        var app = getNvAppById(target.runningGameId, target.uuid!!)
+        if (app == null) {
+            app = NvApp("app", target.runningGameId, false)
+        }
+
+        showToast(getString(R.string.restoring_session, target.name))
+        uiScope.launch {
+            if (PairStatePreflight.isConfirmedNotPaired(target, managerBinder!!, "Restore session")) {
+                showToast(getString(R.string.scut_not_paired))
+                return@launch
+            }
+            ServerHelper.doStart(this@PcView, app, target, managerBinder!!, forceResumeCurrentSession = true)
+        }
+    }
+
+    private fun showAddressSelectionDialog(computer: ComputerDetails) {
+        val dialog = AddressSelectionDialog(this, computer) { address ->
+            val temp = ComputerDetails(computer)
+            temp.activeAddress = address
+            doAppList(temp, newlyPaired = false, showHiddenGames = false)
+        }
+        dialog.show()
+    }
+
+    // Host Action Sheet
+
+    private fun showHostActionSheet(details: ComputerDetails) {
+        stopComputerUpdates()
+
+        val status = when (details.state) {
+            ComputerDetails.State.ONLINE -> getString(R.string.pcview_menu_header_online)
+            ComputerDetails.State.OFFLINE -> getString(R.string.pcview_menu_header_offline)
+            else -> getString(R.string.pcview_menu_header_unknown)
+        }
+        AppActionSheet.show(
+            context = this,
+            title = details.name.orEmpty(),
+            subtitle = status,
+            activeStatus = details.state == ComputerDetails.State.ONLINE,
+            actions = buildHostPrimaryActions(details),
+            onAction = { handleHostAction(it.id, details) },
+            onDismiss = { selectedAction ->
+                if (selectedAction?.id != MORE_ACTIONS_ID) {
+                    startComputerUpdates()
+                }
+            }
+        )
+    }
+
+    private fun buildHostPrimaryActions(details: ComputerDetails): List<AppActionSheet.Action> = buildList {
+        fun add(
+            id: Int,
+            titleRes: Int,
+            destructive: Boolean = false,
+            sectionStart: Boolean = false,
+            opensSubmenu: Boolean = false
+        ) {
+            add(AppActionSheet.Action(
+                id = id,
+                title = getString(titleRes),
+                destructive = destructive,
+                sectionStart = sectionStart,
+                opensSubmenu = opensSubmenu
+            ))
+        }
+
+        val paired = details.pairState == PairState.PAIRED
+        if (details.state == ComputerDetails.State.OFFLINE || details.state == ComputerDetails.State.UNKNOWN) {
+            add(WOL_ID, R.string.pcview_menu_send_wol)
+        } else if (!paired) {
+            add(PAIR_ID, R.string.pcview_menu_pair_pc)
+        } else {
+            if (details.runningGameId != 0) {
+                add(RESUME_ID, R.string.applist_menu_resume)
+            }
+            add(FULL_APP_LIST_ID, R.string.pcview_menu_app_list)
+            if (details.vddCapabilityVersion != 0) {
+                add(SECONDARY_SCREEN_ID, R.string.pcview_menu_secondary_screen)
+            }
+            if (!details.nvidiaServer &&
+                HostUnlockUi.availability(this@PcView) != HostUnlockUi.Availability.UNSUPPORTED
+            ) {
+                this.add(AppActionSheet.Action(
+                    id = AUTO_UNLOCK_ID,
+                    title = getString(R.string.pcview_menu_auto_unlock),
+                    description = getString(R.string.pcview_menu_auto_unlock_summary),
+                    toggle = true,
+                    checked = HostUnlockCredentialStore.has(this@PcView, details.uuid)
+                ))
+            }
+        }
+
+        if (paired && details.state == ComputerDetails.State.ONLINE && details.supportsNetworkQualityProbe()) {
+            val endpointIdentity = details.activeAddress?.let { "${it.address}:${it.port}" }
+            val cached = StreamNetworkQualityStore.load(this@PcView, details.uuid, endpointIdentity)
+                ?.takeIf { it.isFresh() }
+            val trailing = cached?.let {
+                val qualityRes = when (it.quality) {
+                    StreamNetworkQuality.EXCELLENT -> R.string.network_quality_excellent
+                    StreamNetworkQuality.GOOD -> R.string.network_quality_good
+                    StreamNetworkQuality.FAIR -> R.string.network_quality_fair
+                    StreamNetworkQuality.POOR -> R.string.network_quality_poor
+                }
+                getString(
+                    R.string.network_quality_menu_summary,
+                    getString(qualityRes),
+                    DateUtils.getRelativeTimeSpanString(
+                        it.testedAtEpochMs,
+                        System.currentTimeMillis(),
+                        DateUtils.MINUTE_IN_MILLIS
+                    )
+                )
+            }
+            this.add(AppActionSheet.Action(
+                id = NETWORK_QUALITY_ID,
+                title = getString(R.string.network_quality_test_title),
+                sectionStart = true,
+                trailingText = trailing
+            ))
+        } else {
+            add(TEST_NETWORK_ID, R.string.pcview_menu_test_network, sectionStart = true)
+        }
+        add(
+            MORE_ACTIONS_ID,
+            R.string.pcview_menu_more_actions,
+            opensSubmenu = true
+        )
+        if (paired && details.runningGameId != 0) {
+            add(QUIT_ID, R.string.applist_menu_quit, destructive = true, sectionStart = true)
+        }
+    }
+
+    private fun showHostMoreActionSheet(details: ComputerDetails) {
+        stopComputerUpdates()
+        AppActionSheet.show(
+            context = this,
+            title = details.name.orEmpty(),
+            subtitle = getString(R.string.pcview_menu_more_actions),
+            actions = buildHostMoreActions(details),
+            onAction = { handleHostAction(it.id, details) },
+            onDismiss = { startComputerUpdates() }
+        )
+    }
+
+    private fun buildHostMoreActions(details: ComputerDetails): List<AppActionSheet.Action> = buildList {
+        fun add(id: Int, titleRes: Int, destructive: Boolean = false, sectionStart: Boolean = false) {
+            add(AppActionSheet.Action(
+                id = id,
+                title = getString(titleRes),
+                destructive = destructive,
+                sectionStart = sectionStart
+            ))
+        }
+
+        add(IPERF3_TEST_ID, R.string.network_bandwidth_test)
+        if (!details.nvidiaServer && resolveSunshineWebUiUrl(details) != null) {
+            add(OPEN_WEBUI_ID, R.string.pcview_menu_open_webui)
+        }
+        add(VIEW_DETAILS_ID, R.string.pcview_menu_details, sectionStart = true)
+        if (details.pairState == PairState.PAIRED && details.state == ComputerDetails.State.ONLINE) {
+            add(SLEEP_ID, R.string.send_sleep_command)
+        }
+        add(
+            DISABLE_IPV6_ID,
+            if (details.ipv6Disabled) R.string.pcview_menu_enable_ipv6
+            else R.string.pcview_menu_disable_ipv6
+        )
+        if (details.nvidiaServer) {
+            add(GAMESTREAM_EOL_ID, R.string.pcview_menu_eol)
+        }
+        add(DELETE_ID, R.string.pcview_menu_delete_pc, destructive = true, sectionStart = true)
+    }
+
+    private fun handleHostAction(itemId: Int, details: ComputerDetails): Boolean {
+        return when (itemId) {
+            PAIR_ID -> {
+                doPair(details)
+                true
+            }
+            UNPAIR_ID -> {
+                doUnpair(details)
+                true
+            }
+            WOL_ID -> {
+                doWakeOnLan(details)
+                true
+            }
+            DELETE_ID -> {
+                handleDeletePc(details)
+                true
+            }
+            FULL_APP_LIST_ID -> {
+                doAppList(details, newlyPaired = false, showHiddenGames = true)
+                true
+            }
+            RESUME_ID -> {
+                handleResume(details)
+                true
+            }
+            QUIT_ID -> {
+                handleQuit(details)
+                true
+            }
+            SLEEP_ID -> {
+                handleSleep(details)
+                true
+            }
+            VIEW_DETAILS_ID -> {
+                Dialog.displayDetailsDialog(this, getString(R.string.title_details), details.toString(), false)
+                true
+            }
+            TEST_NETWORK_ID -> {
+                ServerHelper.doNetworkTest(this)
+                true
+            }
+            NETWORK_QUALITY_ID -> {
+                runNetworkQualityTest(details)
+                true
+            }
+            IPERF3_TEST_ID -> {
+                handleIperf3Test(details)
+                true
+            }
+            SECONDARY_SCREEN_ID -> {
+                handleSecondaryScreen(details)
+                true
+            }
+            GAMESTREAM_EOL_ID -> {
+                HelpLauncher.launchGameStreamEolFaq(this)
+                true
+            }
+            DISABLE_IPV6_ID -> {
+                handleToggleIpv6Disabled(details)
+                true
+            }
+            OPEN_WEBUI_ID -> {
+                handleOpenSunshineWebUi(details)
+                true
+            }
+            MORE_ACTIONS_ID -> {
+                showHostMoreActionSheet(details)
+                true
+            }
+            AUTO_UNLOCK_ID -> {
+                toggleAutoUnlock(details)
+                true
+            }
+            else -> false
+        }
+    }
+
+    private fun toggleAutoUnlock(details: ComputerDetails) {
+        val hostUuid = details.uuid ?: return
+        val hostName = details.name.orEmpty()
+        if (!HostUnlockCredentialStore.has(this, hostUuid)) {
+            hostUnlockUi.showSetup(hostUuid, hostName) { pin ->
+                java.util.Arrays.fill(pin, '\u0000')
+                showToast(getString(R.string.host_unlock_enabled))
+            }
+            return
+        }
+
+        val dialog = AlertDialog.Builder(this, R.style.AppDialogStyle)
+            .setTitle(R.string.host_unlock_disable_title)
+            .setMessage(getString(R.string.host_unlock_disable_message, hostName))
+            .setPositiveButton(R.string.host_unlock_disable_confirm) { _, _ ->
+                HostUnlockCredentialStore.remove(this, hostUuid)
+                showToast(getString(R.string.host_unlock_disabled))
+            }
+            .setNegativeButton(R.string.dialog_button_cancel, null)
+            .create()
+        dialog.show()
+        AppDialogStyler.apply(dialog, this)
+    }
+
+    private fun runNetworkQualityTest(computer: ComputerDetails) {
+        val binder = managerBinder
+        if (binder == null || computer.activeAddress == null || computer.uuid.isNullOrBlank()) {
+            showToast(getString(R.string.error_pc_offline))
+            return
+        }
+
+        var testJob: Job? = null
+        val activeProbe = AtomicReference<NvHTTP?>()
+        val cancelProbe = {
+            testJob?.cancel()
+            activeProbe.getAndSet(null)?.cancelNetworkProbe()
+            Unit
+        }
+        val testingSheet = NetworkQualitySheet.showTesting(
+            this,
+            computer.name.orEmpty(),
+            onCancel = cancelProbe
+        )
+
+        testJob = uiScope.launch {
+            try {
+                val measurement = runInterruptible(Dispatchers.IO) {
+                    val http = NvHTTP(
+                        ServerHelper.getCurrentAddressFromComputer(computer),
+                        computer.httpsPort,
+                        binder.getUniqueId(),
+                        clientName,
+                        computer.serverCert,
+                        PlatformBinding.getCryptoProvider(this@PcView)
+                    )
+                    activeProbe.set(http)
+                    try {
+                        http.runNetworkProbe(testingSheet::updateProgress)
+                    } finally {
+                        activeProbe.compareAndSet(http, null)
+                    }
+                }
+                if (!isActive) return@launch
+
+                val result = StreamNetworkTestResult(
+                    bandwidthMbps = measurement.bandwidthMbps,
+                    responseLatencyMs = measurement.responseLatencyMs,
+                    responseJitterMs = measurement.responseJitterMs
+                )
+                val endpointIdentity = computer.activeAddress?.let { "${it.address}:${it.port}" }
+                StreamNetworkQualityStore.save(this@PcView, computer.uuid, endpointIdentity, result)
+                val recommendation = result.recommendationFor(networkDeviceDisplay())
+                pcGridAdapter.notifyDataSetChanged()
+                testingSheet.dismiss()
+                if (!isFinishing && !isDestroyed) {
+                    NetworkQualitySheet.showResult(
+                        this@PcView,
+                        computer.name.orEmpty(),
+                        result,
+                        recommendation,
+                        onSaveToSceneOne = {
+                            recommendation?.let(::saveNetworkRecommendationToSceneOne)
+                        },
+                        onContinue = {
+                            if (recommendation != null && applyNetworkRecommendation(recommendation)) {
+                                quickStartStream(computer, itemView = null, isSecondaryScreen = false)
+                            }
+                        }
+                    )
+                }
+            } catch (_: CancellationException) {
+                testingSheet.dismiss()
+            } catch (e: Exception) {
+                testingSheet.dismiss()
+                if (!isActive) return@launch
+                if (!isFinishing && !isDestroyed) {
+                    NetworkQualitySheet.showError(
+                        this@PcView,
+                        computer.name.orEmpty(),
+                        networkProbeErrorMessage(e)
+                    )
+                }
+            }
+        }
+    }
+
+    private fun networkProbeErrorMessage(error: Exception): String {
+        if (error is FileNotFoundException) {
+            return getString(R.string.network_quality_unsupported)
+        }
+        if (error is NvHTTP.NetworkProbeException) {
+            return when (error.reason) {
+                "stream_active" -> getString(R.string.network_quality_stream_active)
+                "not_paired" -> getString(R.string.scut_not_paired)
+                "rate_limited" -> getString(R.string.network_quality_rate_limited)
+                "unsupported_version", "invalid_capabilities" -> getString(R.string.network_quality_unsupported)
+                else -> getString(R.string.network_quality_test_failed_detail)
+            }
+        }
+        return error.message?.takeIf { it.isNotBlank() }
+            ?: getString(R.string.network_quality_test_failed_detail)
+    }
+
+    private fun recommendedPreferences(recommendation: StreamNetworkRecommendation): PreferenceConfiguration =
+        PreferenceConfiguration.readPreferences(this).apply {
+            width = recommendation.width
+            height = recommendation.height
+            isNativeResolution = recommendation.usesNativeResolution
+            isCustomResolution = !recommendation.usesNativeResolution &&
+                !PreferenceConfiguration.RESOLUTIONS.contains("${recommendation.width}x${recommendation.height}")
+            fps = recommendation.fps
+            bitrate = recommendation.bitrateKbps
+            enableAdaptiveBitrate = true
+        }
+
+    private fun saveNetworkRecommendationToSceneOne(recommendation: StreamNetworkRecommendation): Boolean {
+        persistRecommendedCustomResolution(recommendation)
+        return saveConfigurationToScene(
+            sceneNumber = 1,
+            preferences = recommendedPreferences(recommendation),
+            markActive = false
+        )
+    }
+
+    private fun applyNetworkRecommendation(recommendation: StreamNetworkRecommendation): Boolean {
+        val prefs = recommendedPreferences(recommendation)
+        persistRecommendedCustomResolution(recommendation)
+        if (!prefs.writeScenePreferences(this)) {
+            showToast(getString(R.string.config_save_failed))
+            return false
+        }
+
+        pcGridAdapter.updateLayoutWithPreferences(this, prefs)
+        showToast(getString(R.string.network_quality_recommendation_applied))
+        return true
+    }
+
+    private fun persistRecommendedCustomResolution(recommendation: StreamNetworkRecommendation) {
+        if (recommendation.usesNativeResolution) return
+        val resolution = "${recommendation.width}x${recommendation.height}"
+        if (PreferenceConfiguration.RESOLUTIONS.contains(resolution)) return
+
+        ResolutionValidator.parseResolution(resolution)?.let {
+            CustomResolutionsStore.add(this, it)
+        }
+    }
+
+    private fun networkDeviceDisplay(): StreamDeviceDisplay {
+        val targetDisplay = TargetDisplayResolver(this).resolve(
+            PreferenceConfiguration.isExternalDisplayEnabled(this)
+        )
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val modes = targetDisplay.supportedModes
+            val nativeMode = modes.maxByOrNull {
+                it.physicalWidth.toLong() * it.physicalHeight.toLong()
+            } ?: targetDisplay.mode
+            val maxRefreshRate = modes.asSequence()
+                .filter {
+                    it.physicalWidth == nativeMode.physicalWidth &&
+                        it.physicalHeight == nativeMode.physicalHeight
+                }
+                .maxOfOrNull { it.refreshRate }
+                ?: nativeMode.refreshRate
+            return StreamDeviceDisplay(
+                nativeWidth = nativeMode.physicalWidth,
+                nativeHeight = nativeMode.physicalHeight,
+                maxFps = maxRefreshRate.roundToInt()
+            )
+        }
+
+        val size = android.graphics.Point()
+        targetDisplay.getRealSize(size)
+        return StreamDeviceDisplay(size.x, size.y, targetDisplay.refreshRate.toInt())
+    }
+
+    /**
+     * 解析 Sunshine 主机的 WebUI 地址：使用当前激活地址（在线时）或备选已知地址，
+     * 端口 = HTTP 端口 + 1（Sunshine 默认 47989 -> 47990，HTTPS）。
+     */
+    private fun resolveSunshineWebUiUrl(details: ComputerDetails): String? {
+        val tuple = details.activeAddress
+            ?: details.localAddress
+            ?: details.manualAddress
+            ?: details.remoteAddress
+            ?: details.ipv6Address
+            ?: return null
+        val host = if (tuple.address.contains(":")) "[${tuple.address}]" else tuple.address
+        val webPort = tuple.port + 1
+        return "https://$host:$webPort"
+    }
+
+    private fun handleOpenSunshineWebUi(details: ComputerDetails) {
+        val url = resolveSunshineWebUiUrl(details)
+        if (url == null) {
+            showToast(getString(R.string.pcview_open_webui_unavailable))
+            return
+        }
+        // LAN（私网 IP）下 Sunshine 用自签证书，Android System WebView 147+ 在
+        // 私网 IP + self-signed 组合下即使 onReceivedSslError → proceed() 也会
+        // 进入 ERR_TOO_MANY_RETRIES 死循环（chromium 不缓存 trust 决定）。
+        // 此场景跳转系统浏览器，由用户在浏览器里"高级 → 继续访问"绕过。
+        if (NetHelper.isPrivateNetworkUrl(url)) {
+            try {
+                val view = Intent(Intent.ACTION_VIEW, android.net.Uri.parse(url))
+                view.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                startActivity(view)
+                return
+            } catch (e: Exception) {
+                LimeLog.warning("No external browser for $url: ${e.message}")
+                showToast(getString(R.string.pcview_open_webui_no_browser))
+                return
+            }
+        }
+        try {
+            val certDer = details.serverCert?.encoded
+            val intent = SunshineWebUiActivity.createIntent(
+                this,
+                url,
+                getString(R.string.pcview_menu_open_webui) + " - " + (details.name ?: ""),
+                certDer
+            )
+            startActivity(intent)
+        } catch (e: Exception) {
+            LimeLog.warning("Failed to launch in-app WebUI for $url: ${e.message}")
+            showToast(getString(R.string.pcview_open_webui_no_browser))
+        }
+    }
+
+    private fun handleDeletePc(details: ComputerDetails) {
+        if (ActivityManager.isUserAMonkey()) {
+            LimeLog.info("Ignoring delete PC request from monkey")
+            return
+        }
+        UiHelper.displayDeletePcConfirmationDialog(this, details, {
+            if (managerBinder == null) {
+                showToast(getString(R.string.error_manager_not_running))
+                return@displayDeletePcConfirmationDialog
+            }
+            removeComputer(details)
+        }, null)
+    }
+
+    private fun handleResume(details: ComputerDetails) {
+        if (managerBinder == null) {
+            showToast(getString(R.string.error_manager_not_running))
+            return
+        }
+        var app = getNvAppById(details.runningGameId, details.uuid!!)
+        if (app == null) {
+            app = NvApp("app", details.runningGameId, false)
+        }
+        val binder = managerBinder!!
+        uiScope.launch {
+            if (PairStatePreflight.isConfirmedNotPaired(details, binder, "Resume session")) {
+                showToast(getString(R.string.scut_not_paired))
+                return@launch
+            }
+            ServerHelper.doStart(this@PcView, app, details, binder, forceResumeCurrentSession = true)
+        }
+    }
+
+    private fun handleQuit(details: ComputerDetails) {
+        if (managerBinder == null) {
+            showToast(getString(R.string.error_manager_not_running))
+            return
+        }
+        UiHelper.displayQuitConfirmationDialog(this,
+                { ServerHelper.doQuit(this, details, NvApp("app", 0, false), managerBinder!!, null) },
+                null)
+    }
+
+    private fun handleSleep(details: ComputerDetails) {
+        val binder = managerBinder
+        if (binder == null) {
+            showToast(getString(R.string.error_manager_not_running))
+            return
+        }
+        UiHelper.displaySleepConfirmationDialog(this, details, {
+            ServerHelper.pcSleep(this, details, binder, null)
+        }, null)
+    }
+
+    private fun handleIperf3Test(details: ComputerDetails) {
+        try {
+            val ip = ServerHelper.getCurrentAddressFromComputer(details).address
+            Iperf3Tester(this, ip).show()
+        } catch (e: IOException) {
+            showToast(getString(R.string.unable_to_get_pc_address, e.message))
+        }
+    }
+
+    private fun handleSecondaryScreen(details: ComputerDetails) {
+        if (managerBinder == null) {
+            showToast(getString(R.string.error_manager_not_running))
+            return
+        }
+        doSecondaryScreenStream(details)
+    }
+
+    private fun handleToggleIpv6Disabled(details: ComputerDetails) {
+        if (managerBinder == null) {
+            showToast(getString(R.string.error_manager_not_running))
+            return
+        }
+
+        // 切换IPv6禁用状态
+        details.ipv6Disabled = !details.ipv6Disabled
+
+        // 如果禁用了IPv6，清空所有IPv6相关地址
+        if (details.ipv6Disabled) {
+            details.ipv6Address = null
+
+            // 如果activeAddress是IPv6，清空它
+            if (ComputerDetails.isIpv6Address(details.activeAddress)) {
+                details.activeAddress = null
+            }
+
+            // 从availableAddresses中移除所有IPv6地址
+            details.availableAddresses.removeIf { ComputerDetails.isIpv6Address(it) }
+        }
+
+        // 更新数据库
+        managerBinder?.updateComputer(details)
+
+        // 显示Toast提示用户当前状态
+        if (details.ipv6Disabled) {
+            showToast(getString(R.string.pcview_ipv6_disabled))
+        } else {
+            showToast(getString(R.string.pcview_ipv6_enabled))
+        }
+        // 刷新列表
+        startComputerUpdates()
+    }
+
+    // Adapter Fragment Callbacks
+
+    override fun getAdapterFragmentLayoutId(): Int {
+        return R.layout.pc_grid_view
+    }
+
+    override fun receiveAbsListView(gridView: View?) {
+        if (gridView == null) return
+
+        receiveAdapterView(gridView)
+    }
+
+    @SuppressLint("ClickableViewAccessibility")
+    fun receiveAdapterView(view: View) {
+        if (view !is AbsListView) return
+
+        val listView = view
+        pcListView = listView
+        listView.setSelector(android.R.color.transparent)
+        listView.setAdapter(pcGridAdapter)
+
+        setupListAnimation(listView)
+        handleFirstLoadAnimation(listView)
+        setupListItemClick(listView)
+        setupGridColumnWidth(view)
+        setupEmptyAreaLongPress(listView)
+
+        UiHelper.applyStatusBarPadding(listView)
+        setupHostActionSheet(listView)
+    }
+
+    private fun setupListAnimation(listView: AbsListView) {
+        // stagger 0.08：在 splash 退场窗口（~280ms）内启动级联，留一点呼吸感避免“齐刷刷”僵硬。
+        // 单卡 380ms，整体在 splash 收尾后再多 120ms 内完成 — 视觉接力而非二段式。
+        val controller = LayoutAnimationController(
+                AnimationUtils.loadAnimation(this, R.anim.pc_grid_item_sort), 0.08f)
+        controller.order = LayoutAnimationController.ORDER_NORMAL
+        listView.layoutAnimation = controller
+    }
+
+    private fun handleFirstLoadAnimation(listView: AbsListView) {
+        if (!isFirstLoad) return
+
+        // 首屏不再额外加 listView 整体淡入（之前 250ms postDelayed + 200ms alpha）——
+        // 那样会让卡片在 splash 退完后才入场，造成明显脱节。
+        // 现在直接调度 layoutAnimation，让卡片与 splash 退场同步澌起。
+        listView.alpha = 1f
+        pcGridAdapter.notifyDataSetChanged()
+        listView.scheduleLayoutAnimation()
+        isFirstLoad = false
+    }
+
+    private fun setupListItemClick(listView: AbsListView) {
+        listView.setOnItemClickListener { _, view, pos, _ ->
+            val computer = pcGridAdapter.getItem(pos) as ComputerObject
+
+            if (PcGridAdapter.isAddComputerCard(computer)) {
+                showAddComputerActionSheet()
+                return@setOnItemClickListener
+            }
+
+            if (computer.details.state == ComputerDetails.State.UNKNOWN
+                    || computer.details.state == ComputerDetails.State.OFFLINE) {
+                showHostActionSheet(computer.details)
+            } else if (computer.details.pairState != PairState.PAIRED) {
+                doPair(computer.details)
+            } else if (computer.details.hasMultipleLanAddresses()) {
+                showAddressSelectionDialog(computer.details)
+            } else {
+                val temp = prepareComputerWithAddress(computer.details)
+                if (temp != null) {
+                    doAppList(temp, newlyPaired = false, showHiddenGames = false)
+                } else {
+                    showToast(getString(R.string.error_pc_offline))
+                }
+            }
+        }
+    }
+
+    private fun setupGridColumnWidth(view: View) {
+        if (view is GridView) {
+            calculateDynamicColumnWidth(view)
+        }
+    }
+
+    private fun setupHostActionSheet(listView: AbsListView) {
+        listView.setOnItemLongClickListener { _, _, position, _ ->
+            val computer = pcGridAdapter.getItem(position) as ComputerObject
+            if (PcGridAdapter.isAddComputerCard(computer)) {
+                false
+            } else {
+                showHostActionSheet(computer.details)
+                true
+            }
+        }
+    }
+
+    @SuppressLint("ClickableViewAccessibility")
+    private fun setupEmptyAreaLongPress(listView: AbsListView) {
+        val detector = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
+            override fun onLongPress(e: MotionEvent) {
+                if (listView.pointToPosition(e.x.toInt(), e.y.toInt()) == AdapterView.INVALID_POSITION) {
+                    saveImageWithPermissionCheck()
+                }
+            }
+        })
+
+        listView.setOnTouchListener { _, event ->
+            if (listView.pointToPosition(event.x.toInt(), event.y.toInt()) == AdapterView.INVALID_POSITION) {
+                detector.onTouchEvent(event)
+            }
+            false
+        }
+    }
+
+    private fun calculateDynamicColumnWidth(gridView: GridView) {
+        val density = resources.displayMetrics.density
+        val screenWidth = resources.displayMetrics.widthPixels
+        val availableWidth = screenWidth - gridView.paddingStart - gridView.paddingEnd
+        val spacingPx = (15f * density).toInt()
+        val minColumnPx = (180f * density).toInt()
+
+        val numColumns = 1.coerceAtLeast((availableWidth + spacingPx) / (minColumnPx + spacingPx))
+        val columnWidth = (availableWidth - (numColumns - 1) * spacingPx) / numColumns
+
+        gridView.columnWidth = columnWidth
+    }
+
+    // Dialogs
+
+    private fun showEasyTierControlDialog() {
+        easyTierController?.showControlDialog()
+    }
+
+    // VPN Permission
+
+    override fun requestVpnPermission() {
+        val intent = VpnService.prepare(this)
+        if (intent != null) {
+            startActivityForResult(intent, VPN_PERMISSION_REQUEST_CODE)
+        } else {
+            onActivityResult(VPN_PERMISSION_REQUEST_CODE, RESULT_OK, null)
+        }
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        // Handle ZXing scan result
+        val scanResult = IntentIntegrator.parseActivityResult(requestCode, resultCode, data)
+        if (scanResult != null) {
+            if (scanResult.contents != null) {
+                handleQrPairResult(scanResult.contents.trim())
+            }
+            return
+        }
+
+        if (requestCode == ADD_COMPUTER_REQUEST_CODE) {
+            if (resultCode == RESULT_OK) {
+                pendingAddedComputerUuid = data?.getStringExtra(
+                    AddComputerManually.EXTRA_ADDED_COMPUTER_UUID
+                )
+                showPendingAddedComputer()
+            }
+            return
+        }
+
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == VPN_PERMISSION_REQUEST_CODE && easyTierController != null) {
+            easyTierController?.handleVpnPermissionResult(resultCode)
+        } else if (requestCode == UpdateManager.INSTALL_PERMISSION_REQUEST_CODE) {
+            UpdateManager.onInstallPermissionResult(this)
+        }
+    }
+
+    private fun showPendingAddedComputer() {
+        val uuid = pendingAddedComputerUuid ?: return
+        val details = managerBinder?.getComputer(uuid) ?: return
+        pendingAddedComputerUuid = null
+        updateComputer(details)
+    }
+
+    // Utility
+
+    private fun showToast(message: String) {
+        Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
+    }
+
+    // Inner Classes
+
+    class ComputerObject(var details: ComputerDetails) {
+
+        override fun toString(): String {
+            return details.name!!
+        }
+    }
+}

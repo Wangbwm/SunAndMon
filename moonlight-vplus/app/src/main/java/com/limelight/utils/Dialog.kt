@@ -1,0 +1,318 @@
+package com.limelight.utils
+
+import android.app.Activity
+import android.app.AlertDialog
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.view.KeyEvent
+import android.view.LayoutInflater
+import android.view.View
+import android.view.WindowManager
+import android.widget.Button
+import android.widget.ImageButton
+import android.widget.TextView
+import android.widget.Toast
+import com.limelight.R
+
+class Dialog private constructor(
+    private val activity: Activity,
+    private val title: String,
+    private val message: String,
+    private val runOnDismiss: Runnable,
+    private val isDetailsDialog: Boolean = false
+) : Runnable {
+
+    private lateinit var alert: AlertDialog
+    override fun run() {
+        // Connection diagnostics can finish after Activity recreation. isFinishing stays
+        // false on the old, destroyed instance even after its window token is removed.
+        // Check here on the UI thread, after any queued dispatch and before creating a window.
+        if (activity.isFinishing || activity.isDestroyed) return
+
+        if (isDetailsDialog) {
+            createDetailsDialog()
+        } else {
+            createStandardDialog()
+        }
+    }
+
+    private fun createStandardDialog() {
+        alert = AlertDialog.Builder(activity, R.style.AppDialogStyle).create()
+
+        alert.setTitle(title)
+        alert.setMessage(message)
+        alert.setCancelable(false)
+        alert.setCanceledOnTouchOutside(false)
+
+        alert.setButton(AlertDialog.BUTTON_POSITIVE, activity.resources.getText(android.R.string.ok)) { dialog, _ ->
+            dismissFromUser()
+        }
+        alert.setButton(AlertDialog.BUTTON_NEUTRAL, activity.resources.getText(R.string.help)) { dialog, _ ->
+            dismissFromUser()
+            HelpLauncher.launchTroubleshooting(activity)
+        }
+        alert.setOnShowListener {
+            val button = alert.getButton(AlertDialog.BUTTON_POSITIVE)
+            button.isFocusable = true
+            button.isFocusableInTouchMode = true
+            button.requestFocus()
+        }
+
+        synchronized(rundownDialogs) {
+            rundownDialogs.add(this)
+            alert.show()
+        }
+        notifyVisibilityChanged()
+
+        AppDialogStyler.apply(alert, activity)
+        AppDialogStyler.installDismissKeys(alert, ::dismissFromUser, dismissOnBack = true)
+
+        alert.window?.let { window ->
+            val layoutParams = window.attributes
+            layoutParams.alpha = 0.8f
+            window.attributes = layoutParams
+        }
+    }
+
+    private fun createDetailsDialog() {
+        val builder = AlertDialog.Builder(activity, R.style.AppDialogStyle)
+
+        val dialogView = LayoutInflater.from(activity).inflate(R.layout.details_dialog, null)
+
+        val titleView = dialogView.findViewById<TextView>(R.id.detailsTitle)
+        val contentView = dialogView.findViewById<TextView>(R.id.detailsContent)
+        val copyButton = dialogView.findViewById<ImageButton>(R.id.copyButton)
+
+        titleView.text = title
+        contentView.text = formatDetailsMessage(message)
+
+        copyButton.setOnClickListener {
+            val clipboard = activity.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            val clip = ClipData.newPlainText(
+                activity.getString(R.string.copy_details),
+                contentView.text.toString()
+            )
+            clipboard.setPrimaryClip(clip)
+            Toast.makeText(activity, activity.getString(R.string.copy_success), Toast.LENGTH_SHORT).show()
+        }
+
+        copyButton.isFocusable = true
+        copyButton.isFocusableInTouchMode = true
+        contentView.isFocusable = true
+        contentView.isFocusableInTouchMode = true
+
+        copyButton.setOnKeyListener { _, keyCode, event ->
+            if (event.action == KeyEvent.ACTION_DOWN) {
+                when (keyCode) {
+                    KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> {
+                        copyButton.performClick()
+                        true
+                    }
+                    KeyEvent.KEYCODE_DPAD_DOWN -> {
+                        contentView.requestFocus()
+                        true
+                    }
+                    KeyEvent.KEYCODE_DPAD_UP -> {
+                        titleView.requestFocus()
+                        true
+                    }
+                    else -> false
+                }
+            } else false
+        }
+
+        contentView.setOnKeyListener { _, keyCode, event ->
+            if (event.action == KeyEvent.ACTION_DOWN) {
+                when (keyCode) {
+                    KeyEvent.KEYCODE_DPAD_UP -> {
+                        copyButton.requestFocus()
+                        true
+                    }
+                    else -> false
+                }
+            } else false
+        }
+
+        titleView.setOnKeyListener { _, keyCode, event ->
+            if (event.action == KeyEvent.ACTION_DOWN) {
+                when (keyCode) {
+                    KeyEvent.KEYCODE_DPAD_DOWN -> {
+                        copyButton.requestFocus()
+                        true
+                    }
+                    else -> false
+                }
+            } else false
+        }
+
+        builder.setView(dialogView)
+        builder.setPositiveButton(android.R.string.ok) { _, _ ->
+            dismissFromUser()
+        }
+
+        alert = builder.create()
+        alert.setCancelable(false)
+        alert.setCanceledOnTouchOutside(false)
+
+        synchronized(rundownDialogs) {
+            rundownDialogs.add(this)
+            alert.show()
+        }
+        notifyVisibilityChanged()
+
+        alert.window?.let { window ->
+            val layoutParams = window.attributes
+            layoutParams.alpha = 0.8f
+            window.attributes = layoutParams
+        }
+
+        alert.setOnShowListener {
+            copyButton.requestFocus()
+        }
+
+        alert.setOnKeyListener { _, keyCode, event ->
+            com.limelight.ui.UiDismissKeyHandler.handle(
+                event.action,
+                keyCode,
+                ::dismissFromUser
+            )
+        }
+    }
+
+    private fun dismissFromUser() {
+        dismissFromRundown()
+        runOnDismiss.run()
+    }
+
+    private fun dismissFromRundown() {
+        synchronized(rundownDialogs) {
+            rundownDialogs.remove(this)
+        }
+        safeDismiss(this)
+        notifyVisibilityChanged()
+    }
+
+    private fun formatDetailsMessage(message: String): String {
+        return message.split("\n").joinToString("\n") { line ->
+            val trimmed = line.trim()
+            if (trimmed.isEmpty()) {
+                ""
+            } else if (trimmed.contains(": ")) {
+                val parts = trimmed.split(": ", limit = 2)
+                if (parts.size == 2) {
+                    val label = parts[0].trim()
+                    val value = parts[1].trim()
+                    val icon = getIconForLabel(label)
+                    "$icon ${localizeDetailsLabel(label)}: $value"
+                } else {
+                    line
+                }
+            } else {
+                line
+            }
+        }
+    }
+
+    private fun localizeDetailsLabel(label: String): String {
+        val resource = when (label) {
+            "Name" -> R.string.details_name
+            "State" -> R.string.details_state
+            "Active Address" -> R.string.details_active_address
+            "Local Address" -> R.string.details_local_address
+            "Remote Address" -> R.string.details_remote_address
+            "IPv6 Address" -> R.string.details_ipv6_address
+            "Manual Address" -> R.string.details_manual_address
+            "MAC Address" -> R.string.details_mac_address
+            "Pair State" -> R.string.details_pair_state
+            "Running Game ID" -> R.string.details_running_game
+            "HTTPS Port" -> R.string.details_https_port
+            "Sunshine Version" -> R.string.details_sunshine_version
+            "Desktop Special App Support" -> R.string.details_desktop_support
+            "VDD Capability Version" -> R.string.details_vdd_version
+            "HDR Supported" -> R.string.details_hdr_support
+            "Super CMDs" -> R.string.details_super_commands
+            else -> return label
+        }
+        return activity.getString(resource)
+    }
+
+    private fun getIconForLabel(label: String): String = when (label.lowercase()) {
+        "name" -> "📱"
+        "state" -> "🔄"
+        "uuid" -> "🔑"
+        "id" -> "🆔"
+        "address", "local address", "remote address", "ipv6 address", "manual address", "active address" -> "🌐"
+        "mac address" -> "📡"
+        "pair state" -> "🔗"
+        "running game id" -> "🎮"
+        "https port" -> "🔒"
+        "hdr supported" -> "🎨"
+        "super cmds" -> "⚡"
+        else -> "🔹"
+    }
+
+    companion object {
+        private val rundownDialogs = ArrayList<Dialog>()
+        private var visibilityListener: (() -> Unit)? = null
+
+        fun setVisibilityListener(listener: (() -> Unit)?) {
+            visibilityListener = listener
+        }
+
+        fun hasVisibleDialog(): Boolean {
+            return synchronized(rundownDialogs) { rundownDialogs.isNotEmpty() }
+        }
+
+        private fun notifyVisibilityChanged() {
+            visibilityListener?.invoke()
+        }
+
+        fun closeDialogs() {
+            val dialogs = synchronized(rundownDialogs) {
+                val dialogs = rundownDialogs.toList()
+                rundownDialogs.clear()
+                dialogs
+            }
+
+            for (d in dialogs) {
+                safeDismiss(d)
+            }
+            notifyVisibilityChanged()
+        }
+
+        private fun safeDismiss(d: Dialog) {
+            // Activity 已经 finishing / destroyed 时，DecorView 可能已经从 WindowManager 解绑，
+            // 此时 isShowing 仍可能为 true，直接 dismiss 会触发
+            // IllegalArgumentException: View ... not attached to window manager
+            if (d.activity.isFinishing || d.activity.isDestroyed) {
+                return
+            }
+            try {
+                if (d.alert.isShowing) {
+                    d.alert.dismiss()
+                }
+            } catch (e: IllegalArgumentException) {
+                // View 已与 WindowManager 解绑，安全忽略
+            } catch (e: RuntimeException) {
+                // 兜底：任何 dismiss 异常都不应让 onStop 崩溃
+            }
+        }
+
+        fun displayDialog(activity: Activity, title: String, message: String, endAfterDismiss: Boolean) {
+            activity.runOnUiThread(Dialog(activity, title, message, Runnable {
+                if (endAfterDismiss) activity.finish()
+            }))
+        }
+
+        fun displayDetailsDialog(activity: Activity, title: String, message: String, endAfterDismiss: Boolean) {
+            activity.runOnUiThread(Dialog(activity, title, message, Runnable {
+                if (endAfterDismiss) activity.finish()
+            }, isDetailsDialog = true))
+        }
+
+        fun displayDialog(activity: Activity, title: String, message: String, runOnDismiss: Runnable) {
+            activity.runOnUiThread(Dialog(activity, title, message, runOnDismiss))
+        }
+    }
+}

@@ -1,0 +1,18 @@
+<resources>
+
+    <!--
+        Base application theme for API 21+. This theme completely replaces
+        AppBaseTheme from BOTH res/values/styles.xml and
+        res/values-v21/styles.xml on API 21+ devices.
+    -->
+    <style name="AppBaseTheme" parent="android:Theme.Material">
+        <!-- API 21–28 也使用透明系统栏，与 v29+ 保持一致的沉浸式观感 -->
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <!-- 强调色槽位默认值（vXX 的 AppBaseTheme 是整包替换，默认值必须逐份声明） -->
+        <item name="appAccent">@color/ui_shell_accent</item>
+        <item name="appAccentSoft">@color/ui_shell_accent_soft</item>
+        <item name="appAccentFocus">@color/ui_shell_accent_focus</item>
+    </style>
+
+</resources>

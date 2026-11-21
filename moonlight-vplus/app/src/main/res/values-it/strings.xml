@@ -1,0 +1,374 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Shortcut strings -->
+    <string name="scut_deleted_pc">PC eliminato</string>
+    <string name="scut_not_paired">PC non accoppiato</string>
+    <!-- Help strings -->
+    <string name="help_loading_title">Visualizza assistenza</string>
+    <string name="help_loading_msg">Caricamento pagina di assistenza…</string>
+    <!-- PC view menu entries -->
+    <string name="pcview_menu_app_list">Vedi Tutte le Applicazioni</string>
+    <string name="pcview_menu_pair_pc">Accoppia PC</string>
+    <string name="pcview_menu_unpair_pc">Disaccoppia PC</string>
+    <string name="pcview_menu_send_wol">Invia richiesta Wake-On-LAN</string>
+    <string name="pcview_menu_delete_pc">Rimuovi PC</string>
+    <!-- Pair messages -->
+    <string name="pairing">Accoppiamento…</string>
+    <string name="pair_pc_offline">Il PC è offline</string>
+    <string name="pair_pc_ingame">PC con applicazione avviata. Devi chiudere l\'applicazione prima dell\'accoppiamento.</string>
+    <string name="pair_pairing_title">Accoppiamento</string>
+    <string name="pair_pairing_msg">Inserisci il seguente PIN sul PC:</string>
+    <string name="pair_incorrect_pin">PIN non corretto</string>
+    <string name="pair_fail">Accoppiamento fallito</string>
+    <string name="pair_already_in_progress">Accoppiamento già in corso</string>
+    <!-- WOL messages -->
+    <string name="wol_pc_online">PC già avviato</string>
+    <string name="wol_no_mac">Impossibile risvegliare il PC perché non è stato salvato nessun indirizzo MAC</string>
+    <string name="wol_waking_pc">Risveglio PC…</string>
+    <string name="wol_waking_msg">Il PC potrebbe impiegare qualche secondo per risvegliarsi.
+        Se non succede niente, assicurati che l\'opzione Wake-On-LAN sia configurata correttamente.
+    </string>
+    <string name="wol_fail">Invio pacchetti Wake-On-LAN fallito</string>
+    <!-- Unpair messages -->
+    <string name="unpairing">Disaccoppiamento…</string>
+    <string name="unpair_success">Disaccoppiato con successo</string>
+    <string name="unpair_fail">Disaccoppiamento fallito</string>
+    <string name="unpair_error">Il dispositivo non è stato accoppiato</string>
+    <!-- Errors -->
+    <string name="error_pc_offline">PC offline</string>
+    <string name="error_manager_not_running">Il servizio ComputerManager non è avviato. Attendi qualche secondo o riavvia l\'applicazione.</string>
+    <string name="error_unknown_host">Risoluzione nome host fallita</string>
+    <string name="error_404">GFE ha ritornato un errore HTTP 404 error. Assicurati che il PC stia usando una GPU supportata.
+        Usare un software di desktop remoto può causare questo errore. Prova a riavviare il PC o a reinstallare GFE.
+    </string>
+    <string name="title_decoding_error">Il decodificatore video ha smesso di funzionare</string>
+    <string name="message_decoding_error">Moonlight ha smesso di funzionare per colpa di un problema al decodificatore video di questo dispositivo. Prova a modificare le impostazioni di stream se il problema persiste.</string>
+    <string name="title_decoding_reset">Ripristino impostazioni video</string>
+    <string name="message_decoding_reset">Il decodificatore video del dispositivo continua a funzionare in modo anomalo con le impostazioni di streaming selezionate. Le impostazioni di streaming sono state ripristinate ai valori predefiniti.</string>
+    <string name="error_usb_prohibited">L\'accesso USB è vietato dall\'amministratore del dispositivo. Verifica le impostazioni Knox o MDM.</string>
+    <!-- Start application messages -->
+    <string name="conn_establishing_title">Connessione in corso</string>
+    <string name="conn_establishing_msg">Avvio connessione</string>
+    <string name="conn_metered">Attenzione: la rete attiva prevede costi aggiuntivi in base all\'utilizzo!</string>
+    <string name="conn_client_latency">Latenza decodifica fotogrammi media:</string>
+    <string name="conn_client_latency_hw">latenza decodificatore hardware:</string>
+    <string name="conn_hardware_latency">Latenza decodificatore hardware media:</string>
+    <string name="conn_starting">Avvio in corso</string>
+    <string name="conn_error_title">Errore connessione</string>
+    <string name="conn_error_msg">Avvio fallito</string>
+    <string name="conn_terminated_title">Connessione interrotta</string>
+    <string name="conn_terminated_msg">La connessione è stata interrotta</string>
+    <!-- General strings -->
+    <string name="ip_hint">Indirizzo IP del PC</string>
+    <string name="searching_pc">Ricerca di PC nella rete locale…
+\n
+\n Assicurati che Sunshine sia avviato o che GameStream sia abilitato nelle impostazioni SHIELD di GeForce Experience.</string>
+    <string name="yes">Sì</string>
+    <string name="no">No</string>
+    <string name="lost_connection">Connessione con il PC persa</string>
+    <string name="help">Assistenza</string>
+    <!-- AppList activity -->
+    <string name="applist_connect_msg">Connessione al PC in corso…</string>
+    <string name="applist_menu_resume">Riprendi sessione</string>
+    <string name="applist_menu_quit">Chiudi sessione</string>
+    <string name="applist_menu_quit_and_start">Chiudi sessione corrente e avvia</string>
+    <string name="applist_menu_cancel">Annulla</string>
+    <string name="applist_refresh_title">Lista applicazioni</string>
+    <string name="applist_refresh_msg">Aggiornamento lista in corso…</string>
+    <string name="applist_refresh_error_title">Errore</string>
+    <string name="applist_refresh_error_msg">Ricezione lista applicazioni fallita</string>
+    <string name="applist_quit_app">Chiusura in corso</string>
+    <string name="applist_quit_success">Sessione chiusa con successo</string>
+    <string name="applist_quit_fail">Chiusura sessione fallita</string>
+    <string name="applist_quit_confirmation">Sei sicuro di voler chiudere l\'applicazione avviata? Tutti i dati non salvati saranno persi.</string>
+    <!-- Add computer manually activity -->
+    <string name="title_add_pc">Aggiungi PC manualmente</string>
+    <string name="msg_add_pc">Connessione al PC in corso…</string>
+    <string name="addpc_fail">Impossibile connettersi al PC specificato. Assicurati che le porte nel firewall del PC siano configurate correttamente.</string>
+    <string name="addpc_success">PC aggiunto con successo</string>
+    <string name="addpc_unknown_host">Impossibile risovere l\'indirizzo del PC. Assicurati di aver scritto correttamente l\'indirizzo.</string>
+    <string name="addpc_enter_ip">Devi inserire un indirizzo IP</string>
+    <string name="addpc_wrong_sitelocal">Quell\'indirizzo non sembra corretto. È necessario utilizzare l\'indirizzo IP pubblico del router per lo streaming su Internet.</string>
+    <!-- Preferences -->
+    <string name="category_basic_settings">Impostazioni generali</string>
+    <string name="title_resolution_list">Risoluzione video</string>
+    <string name="summary_resolution_list">Aumentare per migliorare la nitidezza dell\'immagine. Diminuire per aumentare le prestazioni su dispositivi di fascia più bassa e reti più lente.</string>
+    <string name="title_seekbar_bitrate">Velocità di trasmissione video</string>
+    <string name="summary_seekbar_bitrate">Un bitrate più alto migliora la qualità dell’immagine, ma usa più banda; un bitrate più basso è più adatto alle reti lente o instabili. Se lo streaming scatta, riducilo prima e aumentalo quando la rete è stabile ma l’immagine è poco nitida; per 1080p60, inizia da circa 10–20 Mbps.</string>
+    <string name="title_checkbox_stretch_video">Forza video a schermo intero</string>
+    <string name="title_checkbox_disable_warnings">Disabilita messaggi di warning</string>
+    <string name="summary_checkbox_disable_warnings">Disabilita i messaggi di warning sullo schermo durante lo streaming</string>
+    <string name="title_checkbox_enable_pip">Abilita modalità spettatore Picture-in-Picture</string>
+    <string name="summary_checkbox_enable_pip">Permette di osservare (ma non di controllare) la stream in multitasking</string>
+    <string name="category_audio_settings">Impostazioni audio</string>
+    <string name="title_checkbox_multi_controller">Supporto a più controller</string>
+    <string name="summary_checkbox_multi_controller">Quando disabilitato, tutti i controller appaiono come uno solo</string>
+    <string name="title_seekbar_deadzone">Regola i punti morti degli stick analogici</string>
+    <string name="suffix_seekbar_deadzone">%</string>
+    <string name="title_checkbox_xb1_driver">Driver del controller Xbox 360/One</string>
+    <string name="summary_checkbox_xb1_driver">Abilita un driver USB integrato per dispositivi senza supporto al controller Xbox nativo</string>
+    <string name="title_checkbox_usb_bind_all">Sovrascrivi il supporto ai controller su Android</string>
+    <string name="summary_checkbox_usb_bind_all">Forza i driver USB di Moonlight di assumere il controllo su tutti i controller Xbox supportati</string>
+    <string name="title_checkbox_mouse_emulation">Emulazione del mouse tramite controller</string>
+    <string name="summary_checkbox_mouse_emulation">Tenendo premuto il pulsante Start, il controller passerà alla modalità mouse</string>
+    <string name="category_on_screen_controls_settings">Impostazioni dei controlli a schermo</string>
+    <string name="title_checkbox_show_onscreen_controls">Mostra controlli a schermo</string>
+    <string name="summary_checkbox_show_onscreen_controls">Mostra l\'overlay virtuale del controller su schermo</string>
+    <string name="title_only_l3r3">Mostra solo L3 e R3</string>
+    <string name="summary_only_l3r3">Nasconde tutti i pulsanti virtuali tranne L3 e R3</string>
+    <string name="title_reset_osc">Ripristina il layout personalizzato dei controlli a schermo</string>
+    <string name="summary_reset_osc">Ripristina tutti i controlli a schermo nelle loro posizioni e dimensioni predefinite</string>
+    <string name="dialog_title_reset_osc">Ripristino del layout</string>
+    <string name="dialog_text_reset_osc">Sei sicuro di voler ripristinare ai valori predefiniti i layout dei controlli a schermo?</string>
+    <string name="toast_reset_osc_success">I controlli a schermo sono stati ripristinati</string>
+    <string name="category_ui_settings">Impostazioni dell\'interfaccia</string>
+    <string name="title_language_list">Lingua</string>
+    <string name="summary_language_list">Lingua da usare in Moonlight</string>
+    <string name="title_checkbox_small_icon_mode">Usa icone piccole</string>
+    <string name="summary_checkbox_small_icon_mode">Usa icone piccole nella griglia per avere più oggetti a schermo</string>
+    <string name="category_host_settings">Impostazioni del PC host</string>
+    <string name="title_checkbox_enable_sops">Ottimizza le impostazioni dei giochi</string>
+    <string name="summary_checkbox_enable_sops">Permetti a GFE di modificare le impostazioni dei giochi per uno streaming ottimale</string>
+    <string name="title_checkbox_host_audio">Riproduci audio sul PC</string>
+    <string name="summary_checkbox_host_audio">Riproduce l\'audio sul PC e su questo dispositivo</string>
+    <string name="category_advanced_settings">Impostazioni avanzate</string>
+    <string name="title_disable_frame_drop">Non saltare i fotogrammi</string>
+    <string name="summary_disable_frame_drop">Potrebbe ridurre il micro-stuttering su alcuni dispositivi, ma può aumentare la latenza</string>
+    <string name="title_video_format">Modifica impostazioni del codec</string>
+    <string name="summary_video_format">Non sai quale scegliere? Usa Automatico. HEVC è consigliato per la maggior parte dei dispositivi moderni e offre in genere un buon equilibrio tra qualità dell’immagine, banda e HDR; AV1 può ridurre il consumo di banda se supportato da entrambi i lati, ma su alcuni dispositivi può avere una latenza di decodifica maggiore; H.264 offre la compatibilità migliore, ma richiede più banda e non supporta HDR.</string>
+    <string name="title_enable_hdr">Abilita HDR (sperimentale)</string>
+    <string name="summary_enable_hdr">Utilizza l\'HDR quando il gioco e la scheda video del PC lo supportano. L\'HDR richiede una scheda video col supporto dell\'encoding HEVC Main 10.</string>
+    <string name="suffix_osc_opacity">%</string>
+    <string name="pcview_menu_header_online">Online</string>
+    <string name="scut_pc_not_found">PC non trovato</string>
+    <string name="scut_invalid_uuid">Il PC indicato non è valido</string>
+    <string name="scut_invalid_app_id">L\'App indicata non è valida</string>
+    <string name="pcview_menu_header_offline">Offline</string>
+    <string name="pcview_menu_header_unknown">Aggiornando</string>
+    <string name="pcview_menu_details">Mostra Dettagli</string>
+    <string name="pcview_menu_test_network">Controlla la Connessione di Rete</string>
+    <string name="title_details">Dettagli</string>
+    <string name="delete_pc_msg">Sei sicuro di voler rimuovere questo PC\?</string>
+    <string name="slow_connection_msg">Connessione lenta al PC
+\nRidurre il bitrate</string>
+    <string name="poor_connection_msg">Connessione al PC di bassa qualità</string>
+    <string name="applist_menu_hide_app">Nascondi App</string>
+    <string name="applist_menu_scut">Crea Collegamento</string>
+    <string name="applist_menu_tv_channel">Aggiungi al Canale</string>
+    <string name="applist_menu_details">Mostra Dettagli</string>
+    <string name="summary_fps_list">Aumentare per uno streaming video più fluido. Diminuire per prestazioni migliori su dispositivi di fascia più bassa.</string>
+    <string name="applist_details_id">ID Applicazione:</string>
+    <string name="perf_overlay_decoder">Decoder: %1$s</string>
+    <string name="perf_overlay_dectime">Tempo medio di decodifica: %1$.2f ms</string>
+    <string name="perf_overlay_streamdetails">Flusso video: %1$s %2$.2f FPS</string>
+    <string name="nettest_title_waiting">Prova della Connessione di Rete</string>
+    <string name="nettest_text_waiting">Moonlight sta testando la tua connessione di rete per controllare se ogni porta richiesta sia bloccata.
+\n
+\nPotrebbero volerci alcuni secondi…</string>
+    <string name="nettest_title_done">Test della Rete Completato</string>
+    <string name="nettest_text_inconclusive">Il test della rete non è stato effettuato perché nessuno dei server per il test della connessione di Moonlight era raggiungibile. Controlla la tua connessione ad Internet o riprova più tardi.</string>
+    <string name="nettest_text_success">La tua rete non sembra bloccare Moonlight. Se hai ancora problemi di connessione, controlla le impostazioni del firewall del PC.
+\n
+\nSe stai cercando di trasmettere via Internet, installa il Moonlight Internet Hosting Tool sul tuo PC ed avvia il Test per la trasmissione via Internet incluso per controllare la connessione ad Internet del tuo PC.</string>
+    <string name="title_checkbox_vibrate_osc">Abilita vibrazione</string>
+    <string name="title_audio_config_list">Configurazione suono surround</string>
+    <string name="title_checkbox_touchscreen_trackpad">Usa lo schermo touch come un trackpad</string>
+    <string name="summary_audio_config_list">Abilita il sourround 5.1 o 7.1 per sistemi home-theater</string>
+    <string name="title_fps_list">Frame rate video</string>
+    <string name="summary_checkbox_touchscreen_trackpad">Se abilitato, lo schermo touch si comporta come un trackpad. Se disabilitato, lo schermo touch controlla direttamente il cursore del mouse.</string>
+    <string name="title_checkbox_mouse_nav_buttons">Abilita i bottoni avanti e indietro del mouse</string>
+    <string name="pacing_balanced">Bilanciato (ritardo e fluidità)</string>
+    <string name="pacing_latency">Bassa latenza (risposta più rapida)</string>
+    <string name="pacing_precise_sync">Ritmo fotogrammi preciso (consigliato)</string>
+    <string name="pacing_experimental_low_latency">Latenza ultra-bassa (sperimentale)</string>
+    <string name="suffix_seekbar_bitrate_mbps">Mbps</string>
+    <string name="resolution_prefix_native">Nativo</string>
+    <string name="no_video_received_error">Nessun video ricevuto dal PC sorgente.</string>
+    <string name="category_input_settings">Impostazioni di input</string>
+    <string name="title_native_res_dialog">Avviso Risoluzione Nativa</string>
+    <string name="dialog_title_osc_opacity">Cambia opacità</string>
+    <string name="pacing_smoothness">Fluidità prima di tutto (ritardo maggiore)</string>
+    <string name="summary_osc_opacity">Rende i controlli a schermo più/meno trasparenti</string>
+    <string name="summary_checkbox_mouse_nav_buttons">Abilitare questa opzione può far smettere di funzionare il click destro su alcuni dispositivi</string>
+    <string name="title_checkbox_flip_face_buttons">Inverti i bottoni frontali</string>
+    <string name="summary_checkbox_flip_face_buttons">Inverte i bottoni A/B e X/Y sui controller e sui controlli a schermo</string>
+    <string name="summary_checkbox_vibrate_osc">Fa vibrare il tuo dispositivo per emulare la vibrazione con i controlli a schermo</string>
+    <string name="resolution_360p">360p</string>
+    <string name="resolution_480p">480p</string>
+    <string name="resolution_720p">720p</string>
+    <string name="resolution_1080p">1080p</string>
+    <string name="resolution_1440p">1440p</string>
+    <string name="resolution_4k">4K</string>
+    <string name="audioconf_stereo">Stereo</string>
+    <string name="audioconf_51surround">Surround 5.1</string>
+    <string name="audioconf_71surround">Surround 7.1</string>
+    <string name="videoformat_auto">Automatico (Consigliato)</string>
+    <string name="videoformat_hevcalways">Preferisci HEVC</string>
+    <string name="title_frame_pacing">Bilanciamento frame video</string>
+    <string name="summary_frame_pacing">Scegli come regolare il ritmo dei fotogrammi video. Il ritmo preciso può usare i timestamp video (PTS) ed è consigliato per la maggior parte dei dispositivi.</string>
+    <string name="nettest_text_failure">Sembra che l\'attuale connessione di rete del tuo dispositivo stia bloccando Moonlight. Trasmettere via Internet potrebbe non funzionare mentre sei connesso a questa rete.
+\n
+\nQueste porte di rete sono bloccate:
+\n</string>
+    <string name="nettest_text_blocked">L\'attuale connessione di rete del tuo dispositivo sta bloccando Moonlight. Trasmettere via Internet potrebbe non funzionare mentre sei connesso a questa rete.</string>
+    <string name="unable_to_pin_shortcut">Il tuo launcher non permette la creazione di scorciatoie appuntate.</string>
+    <string name="video_decoder_init_failed">Il decoder video non è riuscito ad inizializzarsi. Il tuo dispositivo potrebbe non supportare la risoluzione o il frame rate selezionati.</string>
+    <string name="check_ports_msg">Controlla il tuo firewall e le regole di inoltro delle seguenti porte:</string>
+    <string name="title_enable_post_stream_toast">Mostra un messaggio sulla latenza dopo la trasmissione</string>
+    <string name="no_frame_received_error">La tua connessione di rete non sta funzionando bene. Riduci il bitrate video o prova ad usare una connessione più veloce.</string>
+    <string name="early_termination_error">Qualcosa è andato storto sul PC sorgente mentre la trasmissione veniva avviata.
+\n
+\nAssicurati di non avere nessun contenuto protetto da DRM aperto sul PC sorgente. Puoi anche provare a spengere e riaccendere il PC sorgente.</string>
+    <string name="summary_enable_post_stream_toast">Molstra un messaggio con informazioni sulla latenza dopo che la trasmissione è conclusa</string>
+    <string name="text_native_res_dialog">Le impostazioni di risoluzione nativa e/o di FPS possono non essere supportate dal server per lo streaming. Dovrai aggiungerle manualmente all\'interno delle impostazioni del PC o del server.
+\n
+\nSe scegli di create una risoluzione personalizzata nel Pannello di Controllo NVIDIA per copiare la risoluzione dello schermo, assicurati di aver letto e capito il messaggio di attenzione di NVIDIA a proposito dei possibili danni al monitor, all\'instabilità del PC e altri potenziali problemi.
+\n
+\nNon saremo responsabili per qualsiasi problema risultante dalla creazione di una risoluzione personalizzata sul tuo PC.
+\n
+\nPuò capitare che il tuo monitor potrebbe non supportare una risoluzione dello schermo richiesta. In questo caso, prova a impostare un monitor virtuale. Infine, se il tuo dispositivo o PC sorgente non supportano la trasmissione ad una specifica risoluzione dello schermo o della frequenza di aggiornamento, sfortunatamente non ci sono altre soluzioni.</string>
+    <string name="perf_overlay_incomingfps">Frame rate in ingresso dalla rete: %1$.2f FPS</string>
+    <string name="perf_overlay_renderingfps">Frame rate renderizzato: %1$.2f FPS</string>
+    <string name="perf_overlay_netdrops">Frame scartati dalla tua connessione di rete: %1$.2f%%</string>
+    <string name="perf_overlay_netlatency">Latenza media della rete: %1$d ms (varianza: %2$d ms)</string>
+    <string name="category_help">Aiuto</string>
+    <string name="title_setup_guide">Guida configurazione</string>
+    <string name="pacing_balanced_alt">Limita gli FPS in uscita (fino alla frequenza di aggiornamento)</string>
+    <string name="summary_seekbar_deadzone">Nota: Alcuni giochi possono imporre una deadzone più grande di quella che Moonlight è configurato per utilizzare.</string>
+    <string name="title_checkbox_absolute_mouse_mode">Modalità mouse desktop remoto</string>
+    <string name="summary_checkbox_absolute_mouse_mode">Questo può rendere l\'accelerazione del mouse più naturale per l\'utilizzo del desktop remoto, ma è incompatibile con molti giochi.</string>
+    <string name="summary_setup_guide">Visualizza le istruzioni su come configurare il tuo PC da gaming per lo streaming</string>
+    <string name="title_troubleshooting">Guida alla risoluzione dei problemi</string>
+    <string name="title_privacy_policy">Informativa sulla privacy</string>
+    <string name="summary_troubleshooting">Visualizza i suggerimenti per la diagnosi e la risoluzione dei problemi di streaming più comuni</string>
+    <string name="summary_privacy_policy">Visualizza l\'informativa sulla privacy di Moonlight</string>
+    <string name="frame_conversion_error">Il PC host ha segnalato un errore fatale di codifica video.
+\n
+\nProva a disabilitare la modalità HDR, modificare la risoluzione dello streaming o la risoluzione del display del tuo PC host.</string>
+    <string name="summary_checkbox_reduce_refresh_rate">Una minore frequenza di aggiornamento del display può risparmiare energia a scapito di una latenza video aggiuntiva</string>
+    <string name="title_checkbox_enable_audiofx">Abilita il supporto per l\'equalizzatore di sistema</string>
+    <string name="summary_checkbox_enable_audiofx">Consente agli effetti audio di funzionare durante lo streaming, ma può aumentare la latenza audio</string>
+    <string name="title_checkbox_reduce_refresh_rate">Consenti riduzione della frequenza di aggiornamento</string>
+    <string name="summary_full_range">Ciò causerà la perdita di dettagli in aree chiare e scure se il dispositivo non visualizza correttamente i contenuti video a gamma completa.</string>
+    <string name="title_full_range">Forza video full range (sperimentale)</string>
+    <string name="videoformat_av1always">Preferisci AV1 (Sperimentale)</string>
+    <string name="pcview_menu_eol">Terminazione del servizio NVIDIA GameStream</string>
+    <string name="title_checkbox_gamepad_motion_sensors">Permetti l\'uso dei sensori giroscopici del gamepad</string>
+    <string name="summary_checkbox_gamepad_touchpad_as_mouse">Forza l\'input del touchpad del gamepad a controllare il mouse dell\'host, anche quando si sta emulando un gamepad col touchpad.</string>
+    <string name="toast_controller_type_changed">Il tipo di gamepad potrebbe cambiare se è attiva l\'emulazione dei sensori giroscopici</string>
+    <string name="summary_checkbox_gamepad_motion_sensors">Abilita per gli host supportati la trasmissione dei dati dai sensori giroscopici quando si simula un gamepad con sensori giroscopici. Disabilitandolo può ridurre il consumo di batteria e la rete richiesta per lo stream se i sensori giroscopici non vengono utilizzati nel gioco.</string>
+    <string name="summary_checkbox_gamepad_motion_fallback">Usa i sensori giroscopici integrati nel tuo dispositivo se il tuo gamepad non possiede i sensori giroscopici o non sono compatibili con la tua versione Android.
+\nNota: Abilitare questa opzione farà apparire il tuo gamepad come un controller Playstation all\'host.</string>
+    <string name="videoformat_h264always">Preferisci H.264</string>
+    <string name="fps_suffix_fps">FPS</string>
+    <string name="category_gamepad_settings">Impostazioni del gamepad</string>
+    <string name="title_checkbox_gamepad_motion_fallback">Emula il supporto dei sensori giroscopici del gamepad</string>
+    <string name="pair_pairing_help">Se il tuo PC host sta eseguendo Sunshine, vai nella pagina web locale di Sunshine ed inserisci il PIN.</string>
+    <string name="title_checkbox_gamepad_touchpad_as_mouse">Controlla sempre il mouse col touchpad</string>
+    <string name="perf_overlay_hostprocessinglatency">Latenza di codifica da parte dell\'host min/max/average: %1$.1f/%2$.1f/%3$.1f ms</string>
+    <string name="title_screen_combination_mode">Combinazione schermi</string>
+    <string name="summary_screen_combination_mode">Controllo display Foundation Sunshine</string>
+    <string name="screen_combination_mode_dialog_subtitle">Si applica al controllo display Foundation Sunshine</string>
+    <string name="screen_mode_host_default">Segui host</string>
+    <string name="screen_mode_no_operation">Invariato</string>
+    <string name="screen_mode_auto_activate">Attiva</string>
+    <string name="screen_mode_primary_streaming">Principale</string>
+    <string name="screen_mode_secondary_streaming">Secondario</string>
+    <string name="screen_mode_exclusive_streaming">Esclusivo</string>
+    <string name="screen_mode_host_default_desc">Usa l’impostazione dell’host Sunshine senza sovrascriverla.</string>
+    <string name="screen_mode_no_operation_desc">Mantiene la disposizione attuale degli schermi.</string>
+    <string name="screen_mode_auto_activate_desc">Attiva il display selezionato per lo streaming.</string>
+    <string name="screen_mode_primary_streaming_desc">Attiva il display selezionato e lo imposta come principale.</string>
+    <string name="screen_mode_secondary_streaming_desc">Mantiene il display fisico come principale e usa il display Foundation come secondario.</string>
+    <string name="screen_mode_exclusive_streaming_desc">Usa solo il display selezionato e disattiva gli altri display.</string>
+    <string name="title_config_sync_backup_password">Password di crittografia del backup</string>
+    <string name="title_document_handbook">Documentazione</string>
+    <string name="summary_document_handbook">Visualizza la documentazione correlata</string>
+    <string name="title_about_us">Chi siamo</string>
+    <string name="title_checkbox_mic_volume_processing">Elaborazione del volume del microfono</string>
+    <string name="summary_checkbox_mic_volume_processing">Regola il volume del microfono prima che venga inviato all’host. Il guadagno fisso e il bilanciamento del volume si escludono a vicenda.</string>
+    <string name="title_checkbox_mic_gain">Guadagno volume</string>
+    <string name="summary_checkbox_mic_gain">Regola il volume del microfono di una quantità fissa. I valori positivi lo amplificano, quelli negativi lo attenuano.</string>
+    <string name="title_seekbar_mic_gain">Guadagno</string>
+    <string name="summary_seekbar_mic_gain">Imposta il guadagno fisso. 0 dB mantiene il volume originale e si trova al centro del cursore.</string>
+    <string name="suffix_seekbar_mic_gain_db">dB</string>
+    <string name="title_checkbox_mic_balance">Bilanciamento volume</string>
+    <string name="summary_checkbox_mic_balance">Comprime gli ingressi elevati per ridurre le variazioni di volume e il rischio di clipping.</string>
+    <string name="title_seekbar_mic_balance">Compensazione uscita</string>
+    <string name="summary_seekbar_mic_balance" formatted="false">Imposta il guadagno di compensazione dopo il bilanciamento del volume. Il 50% corrisponde a +4 dB ed è il valore consigliato.</string>
+    <string name="suffix_seekbar_mic_balance_target" formatted="false">%</string>
+    <string name="title_checkbox_mic_voice_enhancement">Ottimizzazione voce</string>
+    <string name="summary_checkbox_mic_voice_enhancement">Riduce il rumore a bassa frequenza e migliora la chiarezza della voce. Disponibile con guadagno fisso e bilanciamento del volume.</string>
+    <string name="title_pyrowave_capability_diagnostic">Verifica delle capacità PyroWave</string>
+    <string name="summary_pyrowave_capability_diagnostic">Esamina le capacità Vulkan e i requisiti del decoder PyroWave attuale.</string>
+    <string name="pyrowave_diag_loading">Verifica delle capacità PyroWave…</string>
+    <string name="pyrowave_diag_runtime">API della libreria PyroWave inclusa</string>
+    <string name="pyrowave_diag_gpu_frontend">Modulo di presentazione GPU</string>
+    <string name="pyrowave_diag_gpu_gate">La presentazione GPU richiede Android 10+, arm64-v8a e Vulkan 1.3. Il percorso SDR di riserva richiede Vulkan 1.2 e le funzioni del decoder indicate sotto; non decodifica solo sulla CPU.</string>
+    <string name="pyrowave_diag_ready">I requisiti verificati sono soddisfatti</string>
+    <string name="pyrowave_diag_missing">Mancano requisiti dell’implementazione attuale</string>
+    <string name="pyrowave_diag_scope">Questo rapporto verifica solo le capacità dichiarate dal driver. Presentazione nella finestra, formati delle immagini, risoluzione di destinazione, uscita HDR e prestazioni di decodifica devono ancora essere verificati durante lo streaming.</string>
+    <string name="pyrowave_diag_loader_missing">Nessun loader Vulkan accessibile</string>
+    <string name="pyrowave_diag_no_devices">Nessun dispositivo fisico Vulkan trovato</string>
+    <string name="pyrowave_diag_query_failed">Impossibile leggere le capacità Vulkan. Questo non conferma l’assenza di supporto.</string>
+    <string name="pyrowave_diag_storage_path">Memoria a 8 bit o buffer di texel di grandi dimensioni</string>
+    <string name="pyrowave_diag_gpu_backend">Requisiti di presentazione GPU</string>
+    <string name="pyrowave_diag_staging_backend">Requisiti del percorso SDR di riserva</string>
+    <string name="pyrowave_diag_subgroup_range">Sottogruppi di calcolo completi nell’intervallo wave4–wave128</string>
+    <string name="pyrowave_diag_max_workgroup">Thread per gruppo di lavoro</string>
+    <string name="pyrowave_diag_shared_memory">Memoria condivisa del gruppo di lavoro</string>
+    <string name="pyrowave_diag_queue">Coda combinata di grafica e calcolo</string>
+    <string name="pyrowave_diag_android_surface">Estensioni Vulkan Surface di Android</string>
+    <string name="pyrowave_diag_copy_failed">Impossibile copiare il rapporto</string>
+    <string name="pyrowave_diag_present">Presente</string>
+    <string name="pyrowave_diag_absent">Assente</string>
+    <string name="pyrowave_diag_vulkan_loader">Loader Vulkan</string>
+    <string name="pyrowave_diag_subgroup_ops">Operazioni dei sottogruppi</string>
+    <string name="pyrowave_diag_subgroup_size">Dimensione del sottogruppo</string>
+    <string name="pyrowave_diag_subgroup_limits">Dimensione min. / max. del sottogruppo</string>
+    <string name="pyrowave_diag_required_subgroup">Operazioni dei sottogruppi richieste</string>
+    <string name="pyrowave_diag_texel_limit">Numero massimo di elementi del buffer di texel</string>
+    <string name="pyrowave_diag_back">Indietro</string>
+    <string name="pyrowave_diag_copy">Copia</string>
+    <string name="pyrowave_diag_copy_success">Rapporto copiato negli appunti</string>
+    <string name="pyrowave_diag_unavailable">Non disponibile</string>
+    <string name="image_saved_successfully">Immagine salvata in: Pictures/vplus</string>
+    <string name="image_save_failed_with_error">Salvataggio dell\'immagine non riuscito: %1$s</string>
+    <string name="tip_double_tap_mouse">Suggerimento: tieni premuta l\'area vuota in alto nell\'elenco dei computer per salvare l\'immagine di sfondo attuale.</string>
+    <string name="pyrowave_negotiation_fallback">La negoziazione di PyroWave non è riuscita. Passaggio a %1$s.</string>
+    <string name="title_list_mouse_axis_correction">Correzione della direzione del mouse</string>
+    <string name="summary_list_mouse_axis_correction">Ruota il movimento del mouse acquisito prima di inviarlo all’host. Modifica questa opzione solo se un dispositivo Android segnala assi del mouse ruotati.</string>
+    <string name="mouse_axis_correction_off">Disattivato</string>
+    <string name="mouse_axis_correction_90">Ruota di 90 gradi</string>
+    <string name="mouse_axis_correction_180">Ruota di 180 gradi</string>
+    <string name="mouse_axis_correction_270">Ruota di 270 gradi</string>
+    <string name="summary_checkbox_reverse_resolution">Attiva solo quando l\'orientamento o le dimensioni dell\'immagine sono errati; potrebbe entrare in conflitto con la rotazione del dispositivo.</string>
+    <string name="summary_checkbox_rotable_screen">Sincronizza automaticamente il layout dello streaming quando il dispositivo passa dall\'orientamento verticale a quello orizzontale e viceversa.</string>
+    <string name="layout_page_device_text_1a70f">Attiva o disattiva il tocco</string>
+    <string name="game_menu_perf_metrics">Indicatori da visualizzare</string>
+    <string name="game_menu_perf_health">Indicatore dello stato dello streaming</string>
+    <string name="game_menu_perf_health_summary">Mostra lo stato generale</string>
+    <string name="game_menu_perf_single_tap">Un tocco per cambiare stile</string>
+    <string name="game_menu_perf_double_tap">Due tocchi per cambiare layout</string>
+    <string name="game_menu_perf_long_press">Tieni premuto per visualizzare la spiegazione degli indicatori</string>
+    <string name="game_menu_perf_metric_summary">Lo stile Mini mostra una serie fissa di indicatori.</string>
+    <string name="game_menu_perf_orientation_fixed">Questo stile usa un layout fisso. L’orientamento selezionato viene applicato passando allo stile Standard.</string>
+    <string name="game_menu_perf_orientation_docked">L’orientamento selezionato viene applicato quando si esce dal layout ancorato.</string>
+    <string name="game_menu_perf_fixed_layout">Layout fisso</string>
+    <string name="game_menu_perf_docked_layout">Ancorato</string>
+    <string name="game_menu_perf_orientation_portrait">Con lo schermo in verticale, il layout è sempre verticale.</string>
+    <string name="perf_sheet_previous_page">Pagina precedente</string>
+    <string name="perf_sheet_next_page">Pagina successiva</string>
+    <string name="perf_sheet_settings">Impostazioni</string>
+    <string name="game_menu_perf_position">Posizionamento rapido</string>
+    <string name="game_menu_perf_position_reset">Ripristina posizione</string>
+    <string name="perf_overlay_anchor_top_left">Alto sinistra</string>
+    <string name="perf_overlay_anchor_top_center">Alto centro</string>
+    <string name="perf_overlay_anchor_top_right">Alto destra</string>
+    <string name="perf_overlay_anchor_center_left">Centro sinistra</string>
+    <string name="perf_overlay_anchor_center">Centro</string>
+    <string name="perf_overlay_anchor_center_right">Centro destra</string>
+    <string name="perf_overlay_anchor_bottom_left">Basso sinistra</string>
+    <string name="perf_overlay_anchor_bottom_center">Basso centro</string>
+    <string name="perf_overlay_anchor_bottom_right">Basso destra</string>
+</resources>

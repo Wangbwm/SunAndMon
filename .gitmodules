@@ -1,0 +1,114 @@
+[submodule "foundation-sunshine/third-party/build-deps"]
+	path = foundation-sunshine/third-party/build-deps
+	url = https://github.com/AlkaidLab/foundation-build-deps.git
+	branch = dist
+[submodule "foundation-sunshine/third-party/doxyconfig"]
+	path = foundation-sunshine/third-party/doxyconfig
+	url = https://github.com/LizardByte/doxyconfig.git
+	branch = master
+[submodule "foundation-sunshine/third-party/googletest"]
+	path = foundation-sunshine/third-party/googletest
+	url = https://github.com/google/googletest.git
+	branch = main
+[submodule "foundation-sunshine/third-party/inputtino"]
+	path = foundation-sunshine/third-party/inputtino
+	url = https://github.com/games-on-whales/inputtino.git
+	branch = stable
+[submodule "foundation-sunshine/third-party/moonlight-common-c"]
+	path = foundation-sunshine/third-party/moonlight-common-c
+	url = https://github.com/qiin2333/moonlight-common-c.git
+	branch = mic
+[submodule "foundation-sunshine/third-party/nanors"]
+	path = foundation-sunshine/third-party/nanors
+	url = https://github.com/sleepybishop/nanors.git
+	branch = master
+[submodule "foundation-sunshine/third-party/nvenc-headers/1100"]
+	path = foundation-sunshine/third-party/nvenc-headers/1100
+	url = https://github.com/FFmpeg/nv-codec-headers.git
+	branch = sdk/11.0
+[submodule "foundation-sunshine/third-party/nvenc-headers/1200"]
+	path = foundation-sunshine/third-party/nvenc-headers/1200
+	url = https://github.com/FFmpeg/nv-codec-headers.git
+	branch = sdk/12.0
+[submodule "foundation-sunshine/third-party/nvenc-headers/1300"]
+	path = foundation-sunshine/third-party/nvenc-headers/1300
+	url = https://github.com/FFmpeg/nv-codec-headers.git
+[submodule "foundation-sunshine/third-party/nvenc-headers/1301"]
+	path = foundation-sunshine/third-party/nvenc-headers/1301
+	url = https://github.com/FFmpeg/nv-codec-headers.git
+[submodule "foundation-sunshine/third-party/AMF"]
+	path = foundation-sunshine/third-party/AMF
+	url = https://github.com/GPUOpen-LibrariesAndSDKs/AMF.git
+	shallow = true
+[submodule "foundation-sunshine/third-party/nvapi"]
+	path = foundation-sunshine/third-party/nvapi
+	url = https://github.com/NVIDIA/nvapi.git
+	branch = main
+[submodule "foundation-sunshine/third-party/TPCircularBuffer"]
+	path = foundation-sunshine/third-party/TPCircularBuffer
+	url = https://github.com/michaeltyson/TPCircularBuffer.git
+	branch = master
+[submodule "foundation-sunshine/third-party/tray"]
+	path = foundation-sunshine/third-party/tray
+	url = https://github.com/LizardByte/tray.git
+	branch = master
+[submodule "foundation-sunshine/third-party/ViGEmClient"]
+	path = foundation-sunshine/third-party/ViGEmClient
+	url = https://github.com/LizardByte/Virtual-Gamepad-Emulation-Client.git
+	branch = master
+[submodule "foundation-sunshine/third-party/wayland-protocols"]
+	path = foundation-sunshine/third-party/wayland-protocols
+	url = https://github.com/LizardByte-infrastructure/wayland-protocols.git
+	branch = main
+[submodule "foundation-sunshine/third-party/wlr-protocols"]
+	path = foundation-sunshine/third-party/wlr-protocols
+	url = https://gitlab.freedesktop.org/wlroots/wlr-protocols.git
+	branch = master
+[submodule "foundation-sunshine/src_assets/common/sunshine-control-panel"]
+	path = foundation-sunshine/src_assets/common/sunshine-control-panel
+	url = https://github.com/AlkaidLab/foundation-panel.git
+	branch = main
+[submodule "foundation-sunshine/third-party/moonlight-audio-haptics"]
+	path = foundation-sunshine/third-party/moonlight-audio-haptics
+	url = https://github.com/AlkaidLab/moonlight-audio-haptics.git
+	branch = main
+[submodule "foundation-sunshine/third-party/pyrowave"]
+	path = foundation-sunshine/third-party/pyrowave
+	url = https://github.com/AlkaidLab/pyrowave.git
+	branch = master
+[submodule "moonlight-qt/moonlight-common-c/moonlight-common-c"]
+	path = moonlight-qt/moonlight-common-c/moonlight-common-c
+	url = https://github.com/qiin2333/moonlight-common-c.git
+[submodule "moonlight-qt/qmdnsengine/qmdnsengine"]
+	path = moonlight-qt/qmdnsengine/qmdnsengine
+	url = https://github.com/cgutman/qmdnsengine.git
+[submodule "moonlight-qt/app/SDL_GameControllerDB"]
+	path = moonlight-qt/app/SDL_GameControllerDB
+	url = https://github.com/gabomdq/SDL_GameControllerDB.git
+[submodule "moonlight-qt/third-party/AMF"]
+	path = moonlight-qt/third-party/AMF
+	url = https://github.com/GPUOpen-LibrariesAndSDKs/AMF.git
+[submodule "moonlight-qt/usb-helper/third_party/usbipdcpp"]
+	path = moonlight-qt/usb-helper/third_party/usbipdcpp
+	url = https://github.com/yunsmall/usbipdcpp.git
+[submodule "moonlight-qt/usb-helper/third_party/libusb"]
+	path = moonlight-qt/usb-helper/third_party/libusb
+	url = https://github.com/libusb/libusb.git
+[submodule "moonlight-qt/usb-helper/third_party/asio"]
+	path = moonlight-qt/usb-helper/third_party/asio
+	url = https://github.com/chriskohlhoff/asio.git
+[submodule "moonlight-qt/usb-helper/third_party/spdlog"]
+	path = moonlight-qt/usb-helper/third_party/spdlog
+	url = https://github.com/gabime/spdlog.git
+[submodule "moonlight-vplus/app/src/main/jni/moonlight-core/moonlight-common-c"]
+	path = moonlight-vplus/app/src/main/jni/moonlight-core/moonlight-common-c
+	url = https://github.com/qiin2333/moonlight-common-c.git
+	branch = mic
+[submodule "moonlight-vplus/framegen/src/main/cpp/lsfg-vk-android"]
+	path = moonlight-vplus/framegen/src/main/cpp/lsfg-vk-android
+	url = https://github.com/AlkaidLab/lsfg-vk-android-legacy.git
+	branch = main
+[submodule "moonlight-vplus/third-party/pyrowave"]
+	path = moonlight-vplus/third-party/pyrowave
+	url = https://github.com/AlkaidLab/pyrowave.git
+	branch = master

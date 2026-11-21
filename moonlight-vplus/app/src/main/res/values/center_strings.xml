@@ -1,0 +1,38 @@
+<resources>
+    <string name="center_devices">Center devices</string>
+    <string name="center_url">Center URL</string>
+    <string name="center_key">Access key</string>
+    <string name="center_sign_in">Sign in</string>
+    <string name="center_sign_out">Sign out</string>
+    <string name="center_login_failed">Could not sign in. Check the HTTPS URL and access key.</string>
+    <string name="center_list_failed">Could not load the center device list.</string>
+    <string name="center_empty">Enable hosting on a computer signed into this center.</string>
+    <string name="center_device_online">%1$s · Online</string>
+    <string name="center_device_offline">%1$s · Offline</string>
+    <string name="center_offline">This device is offline.</string>
+    <string name="center_connecting">Connecting to the host…</string>
+    <string name="center_connect_failed">Could not connect. Check that the host is reachable and allows this client.</string>
+    <string name="center_my_devices">My devices</string>
+    <string name="center_refresh">Refresh</string>
+    <string name="center_server">Center server</string>
+    <string name="center_connected">Connected</string>
+    <string name="center_loading">Loading devices…</string>
+    <string name="center_sign_in_hint">Sign in to your center to view registered devices.</string>
+    <string name="center_all_devices">All devices</string>
+    <string name="center_online">Online</string>
+    <string name="center_offline_short">Offline</string>
+    <string name="center_local_network">Local network</string>
+    <string name="center_nav_devices">Devices</string>
+    <string name="center_nav_center">Center</string>
+    <string name="center_settings">Settings</string>
+    <string name="center_remote_desktop">Remote desktop</string>
+    <string name="center_connect_desktop">Connect desktop</string>
+    <string name="center_common_actions">Common actions</string>
+    <string name="center_app_list">App list</string>
+    <string name="center_stream_settings">Streaming settings</string>
+    <string name="center_device_options">Device options</string>
+    <plurals name="center_online_count">
+        <item quantity="one">%d online</item>
+        <item quantity="other">%d online</item>
+    </plurals>
+</resources>

@@ -1,0 +1,54 @@
+<resources>
+
+    <!-- Shared corner radius scale. Use CircleShape or half the component height for pills/circles. -->
+    <dimen name="corner_radius_extra_small">4dp</dimen>
+    <dimen name="corner_radius_small">8dp</dimen>
+    <dimen name="corner_radius_medium">12dp</dimen>
+    <dimen name="corner_radius_large">16dp</dimen>
+    <dimen name="corner_radius_overlay">20dp</dimen>
+    <dimen name="corner_radius_extra_large">24dp</dimen>
+
+    <!-- Default screen margins, per the Android Design guidelines. -->
+    <dimen name="activity_horizontal_margin">16dp</dimen>
+    <dimen name="activity_vertical_margin">16dp</dimen>
+    <dimen name="tv_channel_logo_width">80dp</dimen>
+    <dimen name="tv_channel_logo_height">80dp</dimen>
+
+    <dimen name="activity_safearea_top">46dp</dimen>
+    <dimen name="keyboard_top_view_seek_bar_min_width">60dp</dimen>
+    <dimen name="game_menu_dialog_width">576dp</dimen>
+
+    <!-- PC View toolbar buttons -->
+    <dimen name="pc_toolbar_button_size">64dp</dimen>
+
+    <!-- Drawer width -->
+    <dimen name="drawer_width">280dp</dimen>
+    <dimen name="settings_landscape_sidebar_width">224dp</dimen>
+    <dimen name="settings_category_item_outer_horizontal_margin">14dp</dimen>
+    <dimen name="settings_category_item_horizontal_padding">16dp</dimen>
+    <dimen name="settings_category_item_control_gap">12dp</dimen>
+    <dimen name="settings_category_item_title_end_margin">10dp</dimen>
+    <dimen name="settings_preference_item_vertical_padding">10dp</dimen>
+
+    <!-- Crown store -->
+
+    <!-- Widget -->
+    <dimen name="widget_margin">8dp</dimen>
+
+    <!-- AppView -->
+    <dimen name="appview_edge_margin">8dp</dimen>
+    <dimen name="appview_content_margin">20dp</dimen>
+    <dimen name="appview_bottom_margin">10dp</dimen>
+    <dimen name="appview_icon_button_size">48dp</dimen>
+    <dimen name="appview_panel_elevation">12dp</dimen>
+    <dimen name="appview_title_text_size">20sp</dimen>
+    <dimen name="appview_title_min_height">48dp</dimen>
+    <dimen name="appview_header_spacer_width">0dp</dimen>
+    <dimen name="appview_large_card_width">180dp</dimen>
+    <dimen name="appview_large_card_height">240dp</dimen>
+    <dimen name="appview_large_card_padding">10dp</dimen>
+    <dimen name="appview_small_card_width">120dp</dimen>
+    <dimen name="appview_small_card_height">160dp</dimen>
+
+    <dimen name="crown_inspector_preview_height">84dp</dimen>
+</resources>

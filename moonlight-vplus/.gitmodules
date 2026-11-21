@@ -1,0 +1,12 @@
+[submodule "app/src/main/jni/moonlight-core/moonlight-common-c"]
+	path = app/src/main/jni/moonlight-core/moonlight-common-c
+	url = https://github.com/qiin2333/moonlight-common-c.git
+	branch = mic
+[submodule "framegen/src/main/cpp/lsfg-vk-android"]
+	path = framegen/src/main/cpp/lsfg-vk-android
+	url = https://github.com/AlkaidLab/lsfg-vk-android-legacy.git
+	branch = main
+[submodule "third-party/pyrowave"]
+	path = third-party/pyrowave
+	url = https://github.com/AlkaidLab/pyrowave.git
+	branch = master

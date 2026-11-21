@@ -56,10 +56,13 @@ type EasyTierProvider struct {
 	forwards    map[string]*etForwardEntry
 }
 
-func NewEasyTierProvider() *EasyTierProvider {
+func NewEasyTierProvider(alloc *LoopbackAllocator) *EasyTierProvider {
+	if alloc == nil {
+		alloc = NewLoopbackAllocator()
+	}
 	return &EasyTierProvider{
 		state:    "stopped",
-		alloc:    NewLoopbackAllocator(),
+		alloc:    alloc,
 		forwards: make(map[string]*etForwardEntry),
 	}
 }
@@ -408,7 +411,7 @@ func (e *EasyTierProvider) EnsureForward(remoteIP string, ports HostPorts) (Forw
 	}
 	_ = e.CloseForward(remoteIP)
 
-	localHost, err := e.alloc.Allocate(remoteIP)
+	localHost, err := e.alloc.Allocate(string(ProviderEasyTier) + ":" + remoteIP)
 	if err != nil {
 		return ForwardMapping{}, err
 	}
@@ -450,6 +453,7 @@ func (e *EasyTierProvider) EnsureForward(remoteIP string, ports HostPorts) (Forw
 	}
 
 	mapping := ForwardMapping{
+		Provider:  ProviderEasyTier,
 		RemoteIP:  remoteIP,
 		LocalHost: localHost,
 		Ports:     norm,

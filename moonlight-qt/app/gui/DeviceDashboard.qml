@@ -370,14 +370,7 @@ Rectangle {
                 RailButton {
                     Layout.fillWidth: true
                     text: qsTr("Built-in tunnel")
-                    secondary: {
-                        const t = dashboard.center ? dashboard.center.tunnel : null
-                        if (!t || t.state === "stopped") return ""
-                        if (t.state === "connected") return t.provider === "easytier" ? "EasyTier" : "Tailscale"
-                        if (t.state === "needs_auth") return qsTr("Sign in")
-                        if (t.state === "starting") return qsTr("Connecting")
-                        return qsTr("Error")
-                    }
+                    secondary: dashboard.center && dashboard.center.tunnel ? dashboard.center.tunnel.summaryBadge : ""
                     secondaryColor: {
                         const t = dashboard.center ? dashboard.center.tunnel : null
                         if (t && t.state === "connected") return Theme.success

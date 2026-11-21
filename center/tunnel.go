@@ -12,6 +12,11 @@ import (
 	"strings"
 )
 
+type tunnelEndpoint struct {
+	Provider string `json:"provider"`
+	Address  string `json:"address"`
+}
+
 type tunnelConfig struct {
 	Provider      string   `json:"provider"`
 	ControlURL    string   `json:"controlUrl,omitempty"`
@@ -42,6 +47,46 @@ func normalizeTunnelEndpoint(provider, address string) (string, string, error) {
 		return "", "", errors.New("invalid tunnelAddress")
 	}
 	return p, ip.Unmap().String(), nil
+}
+
+func normalizeTunnelEndpoints(legacyProvider, legacyAddress string, list []tunnelEndpoint) (string, string, []tunnelEndpoint, error) {
+	if len(list) > 4 {
+		return "", "", nil, errors.New("too many tunnel endpoints")
+	}
+	byProvider := make(map[string]string, 2)
+	order := []string{}
+	add := func(p, a string) error {
+		np, na, err := normalizeTunnelEndpoint(p, a)
+		if err != nil {
+			return err
+		}
+		if np == "" {
+			return nil
+		}
+		if _, exists := byProvider[np]; !exists {
+			order = append(order, np)
+		}
+		byProvider[np] = na
+		return nil
+	}
+	for _, ep := range list {
+		if err := add(ep.Provider, ep.Address); err != nil {
+			return "", "", nil, err
+		}
+	}
+	if legacyProvider != "" || legacyAddress != "" {
+		if err := add(legacyProvider, legacyAddress); err != nil {
+			return "", "", nil, err
+		}
+	}
+	if len(order) == 0 {
+		return "", "", nil, nil
+	}
+	out := make([]tunnelEndpoint, 0, len(order))
+	for _, p := range order {
+		out = append(out, tunnelEndpoint{Provider: p, Address: byProvider[p]})
+	}
+	return out[0].Provider, out[0].Address, out, nil
 }
 
 func normalizeTunnelConfig(cfg tunnelConfig) (tunnelConfig, error) {

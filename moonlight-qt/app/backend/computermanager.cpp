@@ -620,7 +620,8 @@ void ComputerManager::connectFromCenter(const QJsonObject& grant)
     const QSslCertificate cert(grant.value("certificate").toString().toLatin1());
     const auto ticket = grant.value("ticket").toString();
     const auto addresses = grant.value("addresses").toArray();
-    const QString tunnelLocalAddress = grant.value("tunnelLocalAddress").toString();
+    const auto tunnelLocalAddresses = grant.value("tunnelLocalAddresses").toArray();
+    const bool preferTunnelFirst = grant.value("preferTunnelFirst").toBool(false);
     const int port = grant.value("port").toInt();
     const int httpsPort = grant.value("httpsPort").toInt();
     const QRegularExpression ticketFormat("^[0-9]{1,12}\\.[A-Z2-7]{26}\\.[a-f0-9]{64}$");
@@ -630,23 +631,31 @@ void ComputerManager::connectFromCenter(const QJsonObject& grant)
         return;
     }
 
-    m_CenterPool.start([this, cert, ticket, addresses, tunnelLocalAddress, port, httpsPort] {
-        QList<QHostAddress> candidates;
+    m_CenterPool.start([this, cert, ticket, addresses, tunnelLocalAddresses, preferTunnelFirst, port, httpsPort] {
+        QList<QHostAddress> directCandidates;
         for (const auto addressValue : addresses) {
             const QHostAddress ip(addressValue.toString());
             if (!ip.isNull() && !ip.isLoopback() && !ip.isLinkLocal() && !ip.isMulticast()) {
-                candidates.append(ip);
+                directCandidates.append(ip);
             }
         }
-        // Append the local isolated userspace tunnel loopback forward (127.18.0.0/16) as
-        // Smart Route fallback after direct LAN / routed addresses.
-        if (!tunnelLocalAddress.isEmpty()) {
-            const QHostAddress tunnelIp(tunnelLocalAddress);
+        // Validate local isolated userspace tunnel loopback forwards (strictly 127.18.0.0/16).
+        QList<QHostAddress> tunnelCandidates;
+        for (const auto val : tunnelLocalAddresses) {
+            const QHostAddress tunnelIp(val.toString());
             bool okV4 = false;
             const quint32 v4 = tunnelIp.toIPv4Address(&okV4);
-            if (okV4 && (v4 >> 16) == ((127u << 8) | 18u)) {
-                candidates.append(tunnelIp);
+            if (okV4 && (v4 >> 16) == ((127u << 8) | 18u) && !tunnelCandidates.contains(tunnelIp)) {
+                tunnelCandidates.append(tunnelIp);
             }
+        }
+        QList<QHostAddress> candidates;
+        if (preferTunnelFirst) {
+            candidates.append(tunnelCandidates);
+            candidates.append(directCandidates);
+        } else {
+            candidates.append(directCandidates);
+            candidates.append(tunnelCandidates);
         }
         for (const auto& ip : candidates) {
             if (m_Closing) {

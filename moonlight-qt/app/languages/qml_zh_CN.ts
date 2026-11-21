@@ -4866,12 +4866,91 @@
         <source>Built-in tunnel is not connected.</source>
         <translation>内置隧道尚未连接。</translation>
     </message>
+    <message>
+        <source>Sign in</source>
+        <translation>需登录</translation>
+    </message>
+    <message>
+        <source>Connecting</source>
+        <translation>连接中</translation>
+    </message>
+    <message>
+        <source>Error</source>
+        <translation>异常</translation>
+    </message>
+</context>
+<context>
+    <name>CenterClient</name>
+    <message>
+        <source>Could not reach the host directly. This host advertises built-in tunnel (%1) — connect it in &quot;Built-in tunnel&quot; and retry.</source>
+        <translation>无法直连主机。该主机已开启内置隧道（%1），请在左侧「内置隧道」中连接对应网络后重试。</translation>
+    </message>
 </context>
 <context>
     <name>TunnelDialog</name>
     <message>
         <source>Built-in tunnel</source>
         <translation>内置打洞隧道</translation>
+    </message>
+    <message>
+        <source>Tailscale / Headscale and EasyTier can run simultaneously in isolated userspace without touching your system VPN or routes. When both tunnels are available, SunAndMon automatically selects and fails over according to your route policy.</source>
+        <translation>Tailscale / Headscale 与 EasyTier 可同时在独立用户态运行，不改动系统 VPN 或路由表。当双隧道同时在线时，SunAndMon 会按路由策略自动择优并故障切换。</translation>
+    </message>
+    <message>
+        <source>Connection route policy (auto-failover across available routes)</source>
+        <translation>连接路由策略（支持所有可用链路自动故障切换）</translation>
+    </message>
+    <message>
+        <source>Auto (Direct → EasyTier → Tailscale)</source>
+        <translation>自动（直连 → EasyTier → Tailscale）</translation>
+    </message>
+    <message>
+        <source>Auto (Direct → Tailscale → EasyTier)</source>
+        <translation>自动（直连 → Tailscale → EasyTier）</translation>
+    </message>
+    <message>
+        <source>Prefer EasyTier tunnel</source>
+        <translation>优先 EasyTier 隧道</translation>
+    </message>
+    <message>
+        <source>Prefer Tailscale tunnel</source>
+        <translation>优先 Tailscale 隧道</translation>
+    </message>
+    <message>
+        <source>Tunnel hostname</source>
+        <translation>隧道主机名</translation>
+    </message>
+    <message>
+        <source>Connected (Tailscale / Headscale)</source>
+        <translation>已连接（Tailscale / Headscale）</translation>
+    </message>
+    <message>
+        <source>Connected (EasyTier)</source>
+        <translation>已连接（EasyTier）</translation>
+    </message>
+    <message>
+        <source>Auto-connect Tailscale / Headscale on launch</source>
+        <translation>启动时自动连接 Tailscale / Headscale</translation>
+    </message>
+    <message>
+        <source>Disconnect Tailscale</source>
+        <translation>断开 Tailscale</translation>
+    </message>
+    <message>
+        <source>Save &amp; Connect Tailscale</source>
+        <translation>保存并连接 Tailscale</translation>
+    </message>
+    <message>
+        <source>Auto-connect EasyTier on launch</source>
+        <translation>启动时自动连接 EasyTier</translation>
+    </message>
+    <message>
+        <source>Disconnect EasyTier</source>
+        <translation>断开 EasyTier</translation>
+    </message>
+    <message>
+        <source>Save &amp; Connect EasyTier</source>
+        <translation>保存并连接 EasyTier</translation>
     </message>
     <message>
         <source>Runs in isolated userspace without touching your system Tailscale, VPN, or routing table. Configuration and node identity persist across updates.</source>

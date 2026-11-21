@@ -28,14 +28,15 @@ import (
 const onlineFor = 45 * time.Second
 
 type device struct {
-	ID             string   `json:"id"`
-	Name           string   `json:"name"`
-	Addresses      []string `json:"addresses"`
-	Port           uint16   `json:"port"`
-	HTTPSPort      uint16   `json:"httpsPort"`
-	Certificate    string   `json:"certificate"`
-	TunnelProvider string   `json:"tunnelProvider,omitempty"`
-	TunnelAddress  string   `json:"tunnelAddress,omitempty"`
+	ID             string           `json:"id"`
+	Name           string           `json:"name"`
+	Addresses      []string         `json:"addresses"`
+	Port           uint16           `json:"port"`
+	HTTPSPort      uint16           `json:"httpsPort"`
+	Certificate    string           `json:"certificate"`
+	TunnelProvider string           `json:"tunnelProvider,omitempty"`
+	TunnelAddress  string           `json:"tunnelAddress,omitempty"`
+	Tunnels        []tunnelEndpoint `json:"tunnels,omitempty"`
 }
 
 type registration struct {
@@ -178,11 +179,12 @@ func requireKey(expected *[sha256.Size]byte, next http.Handler) http.Handler {
 
 func (c *center) list(w http.ResponseWriter, _ *http.Request) {
 	type listedDevice struct {
-		ID             string `json:"id"`
-		Name           string `json:"name"`
-		Online         bool   `json:"online"`
-		TunnelProvider string `json:"tunnelProvider,omitempty"`
-		TunnelAddress  string `json:"tunnelAddress,omitempty"`
+		ID             string           `json:"id"`
+		Name           string           `json:"name"`
+		Online         bool             `json:"online"`
+		TunnelProvider string           `json:"tunnelProvider,omitempty"`
+		TunnelAddress  string           `json:"tunnelAddress,omitempty"`
+		Tunnels        []tunnelEndpoint `json:"tunnels,omitempty"`
 	}
 	type endpointKey struct {
 		name, address   string
@@ -223,7 +225,7 @@ func (c *center) list(w http.ResponseWriter, _ *http.Request) {
 		if !online && duplicate {
 			continue
 		}
-		devices = append(devices, listedDevice{host.ID, host.effectiveDevice().Name, online, host.TunnelProvider, host.TunnelAddress})
+		devices = append(devices, listedDevice{host.ID, host.effectiveDevice().Name, online, host.TunnelProvider, host.TunnelAddress, host.Tunnels})
 		if host.Certificate != "" {
 			certificates[cert] = true
 		}
@@ -272,7 +274,7 @@ func (c *center) register(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	tunnelProvider, tunnelAddress, err := normalizeTunnelEndpoint(input.TunnelProvider, input.TunnelAddress)
+	tunnelProvider, tunnelAddress, tunnels, err := normalizeTunnelEndpoints(input.TunnelProvider, input.TunnelAddress, input.Tunnels)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -280,6 +282,7 @@ func (c *center) register(w http.ResponseWriter, r *http.Request) {
 	input.Addresses = addresses
 	input.TunnelProvider = tunnelProvider
 	input.TunnelAddress = tunnelAddress
+	input.Tunnels = tunnels
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	old, exists := c.devices[input.ID]
@@ -299,6 +302,7 @@ func (c *center) register(w http.ResponseWriter, r *http.Request) {
 	if !exists || old.Name != input.Name || old.Port != input.Port ||
 		old.HTTPSPort != input.HTTPSPort || old.Certificate != input.Certificate ||
 		old.TunnelProvider != input.TunnelProvider || old.TunnelAddress != input.TunnelAddress ||
+		!slices.Equal(old.Tunnels, tunnels) ||
 		!slices.Equal(old.Addresses, addresses) {
 		if err := c.save(); err != nil {
 			if exists {

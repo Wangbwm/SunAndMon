@@ -42,10 +42,13 @@ type TailscaleProvider struct {
 	forwards    map[string]*tsForwardEntry
 }
 
-func NewTailscaleProvider() *TailscaleProvider {
+func NewTailscaleProvider(alloc *LoopbackAllocator) *TailscaleProvider {
+	if alloc == nil {
+		alloc = NewLoopbackAllocator()
+	}
 	return &TailscaleProvider{
 		state:    "stopped",
-		alloc:    NewLoopbackAllocator(),
+		alloc:    alloc,
 		forwards: make(map[string]*tsForwardEntry),
 	}
 }
@@ -351,7 +354,7 @@ func (t *TailscaleProvider) EnsureForward(remoteIP string, ports HostPorts) (For
 	}
 	_ = t.CloseForward(remoteIP)
 
-	localHost, err := t.alloc.Allocate(remoteIP)
+	localHost, err := t.alloc.Allocate(string(ProviderTailscale) + ":" + remoteIP)
 	if err != nil {
 		return ForwardMapping{}, err
 	}
@@ -406,6 +409,7 @@ func (t *TailscaleProvider) EnsureForward(remoteIP string, ports HostPorts) (For
 	}
 
 	mapping := ForwardMapping{
+		Provider:  ProviderTailscale,
 		RemoteIP:  remoteIP,
 		LocalHost: localHost,
 		Ports:     norm,

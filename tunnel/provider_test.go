@@ -120,6 +120,28 @@ func TestManagerHTTPAuthAndCapabilities(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200 on stop, got %d", rec.Code)
 	}
+	var ms MultiStatus
+	if err := json.Unmarshal(rec.Body.Bytes(), &ms); err != nil {
+		t.Fatal(err)
+	}
+	if ms.Providers[ProviderTailscale].State != "stopped" || ms.Providers[ProviderEasyTier].State != "stopped" {
+		t.Fatalf("expected both providers in MultiStatus: %+v", ms)
+	}
+}
+
+func TestSharedLoopbackAllocatorSeparatesProviders(t *testing.T) {
+	a := NewLoopbackAllocator()
+	tsIP, err := a.Allocate("tailscale:100.64.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	etIP, err := a.Allocate("easytier:100.64.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tsIP == etIP {
+		t.Fatalf("expected distinct loopback IPs per provider, got %s", tsIP)
+	}
 }
 
 func TestEasyTierIdentityPersistence(t *testing.T) {

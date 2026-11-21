@@ -12,13 +12,13 @@ Basic.Dialog {
     readonly property var centerDefaults: center ? center.centerTunnelDefaults : ({})
     readonly property bool hasCenterDefaults: !!centerDefaults && (centerDefaults.provider === "tailscale" || centerDefaults.provider === "easytier")
 
-    property string selectedProvider: "none"
+    property string activeTab: "tailscale"
     property bool useWebOAuth: true
 
     parent: Overlay.overlay
     anchors.centerIn: parent
-    width: Math.min((parent ? parent.width : 640) - 36, 520)
-    height: Math.min((parent ? parent.height : 700) - 36, 620)
+    width: Math.min((parent ? parent.width : 680) - 36, 560)
+    height: Math.min((parent ? parent.height : 740) - 36, 660)
     title: qsTr("Built-in tunnel")
     modal: true
     standardButtons: Dialog.Close
@@ -29,16 +29,16 @@ Basic.Dialog {
 
     function syncFromManager() {
         if (!tunnel) return
-        selectedProvider = tunnel.provider || "none"
         useWebOAuth = tunnel.tsUseWebOAuth !== false
-        autoConnectCheck.checked = tunnel.autoConnect === true
         hostnameField.text = tunnel.hostname || ""
+        tsAutoCheck.checked = tunnel.tsAutoConnect === true
         tsControlField.text = tunnel.tsControlUrl || ""
         tsAuthKeyField.text = tunnel.tsAuthKey || ""
+        etAutoCheck.checked = tunnel.etAutoConnect === true
         etNameField.text = tunnel.etNetworkName || ""
         etSecretField.text = tunnel.etNetworkSecret || ""
         etPeersField.text = tunnel.etPeers || "tcp://public.easytier.top:11010"
-        etVirtualIpField.text = tunnel.etVirtualIp || ""
+        etStaticIpField.text = tunnel.etStaticIp || ""
         etCoreField.text = tunnel.etCoreBinary || ""
     }
 
@@ -73,9 +73,9 @@ Basic.Dialog {
         id: btn
         property bool primary: false
         property bool selected: false
-        implicitHeight: 36
-        leftPadding: 12
-        rightPadding: 12
+        implicitHeight: 35
+        leftPadding: 11
+        rightPadding: 11
         font.family: Theme.fontSans
         font.pixelSize: 13
         font.weight: Font.DemiBold
@@ -109,94 +109,65 @@ Basic.Dialog {
                 Layout.fillWidth: true
                 color: Theme.textDim
                 wrapMode: Text.WordWrap
-                text: qsTr("Runs in isolated userspace without touching your system Tailscale, VPN, or routing table. Configuration and node identity persist across updates.")
+                text: qsTr("Tailscale / Headscale and EasyTier can run simultaneously in isolated userspace without touching your system VPN or routes. When both tunnels are available, SunAndMon automatically selects and fails over according to your route policy.")
             }
 
-            // Live status card
+            // Route priority policy (solves multi-tunnel automatic selection!)
             Rectangle {
                 Layout.fillWidth: true
-                implicitHeight: statusCol.implicitHeight + 20
+                implicitHeight: routeCol.implicitHeight + 18
                 radius: Theme.radiusControl
                 color: Theme.surface2
                 border.color: Theme.line
 
                 ColumnLayout {
-                    id: statusCol
+                    id: routeCol
                     anchors.fill: parent
-                    anchors.margins: 10
+                    anchors.margins: 9
                     spacing: 6
 
-                    RowLayout {
-                        Layout.fillWidth: true
-                        spacing: 8
-                        Rectangle {
-                            width: 9; height: 9; radius: 5
-                            color: !tunnel ? Theme.textDim
-                                 : tunnel.state === "connected" ? Theme.success
-                                 : tunnel.state === "needs_auth" || tunnel.state === "starting" ? Theme.accent
-                                 : tunnel.state === "error" ? "#e5534b" : Theme.textDim
-                        }
-                        LabelText {
-                            font.weight: Font.DemiBold
-                            text: {
-                                if (!tunnel || !tunnel.available) return qsTr("Tunnel binary unavailable")
-                                if (tunnel.state === "connected") return qsTr("Connected (%1)").arg(tunnel.provider === "easytier" ? "EasyTier" : "Tailscale / Headscale")
-                                if (tunnel.state === "needs_auth") return qsTr("Waiting for browser sign-in (Web OAuth)")
-                                if (tunnel.state === "starting") return qsTr("Connecting…")
-                                if (tunnel.state === "error") return qsTr("Connection error")
-                                return qsTr("Disconnected")
-                            }
-                        }
-                        Item { Layout.fillWidth: true }
-                        LabelText {
-                            visible: !!tunnel && tunnel.state === "connected"
-                            color: Theme.textDim
-                            text: qsTr("%1 peers").arg(tunnel ? tunnel.peersOnline : 0)
-                        }
-                    }
-
                     LabelText {
-                        visible: !!tunnel && tunnel.virtualIp.length > 0
-                        color: Theme.textDim
-                        text: tunnel && tunnel.exposeIp.length > 0 && tunnel.exposeIp !== tunnel.virtualIp
-                              ? qsTr("Virtual IP: %1  ·  Host tunnel IP: %2").arg(tunnel.virtualIp).arg(tunnel.exposeIp)
-                              : qsTr("Virtual IP: %1").arg(tunnel ? tunnel.virtualIp : "")
-                        wrapMode: Text.WrapAnywhere
-                        Layout.fillWidth: true
+                        font.weight: Font.DemiBold
+                        text: qsTr("Connection route policy (auto-failover across available routes)")
                     }
-
-                    LabelText {
-                        visible: !!tunnel && tunnel.errorText.length > 0
-                        color: "#e5534b"
-                        text: tunnel ? tunnel.errorText : ""
-                        wrapMode: Text.WordWrap
+                    GridLayout {
                         Layout.fillWidth: true
-                    }
-
-                    RowLayout {
-                        visible: !!tunnel && tunnel.authUrl.length > 0
-                        Layout.fillWidth: true
-                        spacing: 8
+                        columns: 2
+                        columnSpacing: 6
+                        rowSpacing: 6
                         ActionBtn {
-                            primary: true
-                            text: qsTr("Open browser to sign in")
-                            onClicked: if (tunnel) tunnel.openAuthUrl()
-                        }
-                        LabelText {
                             Layout.fillWidth: true
-                            color: Theme.textDim
-                            elide: Text.ElideMiddle
-                            text: tunnel ? tunnel.authUrl : ""
+                            text: qsTr("Auto (Direct → EasyTier → Tailscale)")
+                            selected: !!tunnel && tunnel.routePolicy === "auto"
+                            onClicked: if (tunnel) tunnel.routePolicy = "auto"
+                        }
+                        ActionBtn {
+                            Layout.fillWidth: true
+                            text: qsTr("Auto (Direct → Tailscale → EasyTier)")
+                            selected: !!tunnel && tunnel.routePolicy === "auto_ts"
+                            onClicked: if (tunnel) tunnel.routePolicy = "auto_ts"
+                        }
+                        ActionBtn {
+                            Layout.fillWidth: true
+                            text: qsTr("Prefer EasyTier tunnel")
+                            selected: !!tunnel && tunnel.routePolicy === "prefer_et"
+                            onClicked: if (tunnel) tunnel.routePolicy = "prefer_et"
+                        }
+                        ActionBtn {
+                            Layout.fillWidth: true
+                            text: qsTr("Prefer Tailscale tunnel")
+                            selected: !!tunnel && tunnel.routePolicy === "prefer_ts"
+                            onClicked: if (tunnel) tunnel.routePolicy = "prefer_ts"
                         }
                     }
                 }
             }
 
-            // Center server defaults banner
+            // Center defaults banner
             Rectangle {
                 visible: dialog.hasCenterDefaults
                 Layout.fillWidth: true
-                implicitHeight: defaultsRow.implicitHeight + 16
+                implicitHeight: defaultsRow.implicitHeight + 14
                 radius: Theme.radiusControl
                 color: Theme.accentSoft
                 border.color: Theme.accent
@@ -204,7 +175,7 @@ Basic.Dialog {
                 RowLayout {
                     id: defaultsRow
                     anchors.fill: parent
-                    anchors.margins: 8
+                    anchors.margins: 7
                     spacing: 8
                     LabelText {
                         Layout.fillWidth: true
@@ -217,6 +188,7 @@ Basic.Dialog {
                         onClicked: {
                             if (tunnel) {
                                 tunnel.applyCenterDefaults(dialog.centerDefaults)
+                                dialog.activeTab = dialog.centerDefaults.provider
                                 dialog.syncFromManager()
                             }
                         }
@@ -224,44 +196,110 @@ Basic.Dialog {
                 }
             }
 
-            // Provider tabs
-            LabelText {
-                font.weight: Font.DemiBold
-                text: qsTr("Tunnel provider")
+            // Shared device hostname
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+                LabelText { text: qsTr("Tunnel hostname"); color: Theme.textDim }
+                InputBox {
+                    id: hostnameField
+                    Layout.fillWidth: true
+                    placeholderText: qsTr("Auto (sunandmon-<computer>)")
+                }
             }
+
+            // Independent provider tabs (both can be connected at the same time!)
             RowLayout {
                 Layout.fillWidth: true
                 spacing: 6
                 ActionBtn {
                     Layout.fillWidth: true
-                    text: qsTr("Disabled")
-                    selected: dialog.selectedProvider === "none"
-                    onClicked: dialog.selectedProvider = "none"
+                    selected: dialog.activeTab === "tailscale"
+                    text: "Tailscale / Headscale" + (tunnel && tunnel.tsState === "connected" ? "  ●" : "")
+                    onClicked: dialog.activeTab = "tailscale"
                 }
                 ActionBtn {
                     Layout.fillWidth: true
-                    text: "Tailscale / Headscale"
-                    selected: dialog.selectedProvider === "tailscale"
-                    onClicked: dialog.selectedProvider = "tailscale"
-                }
-                ActionBtn {
-                    Layout.fillWidth: true
-                    text: "EasyTier"
-                    selected: dialog.selectedProvider === "easytier"
-                    onClicked: dialog.selectedProvider = "easytier"
+                    selected: dialog.activeTab === "easytier"
+                    text: "EasyTier" + (tunnel && tunnel.etState === "connected" ? "  ●" : "")
+                    onClicked: dialog.activeTab = "easytier"
                 }
             }
 
-            // Tailscale / Headscale configuration
+            // Tailscale / Headscale panel
             ColumnLayout {
-                visible: dialog.selectedProvider === "tailscale"
+                visible: dialog.activeTab === "tailscale"
                 Layout.fillWidth: true
                 spacing: 8
 
-                LabelText {
-                    font.weight: Font.DemiBold
-                    text: qsTr("Authentication mode")
+                Rectangle {
+                    Layout.fillWidth: true
+                    implicitHeight: tsStatusCol.implicitHeight + 18
+                    radius: Theme.radiusControl
+                    color: Theme.surface2
+                    border.color: Theme.line
+                    ColumnLayout {
+                        id: tsStatusCol
+                        anchors.fill: parent
+                        anchors.margins: 9
+                        spacing: 5
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 8
+                            Rectangle {
+                                width: 9; height: 9; radius: 5
+                                color: !tunnel ? Theme.textDim
+                                     : tunnel.tsState === "connected" ? Theme.success
+                                     : tunnel.tsState === "needs_auth" || tunnel.tsState === "starting" ? Theme.accent
+                                     : tunnel.tsState === "error" ? "#e5534b" : Theme.textDim
+                            }
+                            LabelText {
+                                font.weight: Font.DemiBold
+                                text: !tunnel || !tunnel.available ? qsTr("Tunnel binary unavailable")
+                                    : tunnel.tsState === "connected" ? qsTr("Connected (Tailscale / Headscale)")
+                                    : tunnel.tsState === "needs_auth" ? qsTr("Waiting for browser sign-in (Web OAuth)")
+                                    : tunnel.tsState === "starting" ? qsTr("Connecting…")
+                                    : tunnel.tsState === "error" ? qsTr("Connection error") : qsTr("Disconnected")
+                            }
+                            Item { Layout.fillWidth: true }
+                            LabelText {
+                                visible: !!tunnel && tunnel.tsState === "connected"
+                                color: Theme.textDim
+                                text: qsTr("%1 peers").arg(tunnel ? tunnel.tsPeersOnline : 0)
+                            }
+                        }
+                        LabelText {
+                            visible: !!tunnel && tunnel.tsVirtualIp.length > 0
+                            color: Theme.textDim
+                            text: qsTr("Virtual IP: %1").arg(tunnel ? tunnel.tsVirtualIp : "")
+                        }
+                        LabelText {
+                            visible: !!tunnel && tunnel.tsError.length > 0
+                            color: "#e5534b"
+                            text: tunnel ? tunnel.tsError : ""
+                            wrapMode: Text.WordWrap
+                            Layout.fillWidth: true
+                        }
+                        RowLayout {
+                            visible: !!tunnel && tunnel.tsAuthUrl.length > 0
+                            Layout.fillWidth: true
+                            spacing: 8
+                            ActionBtn {
+                                primary: true
+                                text: qsTr("Open browser to sign in")
+                                onClicked: if (tunnel) tunnel.openTailscaleAuthUrl()
+                            }
+                            LabelText {
+                                Layout.fillWidth: true
+                                color: Theme.textDim
+                                elide: Text.ElideMiddle
+                                text: tunnel ? tunnel.tsAuthUrl : ""
+                            }
+                        }
+                    }
                 }
+
+                LabelText { font.weight: Font.DemiBold; text: qsTr("Authentication mode") }
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: 6
@@ -279,18 +317,14 @@ Basic.Dialog {
                     }
                 }
 
-                LabelText { text: qsTr("Control server URL (leave blank for official Tailscale, or enter Headscale URL)") ; color: Theme.textDim; wrapMode: Text.WordWrap; Layout.fillWidth: true }
+                LabelText { text: qsTr("Control server URL (leave blank for official Tailscale, or enter Headscale URL)"); color: Theme.textDim; wrapMode: Text.WordWrap; Layout.fillWidth: true }
                 InputBox {
                     id: tsControlField
                     Layout.fillWidth: true
                     placeholderText: "https://headscale.example.com"
                 }
 
-                LabelText {
-                    visible: !dialog.useWebOAuth
-                    text: qsTr("Pre-Auth Key")
-                    color: Theme.textDim
-                }
+                LabelText { visible: !dialog.useWebOAuth; text: qsTr("Pre-Auth Key"); color: Theme.textDim }
                 InputBox {
                     id: tsAuthKeyField
                     visible: !dialog.useWebOAuth
@@ -298,13 +332,89 @@ Basic.Dialog {
                     echoMode: TextInput.Password
                     placeholderText: "tskey-auth-..."
                 }
+
+                HardCheckBox {
+                    id: tsAutoCheck
+                    text: qsTr("Auto-connect Tailscale / Headscale on launch")
+                }
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+                    Item { Layout.fillWidth: true }
+                    ActionBtn {
+                        visible: !!tunnel && tunnel.tsState !== "stopped"
+                        text: qsTr("Disconnect Tailscale")
+                        onClicked: if (tunnel) tunnel.stopTailscale()
+                    }
+                    ActionBtn {
+                        primary: true
+                        text: qsTr("Save & Connect Tailscale")
+                        onClicked: if (tunnel) tunnel.saveAndConnectTailscale(
+                            tsAutoCheck.checked, hostnameField.text, tsControlField.text, tsAuthKeyField.text, dialog.useWebOAuth)
+                    }
+                }
             }
 
-            // EasyTier configuration
+            // EasyTier panel
             ColumnLayout {
-                visible: dialog.selectedProvider === "easytier"
+                visible: dialog.activeTab === "easytier"
                 Layout.fillWidth: true
                 spacing: 8
+
+                Rectangle {
+                    Layout.fillWidth: true
+                    implicitHeight: etStatusCol.implicitHeight + 18
+                    radius: Theme.radiusControl
+                    color: Theme.surface2
+                    border.color: Theme.line
+                    ColumnLayout {
+                        id: etStatusCol
+                        anchors.fill: parent
+                        anchors.margins: 9
+                        spacing: 5
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 8
+                            Rectangle {
+                                width: 9; height: 9; radius: 5
+                                color: !tunnel ? Theme.textDim
+                                     : tunnel.etState === "connected" ? Theme.success
+                                     : tunnel.etState === "starting" ? Theme.accent
+                                     : tunnel.etState === "error" ? "#e5534b" : Theme.textDim
+                            }
+                            LabelText {
+                                font.weight: Font.DemiBold
+                                text: !tunnel || !tunnel.available ? qsTr("Tunnel binary unavailable")
+                                    : tunnel.etState === "connected" ? qsTr("Connected (EasyTier)")
+                                    : tunnel.etState === "starting" ? qsTr("Connecting…")
+                                    : tunnel.etState === "error" ? qsTr("Connection error") : qsTr("Disconnected")
+                            }
+                            Item { Layout.fillWidth: true }
+                            LabelText {
+                                visible: !!tunnel && tunnel.etState === "connected"
+                                color: Theme.textDim
+                                text: qsTr("%1 peers").arg(tunnel ? tunnel.etPeersOnline : 0)
+                            }
+                        }
+                        LabelText {
+                            visible: !!tunnel && tunnel.etVirtualIp.length > 0
+                            color: Theme.textDim
+                            text: tunnel && tunnel.etExposeIp.length > 0
+                                  ? qsTr("Virtual IP: %1  ·  Host tunnel IP: %2").arg(tunnel.etVirtualIp).arg(tunnel.etExposeIp)
+                                  : qsTr("Virtual IP: %1").arg(tunnel ? tunnel.etVirtualIp : "")
+                            wrapMode: Text.WrapAnywhere
+                            Layout.fillWidth: true
+                        }
+                        LabelText {
+                            visible: !!tunnel && tunnel.etError.length > 0
+                            color: "#e5534b"
+                            text: tunnel ? tunnel.etError : ""
+                            wrapMode: Text.WordWrap
+                            Layout.fillWidth: true
+                        }
+                    }
+                }
 
                 LabelText {
                     visible: !!tunnel && !tunnel.easytierAvailable
@@ -315,100 +425,49 @@ Basic.Dialog {
                 }
 
                 LabelText { text: qsTr("Network name"); color: Theme.textDim }
-                InputBox {
-                    id: etNameField
-                    Layout.fillWidth: true
-                    placeholderText: "sunandmon-mesh"
-                }
+                InputBox { id: etNameField; Layout.fillWidth: true; placeholderText: "sunandmon-mesh" }
 
                 LabelText { text: qsTr("Network secret"); color: Theme.textDim }
-                InputBox {
-                    id: etSecretField
-                    Layout.fillWidth: true
-                    echoMode: TextInput.Password
-                    placeholderText: qsTr("Shared network secret")
-                }
+                InputBox { id: etSecretField; Layout.fillWidth: true; echoMode: TextInput.Password; placeholderText: qsTr("Shared network secret") }
 
                 LabelText { text: qsTr("Peer / relay nodes (comma or space separated)"); color: Theme.textDim }
-                InputBox {
-                    id: etPeersField
-                    Layout.fillWidth: true
-                    placeholderText: "tcp://public.easytier.top:11010"
-                }
+                InputBox { id: etPeersField; Layout.fillWidth: true; placeholderText: "tcp://public.easytier.top:11010" }
 
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: 8
                     ColumnLayout {
-                        Layout.fillWidth: true
-                        spacing: 4
+                        Layout.fillWidth: true; spacing: 4
                         LabelText { text: qsTr("Static virtual IP (optional, blank = DHCP)"); color: Theme.textDim }
-                        InputBox {
-                            id: etVirtualIpField
-                            Layout.fillWidth: true
-                            placeholderText: "10.126.126.10"
-                        }
+                        InputBox { id: etStaticIpField; Layout.fillWidth: true; placeholderText: "10.126.126.10" }
                     }
                     ColumnLayout {
-                        Layout.fillWidth: true
-                        spacing: 4
+                        Layout.fillWidth: true; spacing: 4
                         LabelText { text: qsTr("easytier-core path (optional)"); color: Theme.textDim }
-                        InputBox {
-                            id: etCoreField
-                            Layout.fillWidth: true
-                            placeholderText: qsTr("Auto-detect")
-                        }
+                        InputBox { id: etCoreField; Layout.fillWidth: true; placeholderText: qsTr("Auto-detect") }
                     }
-                }
-            }
-
-            // Shared node options
-            ColumnLayout {
-                visible: dialog.selectedProvider !== "none"
-                Layout.fillWidth: true
-                spacing: 8
-
-                LabelText { text: qsTr("Tunnel hostname (optional)"); color: Theme.textDim }
-                InputBox {
-                    id: hostnameField
-                    Layout.fillWidth: true
-                    placeholderText: qsTr("Auto (sunandmon-<computer>)")
                 }
 
                 HardCheckBox {
-                    id: autoConnectCheck
-                    text: qsTr("Connect tunnel automatically when SunAndMon starts")
+                    id: etAutoCheck
+                    text: qsTr("Auto-connect EasyTier on launch")
                 }
-            }
 
-            RowLayout {
-                Layout.fillWidth: true
-                Layout.topMargin: 6
-                spacing: 8
-                Item { Layout.fillWidth: true }
-                ActionBtn {
-                    visible: !!tunnel && tunnel.state !== "stopped"
-                    text: qsTr("Disconnect")
-                    onClicked: if (tunnel) tunnel.stopTunnel()
-                }
-                ActionBtn {
-                    primary: true
-                    text: dialog.selectedProvider === "none" ? qsTr("Save & Disable") : qsTr("Save & Connect")
-                    onClicked: {
-                        if (!tunnel) return
-                        tunnel.saveAndConnect(
-                            dialog.selectedProvider,
-                            autoConnectCheck.checked,
-                            hostnameField.text,
-                            tsControlField.text,
-                            tsAuthKeyField.text,
-                            dialog.useWebOAuth,
-                            etNameField.text,
-                            etSecretField.text,
-                            etPeersField.text,
-                            etVirtualIpField.text,
-                            etCoreField.text
-                        )
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+                    Item { Layout.fillWidth: true }
+                    ActionBtn {
+                        visible: !!tunnel && tunnel.etState !== "stopped"
+                        text: qsTr("Disconnect EasyTier")
+                        onClicked: if (tunnel) tunnel.stopEasyTier()
+                    }
+                    ActionBtn {
+                        primary: true
+                        text: qsTr("Save & Connect EasyTier")
+                        onClicked: if (tunnel) tunnel.saveAndConnectEasyTier(
+                            etAutoCheck.checked, hostnameField.text, etNameField.text, etSecretField.text,
+                            etPeersField.text, etStaticIpField.text, etCoreField.text)
                     }
                 }
             }

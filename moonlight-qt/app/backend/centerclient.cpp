@@ -531,7 +531,21 @@ CenterClient::CenterClient(ComputerManager* computers)
     });
     connect(computers, &ComputerManager::centerConnectFinished, this, [this](const QString& uuid, const QString& error) {
         m_Busy = false;
-        m_CenterStatus = error;
+        QString status = error;
+        if (uuid.isEmpty() && !status.isEmpty() && !m_LastConnectHostTunnels.isEmpty() && m_Tunnel) {
+            QStringList missing;
+            for (const auto& p : m_LastConnectHostTunnels) {
+                if (!m_Tunnel->isProviderConnected(p)) {
+                    missing.append(p == QStringLiteral("easytier") ? QStringLiteral("EasyTier") : QStringLiteral("Tailscale"));
+                }
+            }
+            if (!missing.isEmpty()) {
+                status = tr("Could not reach the host directly. This host advertises built-in tunnel (%1) — connect it in \"Built-in tunnel\" and retry.")
+                             .arg(missing.join(QStringLiteral(" / ")));
+            }
+        }
+        m_LastConnectHostTunnels.clear();
+        m_CenterStatus = status;
         emit changed();
         if (!uuid.isEmpty() && connected()) {
             emit hostConnected(uuid);
@@ -1225,6 +1239,8 @@ void CenterClient::connectDevice(const QString& id)
         m_DirectoryRequest = nullptr;
         auto grant = QJsonDocument::fromJson(reply->readAll()).object();
         grant.remove(QStringLiteral("tunnelLocalAddress"));
+        grant.remove(QStringLiteral("tunnelLocalAddresses"));
+        grant.remove(QStringLiteral("preferTunnelFirst"));
         if (reply->error() != QNetworkReply::NoError ||
             reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() != 200 ||
             grant.value("id").toString() != id) {
@@ -1233,20 +1249,45 @@ void CenterClient::connectDevice(const QString& id)
             emit changed();
             return;
         }
-        const QString tunnelProvider = grant.value("tunnelProvider").toString();
-        const QString tunnelAddress = grant.value("tunnelAddress").toString();
+
+        // Collect all tunnel endpoints advertised by the host (supports Tailscale + EasyTier simultaneously).
+        QList<QPair<QString, QString>> hostTunnels;
+        QStringList hostProviders;
+        const auto tunnelsArr = grant.value(QStringLiteral("tunnels")).toArray();
+        for (const auto& val : tunnelsArr) {
+            const auto obj = val.toObject();
+            const QString p = obj.value(QStringLiteral("provider")).toString().trimmed().toLower();
+            const QString a = obj.value(QStringLiteral("address")).toString().trimmed();
+            if (!p.isEmpty() && !a.isEmpty()) {
+                hostTunnels.append({p, a});
+                if (!hostProviders.contains(p)) hostProviders.append(p);
+            }
+        }
+        if (hostTunnels.isEmpty()) {
+            const QString lp = grant.value(QStringLiteral("tunnelProvider")).toString().trimmed().toLower();
+            const QString la = grant.value(QStringLiteral("tunnelAddress")).toString().trimmed();
+            if (!lp.isEmpty() && !la.isEmpty()) {
+                hostTunnels.append({lp, la});
+                hostProviders.append(lp);
+            }
+        }
+        m_LastConnectHostTunnels = hostProviders;
+
         const quint16 grantPort = static_cast<quint16>(grant.value("port").toInt());
         const quint16 grantHttpsPort = static_cast<quint16>(grant.value("httpsPort").toInt());
-        if (m_Tunnel && m_Tunnel->state() == QStringLiteral("connected") &&
-            !tunnelProvider.isEmpty() && tunnelProvider == m_Tunnel->provider() &&
-            !tunnelAddress.isEmpty() && grantPort > 0 && grantHttpsPort > 0) {
-            m_Tunnel->ensureForwardAsync(tunnelAddress, grantPort, grantHttpsPort,
-                                         [this, grant](const QString& localHost, const QString&) mutable {
-                                             if (!localHost.isEmpty()) {
-                                                 grant.insert(QStringLiteral("tunnelLocalAddress"), localHost);
-                                             }
-                                             m_Computers->connectFromCenter(grant);
-                                         });
+        if (m_Tunnel && !hostTunnels.isEmpty() && grantPort > 0 && grantHttpsPort > 0) {
+            m_Tunnel->ensureForwardsAsync(hostTunnels, grantPort, grantHttpsPort,
+                                          [this, grant](const QStringList& localHosts) mutable {
+                                              if (!localHosts.isEmpty()) {
+                                                  QJsonArray arr;
+                                                  for (const auto& h : localHosts) {
+                                                      arr.append(h);
+                                                  }
+                                                  grant.insert(QStringLiteral("tunnelLocalAddresses"), arr);
+                                                  grant.insert(QStringLiteral("preferTunnelFirst"), m_Tunnel->preferTunnelFirst());
+                                              }
+                                              m_Computers->connectFromCenter(grant);
+                                          });
             return;
         }
         m_Computers->connectFromCenter(grant);
@@ -1617,13 +1658,23 @@ void CenterClient::publishHost()
             addresses.append(ip.toString());
         }
     }
-    QString tunnelProvider;
-    QString tunnelAddress;
-    if (m_Tunnel && m_Tunnel->state() == QStringLiteral("connected") && !m_Tunnel->exposeIp().isEmpty()) {
-        tunnelProvider = m_Tunnel->provider();
-        tunnelAddress = m_Tunnel->exposeIp();
-        if (!addresses.contains(tunnelAddress) && addresses.size() < 16) {
-            addresses.append(tunnelAddress);
+    QJsonArray tunnelsArr;
+    QString primaryTunnelProvider;
+    QString primaryTunnelAddress;
+    if (m_Tunnel) {
+        const auto activeTunnels = m_Tunnel->connectedHostTunnels();
+        for (const auto& ep : activeTunnels) {
+            tunnelsArr.append(QJsonObject{
+                {QStringLiteral("provider"), ep.first},
+                {QStringLiteral("address"), ep.second},
+            });
+            if (primaryTunnelProvider.isEmpty()) {
+                primaryTunnelProvider = ep.first;
+                primaryTunnelAddress = ep.second;
+            }
+            if (!addresses.contains(ep.second) && addresses.size() < 16) {
+                addresses.append(ep.second);
+            }
         }
     }
     if (addresses.isEmpty()) {
@@ -1634,9 +1685,10 @@ void CenterClient::publishHost()
                      {"port", m_HttpPort}, {"httpsPort", m_HttpsPort},
                      {"certificate", QString::fromLatin1(m_PublicCertificate)},
                      {"hostKey", QString::fromLatin1(m_HostKey)}};
-    if (!tunnelProvider.isEmpty() && !tunnelAddress.isEmpty()) {
-        body.insert(QStringLiteral("tunnelProvider"), tunnelProvider);
-        body.insert(QStringLiteral("tunnelAddress"), tunnelAddress);
+    if (!tunnelsArr.isEmpty()) {
+        body.insert(QStringLiteral("tunnels"), tunnelsArr);
+        body.insert(QStringLiteral("tunnelProvider"), primaryTunnelProvider);
+        body.insert(QStringLiteral("tunnelAddress"), primaryTunnelAddress);
     }
     const auto token = m_ManagedToken;
     auto reply = m_Registration = request(m_Endpoint, m_Key, DevicesPath + "/" + m_HostId, "PUT",

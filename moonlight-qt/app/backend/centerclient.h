@@ -144,6 +144,7 @@ private:
     ComputerManager* m_Computers;
     TunnelManager* m_Tunnel = nullptr;
     QVariantMap m_CenterTunnelDefaults;
+    QStringList m_LastConnectHostTunnels;
     QNetworkAccessManager m_Network;
     QNetworkAccessManager m_Direct;
     QProcess m_Engine;

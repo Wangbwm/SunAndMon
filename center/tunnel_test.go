@@ -74,4 +74,13 @@ func TestTunnelConfigAndEndpointRegistration(t *testing.T) {
 	if _, _, err := normalizeTunnelEndpoint("easytier", "127.0.0.1"); err == nil {
 		t.Fatal("expected loopback tunnel address rejection")
 	}
+
+	// Validate concurrent multi-tunnel endpoints (Tailscale + EasyTier simultaneously)
+	primaryP, primaryA, list, err := normalizeTunnelEndpoints("", "", []tunnelEndpoint{
+		{Provider: "tailscale", Address: "100.64.12.34"},
+		{Provider: "easytier", Address: "10.127.45.67"},
+	})
+	if err != nil || primaryP != "tailscale" || primaryA != "100.64.12.34" || len(list) != 2 {
+		t.Fatalf("normalizeTunnelEndpoints multi failed: %q %q %+v %v", primaryP, primaryA, list, err)
+	}
 }

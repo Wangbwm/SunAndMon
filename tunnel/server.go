@@ -12,100 +12,228 @@ import (
 )
 
 type tunnelManager struct {
-	mu       sync.Mutex
-	active   TunnelProvider
-	registry map[ProviderType]func() TunnelProvider
+	mu               sync.Mutex
+	alloc            *LoopbackAllocator
+	providers        map[ProviderType]TunnelProvider
+	registry         map[ProviderType]func(*LoopbackAllocator) TunnelProvider
+	desiredHostPorts *HostPorts
 }
 
 func newTunnelManager() *tunnelManager {
+	alloc := NewLoopbackAllocator()
 	return &tunnelManager{
-		registry: map[ProviderType]func() TunnelProvider{
-			ProviderTailscale: func() TunnelProvider { return NewTailscaleProvider() },
-			ProviderEasyTier:  func() TunnelProvider { return NewEasyTierProvider() },
+		alloc:     alloc,
+		providers: make(map[ProviderType]TunnelProvider),
+		registry: map[ProviderType]func(*LoopbackAllocator) TunnelProvider{
+			ProviderTailscale: func(a *LoopbackAllocator) TunnelProvider { return NewTailscaleProvider(a) },
+			ProviderEasyTier:  func(a *LoopbackAllocator) TunnelProvider { return NewEasyTierProvider(a) },
 		},
 	}
 }
 
-func (m *tunnelManager) status() Status {
+func (m *tunnelManager) status() MultiStatus {
 	m.mu.Lock()
-	p := m.active
-	m.mu.Unlock()
-	if p == nil {
-		return Status{Provider: ProviderNone, State: "stopped"}
+	activeCopy := make(map[ProviderType]TunnelProvider, len(m.providers))
+	for k, v := range m.providers {
+		activeCopy[k] = v
 	}
-	return p.Status()
+	desiredPorts := m.desiredHostPorts
+	m.mu.Unlock()
+
+	perProvider := map[ProviderType]Status{
+		ProviderTailscale: {Provider: ProviderTailscale, State: "stopped"},
+		ProviderEasyTier:  {Provider: ProviderEasyTier, State: "stopped"},
+	}
+
+	var allForwards []ForwardMapping
+	for pt, p := range activeCopy {
+		st := p.Status()
+		// Auto-expose host ports on any provider that just finished connecting.
+		if desiredPorts != nil && st.State == "connected" && !st.HostExposed {
+			_ = p.ExposeHost(*desiredPorts)
+			st = p.Status()
+		}
+		perProvider[pt] = st
+		allForwards = append(allForwards, st.ActiveForwards...)
+	}
+
+	// Build summary Status for backward compatibility:
+	// prefer connected > needs_auth > starting > error > stopped.
+	summary := Status{Provider: ProviderNone, State: "stopped", ActiveForwards: allForwards}
+	order := []ProviderType{ProviderTailscale, ProviderEasyTier}
+	rank := func(s string) int {
+		switch s {
+		case "connected":
+			return 4
+		case "needs_auth":
+			return 3
+		case "starting":
+			return 2
+		case "error":
+			return 1
+		default:
+			return 0
+		}
+	}
+	bestRank := 0
+	totalPeers := 0
+	anyHostExposed := false
+	for _, pt := range order {
+		st := perProvider[pt]
+		totalPeers += st.PeersOnline
+		if st.HostExposed {
+			anyHostExposed = true
+		}
+		if r := rank(st.State); r > bestRank {
+			bestRank = r
+			summary = st
+		}
+	}
+	summary.PeersOnline = totalPeers
+	summary.HostExposed = anyHostExposed
+	summary.ActiveForwards = allForwards
+
+	return MultiStatus{
+		Status:    summary,
+		Providers: perProvider,
+	}
 }
 
-func (m *tunnelManager) stop() error {
+func (m *tunnelManager) stopProvider(provider ProviderType) error {
 	m.mu.Lock()
-	p := m.active
-	m.active = nil
+	if provider == "" || provider == ProviderNone {
+		all := make([]TunnelProvider, 0, len(m.providers))
+		for _, p := range m.providers {
+			all = append(all, p)
+		}
+		m.providers = make(map[ProviderType]TunnelProvider)
+		m.mu.Unlock()
+		var firstErr error
+		for _, p := range all {
+			if err := p.Stop(); err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+		return firstErr
+	}
+	p, ok := m.providers[provider]
+	if ok {
+		delete(m.providers, provider)
+	}
 	m.mu.Unlock()
-	if p != nil {
+	if ok {
 		return p.Stop()
 	}
 	return nil
 }
 
-func (m *tunnelManager) start(cfg Config) (Status, error) {
+func (m *tunnelManager) stop() error {
+	return m.stopProvider("")
+}
+
+func (m *tunnelManager) start(cfg Config) (MultiStatus, error) {
 	if cfg.Provider == "" || cfg.Provider == ProviderNone {
 		_ = m.stop()
 		return m.status(), nil
 	}
 	factory, ok := m.registry[cfg.Provider]
 	if !ok {
-		return Status{}, errors.New("unsupported tunnel provider")
+		return MultiStatus{}, errors.New("unsupported tunnel provider")
 	}
-	_ = m.stop()
+	_ = m.stopProvider(cfg.Provider)
 
-	p := factory()
+	p := factory(m.alloc)
 	if err := p.Start(nil, cfg); err != nil {
-		return Status{Provider: cfg.Provider, State: "error", Error: err.Error()}, err
+		ms := m.status()
+		ms.Providers[cfg.Provider] = Status{Provider: cfg.Provider, State: "error", Error: err.Error()}
+		ms.Error = err.Error()
+		return ms, err
 	}
 	m.mu.Lock()
-	m.active = p
+	m.providers[cfg.Provider] = p
 	m.mu.Unlock()
-	return p.Status(), nil
+	return m.status(), nil
 }
 
 func (m *tunnelManager) expose(ports HostPorts) error {
+	norm := ports.Normalized()
 	m.mu.Lock()
-	p := m.active
-	m.mu.Unlock()
-	if p == nil {
-		return errors.New("tunnel is not running")
+	m.desiredHostPorts = &norm
+	active := make([]TunnelProvider, 0, len(m.providers))
+	for _, p := range m.providers {
+		active = append(active, p)
 	}
-	return p.ExposeHost(ports)
+	m.mu.Unlock()
+	if len(active) == 0 {
+		return errors.New("no tunnel provider is running")
+	}
+	var lastErr error
+	anyOK := false
+	for _, p := range active {
+		if err := p.ExposeHost(norm); err != nil {
+			lastErr = err
+		} else {
+			anyOK = true
+		}
+	}
+	if !anyOK && lastErr != nil {
+		return lastErr
+	}
+	return nil
 }
 
 func (m *tunnelManager) unexpose() error {
 	m.mu.Lock()
-	p := m.active
-	m.mu.Unlock()
-	if p == nil {
-		return nil
+	m.desiredHostPorts = nil
+	active := make([]TunnelProvider, 0, len(m.providers))
+	for _, p := range m.providers {
+		active = append(active, p)
 	}
-	return p.UnexposeHost()
+	m.mu.Unlock()
+	for _, p := range active {
+		_ = p.UnexposeHost()
+	}
+	return nil
 }
 
-func (m *tunnelManager) ensureForward(remoteIP string, ports HostPorts) (ForwardMapping, error) {
+func (m *tunnelManager) ensureForward(provider ProviderType, remoteIP string, ports HostPorts) (ForwardMapping, error) {
 	m.mu.Lock()
-	p := m.active
-	m.mu.Unlock()
-	if p == nil {
-		return ForwardMapping{}, errors.New("tunnel is not running")
+	var target TunnelProvider
+	if provider != "" && provider != ProviderNone {
+		target = m.providers[provider]
+	} else {
+		// Auto-pick first connected provider if caller didn't specify one.
+		for _, pt := range []ProviderType{ProviderEasyTier, ProviderTailscale} {
+			if p, ok := m.providers[pt]; ok && p.Status().State == "connected" {
+				target = p
+				break
+			}
+		}
 	}
-	return p.EnsureForward(remoteIP, ports)
+	m.mu.Unlock()
+	if target == nil {
+		return ForwardMapping{}, errors.New("requested tunnel provider is not running")
+	}
+	return target.EnsureForward(remoteIP, ports)
 }
 
-func (m *tunnelManager) closeForward(remoteIP string) error {
+func (m *tunnelManager) closeForward(provider ProviderType, remoteIP string) error {
 	m.mu.Lock()
-	p := m.active
-	m.mu.Unlock()
-	if p == nil {
-		return nil
+	targets := make([]TunnelProvider, 0, len(m.providers))
+	if provider != "" && provider != ProviderNone {
+		if p, ok := m.providers[provider]; ok {
+			targets = append(targets, p)
+		}
+	} else {
+		for _, p := range m.providers {
+			targets = append(targets, p)
+		}
 	}
-	return p.CloseForward(remoteIP)
+	m.mu.Unlock()
+	for _, p := range targets {
+		_ = p.CloseForward(remoteIP)
+	}
+	return nil
 }
 
 func (m *tunnelManager) handler(token string) http.Handler {
@@ -152,8 +280,14 @@ func (m *tunnelManager) handler(token string) http.Handler {
 		writeJSON(w, http.StatusOK, st)
 	})
 
-	mux.HandleFunc("POST /v1/stop", func(w http.ResponseWriter, _ *http.Request) {
-		_ = m.stop()
+	mux.HandleFunc("POST /v1/stop", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Provider ProviderType `json:"provider,omitempty"`
+		}
+		if r.Body != nil {
+			_ = json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req)
+		}
+		_ = m.stopProvider(req.Provider)
 		writeJSON(w, http.StatusOK, m.status())
 	})
 
@@ -176,13 +310,14 @@ func (m *tunnelManager) handler(token string) http.Handler {
 
 	mux.HandleFunc("POST /v1/forward", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			RemoteIP string    `json:"remoteIp"`
-			Ports    HostPorts `json:"ports"`
+			Provider ProviderType `json:"provider,omitempty"`
+			RemoteIP string       `json:"remoteIp"`
+			Ports    HostPorts    `json:"ports"`
 		}
 		if !readJSON(w, r, &req) {
 			return
 		}
-		mapping, err := m.ensureForward(req.RemoteIP, req.Ports)
+		mapping, err := m.ensureForward(req.Provider, req.RemoteIP, req.Ports)
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
@@ -191,7 +326,8 @@ func (m *tunnelManager) handler(token string) http.Handler {
 	})
 
 	mux.HandleFunc("DELETE /v1/forward/{ip}", func(w http.ResponseWriter, r *http.Request) {
-		_ = m.closeForward(r.PathValue("ip"))
+		provider := ProviderType(r.URL.Query().Get("provider"))
+		_ = m.closeForward(provider, r.PathValue("ip"))
 		w.WriteHeader(http.StatusNoContent)
 	})
 

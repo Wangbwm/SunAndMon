@@ -112,9 +112,10 @@ func uniquePorts(vals ...uint16) []uint16 {
 }
 
 type ForwardMapping struct {
-	RemoteIP  string    `json:"remoteIp"`
-	LocalHost string    `json:"localHost"`
-	Ports     HostPorts `json:"ports"`
+	Provider  ProviderType `json:"provider,omitempty"`
+	RemoteIP  string       `json:"remoteIp"`
+	LocalHost string       `json:"localHost"`
+	Ports     HostPorts    `json:"ports"`
 }
 
 type Status struct {
@@ -128,6 +129,11 @@ type Status struct {
 	PeersOnline    int              `json:"peersOnline,omitempty"`
 	HostExposed    bool             `json:"hostExposed,omitempty"`
 	ActiveForwards []ForwardMapping `json:"activeForwards,omitempty"`
+}
+
+type MultiStatus struct {
+	Status
+	Providers map[ProviderType]Status `json:"providers"`
 }
 
 // TunnelProvider is the unified abstraction implemented by both Tailscale/Headscale (tsnet)

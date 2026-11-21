@@ -1040,6 +1040,9 @@ namespace platf {
   bool
   set_privacy_curtain(bool enabled);
 
+  bool
+  is_privacy_curtain_active();
+
   /**
    * @brief Check if GPUs/drivers have changed since the last call to this function.
    * @return `true` if a change has occurred or if it is unknown whether a change occurred.

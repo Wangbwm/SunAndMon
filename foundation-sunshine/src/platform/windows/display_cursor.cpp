@@ -11,6 +11,7 @@
 
 #include "src/cursor_channel.h"
 #include "src/logging.h"
+#include "src/platform/common.h"
 
 namespace platf::dxgi {
   using namespace std::literals;
@@ -427,6 +428,66 @@ namespace platf::dxgi {
 
     if (include_xor) {
       normalized.xor_mask = make_cursor_xor_image(img_data, normalized.info);
+    }
+
+    // When the Windows software privacy curtain hides the physical system cursor
+    // with a transparent bitmap, substitute a crisp visible arrow cursor for the
+    // remote Moonlight viewer so the remote cursor remains clearly visible while
+    // the physical screen stays completely blank.
+    if (platf::is_privacy_curtain_active()) {
+      bool all_transparent = true;
+      for (std::size_t off = 3; off < normalized.alpha.size(); off += 4) {
+        if (std::begin(normalized.alpha)[off] != 0) {
+          all_transparent = false;
+          break;
+        }
+      }
+      if (all_transparent) {
+        static constexpr const char *kArrowRows[] = {
+          "B.................",
+          "BB................",
+          "BWB...............",
+          "BWWB..............",
+          "BWWWB.............",
+          "BWWWWB............",
+          "BWWWWWB...........",
+          "BWWWWWWB..........",
+          "BWWWWWWWB.........",
+          "BWWWWWWWWB........",
+          "BWWWWWWWWWB.......",
+          "BWWWWWWWWWWB......",
+          "BWWWWWWBBBBBB.....",
+          "BWWWBWWB..........",
+          "BWWB.BWWB.........",
+          "BWB..BWWB.........",
+          "BB....BWWB........",
+          "B.....BWWB........",
+          ".......BWWB.......",
+          ".......BBBB......."
+        };
+        constexpr UINT32 kW = 18;
+        constexpr UINT32 kH = 20;
+        util::buffer_t<std::uint8_t> arrow(kW * kH * 4u);
+        for (UINT32 y = 0; y < kH; ++y) {
+          for (UINT32 x = 0; x < kW; ++x) {
+            std::uint32_t px = 0x00000000u;
+            if (kArrowRows[y][x] == 'B') {
+              px = 0xFF000000u;
+            }
+            else if (kArrowRows[y][x] == 'W') {
+              px = 0xFFFFFFFFu;
+            }
+            std::memcpy(std::begin(arrow) + (y * kW + x) * 4u, &px, sizeof(px));
+          }
+        }
+        normalized.info.Type = DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR;
+        normalized.info.Width = kW;
+        normalized.info.Height = kH;
+        normalized.info.Pitch = kW * 4u;
+        normalized.info.HotSpot = { 0, 0 };
+        normalized.alpha = std::move(arrow);
+        normalized.xor_mask = {};
+      }
     }
     return true;
   }

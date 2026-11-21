@@ -2671,6 +2671,75 @@ namespace platf {
   namespace {
     constexpr wchar_t kPrivacyCurtainClassName[] = L"SunAndMonPrivacyCurtainWnd";
     constexpr UINT_PTR kPrivacyCurtainTimerId = 1;
+    std::atomic<bool> g_privacy_curtain_active { false };
+    std::atomic<HWND> g_privacy_curtain_hwnd { nullptr };
+
+    void
+    suppress_shell_previews_and_raise(HWND curtain) {
+      if (!curtain || !IsWindow(curtain)) {
+        return;
+      }
+      // Hide Windows 10/11 taskbar hover preview popups which sit in a shell Z-band
+      // above normal HWND_TOPMOST windows.
+      if (HWND thumb = FindWindowW(L"TaskListThumbnailWnd", nullptr); thumb && IsWindowVisible(thumb)) {
+        ShowWindowAsync(thumb, SW_HIDE);
+      }
+      int vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
+      int vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
+      int vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+      int vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+      if (vw <= 0 || vh <= 0) {
+        vx = 0;
+        vy = 0;
+        vw = GetSystemMetrics(SM_CXSCREEN);
+        vh = GetSystemMetrics(SM_CYSCREEN);
+      }
+      SetWindowPos(curtain, HWND_TOPMOST, vx, vy, vw, vh, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    }
+
+    void CALLBACK
+    privacy_curtain_win_event_proc(HWINEVENTHOOK, DWORD, HWND hwnd, LONG id_object, LONG, DWORD, DWORD) {
+      if (id_object != OBJID_WINDOW || !hwnd) {
+        return;
+      }
+      HWND curtain = g_privacy_curtain_hwnd.load(std::memory_order_acquire);
+      if (!curtain || hwnd == curtain) {
+        return;
+      }
+      wchar_t cls[64] {};
+      if (GetClassNameW(hwnd, cls, 64) > 0 && wcscmp(cls, L"TaskListThumbnailWnd") == 0) {
+        ShowWindowAsync(hwnd, SW_HIDE);
+      }
+      suppress_shell_previews_and_raise(curtain);
+    }
+
+    void
+    hide_physical_system_cursors() {
+      // Standard Win32 OCR_* cursor IDs
+      static constexpr UINT kOcrIds[] = {
+        32512, 32513, 32514, 32515, 32516,
+        32642, 32643, 32644, 32645, 32646,
+        32648, 32649, 32650
+      };
+      // 32x32 completely transparent monochrome cursor (AND=0xFF, XOR=0x00)
+      BYTE and_mask[128];
+      BYTE xor_mask[128];
+      std::memset(and_mask, 0xFF, sizeof(and_mask));
+      std::memset(xor_mask, 0x00, sizeof(xor_mask));
+      HINSTANCE inst = GetModuleHandleW(nullptr);
+      for (UINT id : kOcrIds) {
+        if (HCURSOR blank = CreateCursor(inst, 0, 0, 32, 32, and_mask, xor_mask)) {
+          if (!SetSystemCursor(blank, id)) {
+            DestroyCursor(blank);
+          }
+        }
+      }
+    }
+
+    void
+    restore_physical_system_cursors() {
+      SystemParametersInfoW(SPI_SETCURSORS, 0, nullptr, 0);
+    }
 
     LRESULT CALLBACK
     privacy_curtain_wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
@@ -2695,20 +2764,9 @@ namespace platf {
         case WM_MOUSEACTIVATE:
           return MA_NOACTIVATE;
         case WM_DISPLAYCHANGE:
-        case WM_TIMER: {
-          int vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
-          int vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
-          int vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
-          int vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
-          if (vw <= 0 || vh <= 0) {
-            vx = 0;
-            vy = 0;
-            vw = GetSystemMetrics(SM_CXSCREEN);
-            vh = GetSystemMetrics(SM_CYSCREEN);
-          }
-          SetWindowPos(hwnd, HWND_TOPMOST, vx, vy, vw, vh, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        case WM_TIMER:
+          suppress_shell_previews_and_raise(hwnd);
           return 0;
-        }
         case WM_CLOSE:
           KillTimer(hwnd, kPrivacyCurtainTimerId);
           DestroyWindow(hwnd);
@@ -2735,11 +2793,15 @@ namespace platf {
       set(bool enabled) {
         std::thread old_worker;
         if (!enabled) {
+          bool was_active = false;
           {
             std::lock_guard<std::mutex> lock(mutex);
-            if (!active && !worker.joinable()) {
+            was_active = active || g_privacy_curtain_active.load(std::memory_order_acquire);
+            if (!was_active && !worker.joinable()) {
               return true;
             }
+            g_privacy_curtain_active.store(false, std::memory_order_release);
+            g_privacy_curtain_hwnd.store(nullptr, std::memory_order_release);
             if (hwnd && IsWindow(hwnd)) {
               PostMessageW(hwnd, WM_CLOSE, 0, 0);
             }
@@ -2750,7 +2812,10 @@ namespace platf {
           if (old_worker.joinable()) {
             old_worker.join();
           }
-          BOOST_LOG(info) << "Privacy screen curtain disabled"sv;
+          if (was_active) {
+            restore_physical_system_cursors();
+            BOOST_LOG(info) << "Privacy screen curtain disabled"sv;
+          }
           return true;
         }
 
@@ -2823,9 +2888,28 @@ namespace platf {
             return;
           }
 
+          g_privacy_curtain_hwnd.store(created, std::memory_order_release);
           ShowWindow(created, SW_SHOWNOACTIVATE);
-          SetWindowPos(created, HWND_TOPMOST, vx, vy, vw, vh, SWP_NOACTIVATE | SWP_SHOWWINDOW);
-          SetTimer(created, kPrivacyCurtainTimerId, 500, nullptr);
+          suppress_shell_previews_and_raise(created);
+          SetTimer(created, kPrivacyCurtainTimerId, 40, nullptr);
+
+          HWINEVENTHOOK hook_show = SetWinEventHook(
+            EVENT_OBJECT_SHOW,
+            EVENT_OBJECT_SHOW,
+            nullptr,
+            privacy_curtain_win_event_proc,
+            0,
+            0,
+            WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+          HWINEVENTHOOK hook_fg = SetWinEventHook(
+            EVENT_SYSTEM_FOREGROUND,
+            EVENT_SYSTEM_FOREGROUND,
+            nullptr,
+            privacy_curtain_win_event_proc,
+            0,
+            0,
+            WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+
           promise.set_value(created);
 
           MSG msg {};
@@ -2833,6 +2917,14 @@ namespace platf {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
           }
+
+          if (hook_show) {
+            UnhookWinEvent(hook_show);
+          }
+          if (hook_fg) {
+            UnhookWinEvent(hook_fg);
+          }
+          g_privacy_curtain_hwnd.store(nullptr, std::memory_order_release);
         });
 
         HWND created_hwnd = ready_future.get();
@@ -2847,7 +2939,9 @@ namespace platf {
 
         hwnd = created_hwnd;
         active = true;
-        BOOST_LOG(info) << "Privacy screen curtain enabled (WDA_EXCLUDEFROMCAPTURE)"sv;
+        g_privacy_curtain_active.store(true, std::memory_order_release);
+        hide_physical_system_cursors();
+        BOOST_LOG(info) << "Privacy screen curtain enabled (WDA_EXCLUDEFROMCAPTURE + physical cursor hidden)"sv;
         return true;
       }
     };
@@ -2862,5 +2956,10 @@ namespace platf {
   bool
   set_privacy_curtain(bool enabled) {
     return privacy_curtain_controller().set(enabled);
+  }
+
+  bool
+  is_privacy_curtain_active() {
+    return g_privacy_curtain_active.load(std::memory_order_acquire);
   }
 }  // namespace platf

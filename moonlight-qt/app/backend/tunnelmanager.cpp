@@ -255,7 +255,12 @@ void TunnelManager::loadSettings()
                                      legacyAuto && legacyProvider == QStringLiteral("easytier")).toBool();
     m_EtNetworkName = settings.value(QStringLiteral("tunnel/etNetworkName")).toString().trimmed();
     m_EtNetworkSecret = settings.value(QStringLiteral("tunnel/etNetworkSecret")).toString().trimmed();
-    m_EtPeers = settings.value(QStringLiteral("tunnel/etPeers"), QStringLiteral("tcp://public.easytier.top:11010")).toString().trimmed();
+    const QVariant rawPeers = settings.value(QStringLiteral("tunnel/etPeers"), QStringLiteral("tcp://public.easytier.top:11010"));
+    if (rawPeers.typeId() == QMetaType::QStringList) {
+        m_EtPeers = rawPeers.toStringList().join(QStringLiteral(" ")).trimmed();
+    } else {
+        m_EtPeers = rawPeers.toString().trimmed();
+    }
     m_EtStaticIp = settings.value(QStringLiteral("tunnel/etVirtualIp")).toString().trimmed();
     m_EtCoreBinary = settings.value(QStringLiteral("tunnel/etCoreBinary")).toString().trimmed();
 }

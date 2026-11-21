@@ -611,6 +611,11 @@ namespace platf {
   set_privacy_curtain(bool) {
     return false;
   }
+
+  bool
+  is_privacy_curtain_active() {
+    return false;
+  }
 }  // namespace platf
 
 namespace dyn {

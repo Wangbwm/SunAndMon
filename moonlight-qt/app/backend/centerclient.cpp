@@ -307,6 +307,35 @@ void clearSavedCenterKeyLinux()
 }
 #endif
 
+QString resolveHostConfigDir()
+{
+    const QDir appDir(QCoreApplication::applicationDirPath());
+    if (appDir.exists(QStringLiteral("portable.dat"))) {
+        const QString portableConfig = appDir.filePath(QStringLiteral("host/config"));
+        QDir().mkpath(portableConfig);
+        return portableConfig;
+    }
+#ifdef Q_OS_WIN
+    QString base = qEnvironmentVariable("APPDATA");
+    if (base.isEmpty()) {
+        base = QStandardPaths::writableLocation(QStandardPaths::GenericConfigLocation);
+    }
+    const QString configDir = QDir(base).filePath(QStringLiteral("SunAndMon/host"));
+    QDir().mkpath(configDir);
+    return QDir::toNativeSeparators(configDir);
+#elif defined(Q_OS_LINUX)
+    QString cfgBase = QStandardPaths::writableLocation(QStandardPaths::GenericConfigLocation);
+    if (cfgBase.isEmpty()) {
+        cfgBase = QDir::home().filePath(QStringLiteral(".config"));
+    }
+    const QString configDir = QDir(cfgBase).filePath(QStringLiteral("sunandmon/host"));
+    QDir().mkpath(configDir);
+    return configDir;
+#else
+    return {};
+#endif
+}
+
 QByteArray randomHex()
 {
     QByteArray bytes(32, '\0');
@@ -462,7 +491,13 @@ CenterClient::CenterClient(ComputerManager* computers)
         }
         const QByteArray keyField = m_HostKey.isEmpty() ? QByteArrayLiteral("-") : m_HostKey;
         const QByteArray allowAlt = m_AllowAlternatePorts ? QByteArrayLiteral("1") : QByteArrayLiteral("0");
-        m_ServiceSocket.write("START " + m_ManagedToken + " " + keyField + " " + allowAlt + "\n");
+        const QByteArray configDirHex = resolveHostConfigDir().toUtf8().toHex();
+        QByteArray command = "START " + m_ManagedToken + " " + keyField + " " + allowAlt;
+        if (!configDirHex.isEmpty()) {
+            command += " " + configDirHex;
+        }
+        command += "\n";
+        m_ServiceSocket.write(command);
         m_ServiceSocket.flush();
         m_Startup.start();
     });
@@ -1221,18 +1256,10 @@ void CenterClient::launchLocalHostProcess()
     environment.insert("SUNANDMON_MANAGED_TOKEN", QString::fromLatin1(m_ManagedToken));
     environment.insert("SUNANDMON_HOST_KEY", QString::fromLatin1(m_HostKey));
     environment.insert("SUNANDMON_ALLOW_ALTERNATE_PORTS", m_AllowAlternatePorts ? "1" : "0");
-#ifdef Q_OS_LINUX
-    const QDir appDir(QCoreApplication::applicationDirPath());
-    if (appDir.exists("portable.dat")) {
-        environment.insert("SUNANDMON_CONFIG_DIR", appDir.filePath("host/config"));
-    } else {
-        QString cfgBase = QStandardPaths::writableLocation(QStandardPaths::GenericConfigLocation);
-        if (cfgBase.isEmpty()) {
-            cfgBase = QDir::home().filePath(QStringLiteral(".config"));
-        }
-        environment.insert("SUNANDMON_CONFIG_DIR", QDir(cfgBase).filePath(QStringLiteral("sunandmon/host")));
+    const QString configDir = resolveHostConfigDir();
+    if (!configDir.isEmpty()) {
+        environment.insert("SUNANDMON_CONFIG_DIR", configDir);
     }
-#endif
     m_Engine.setProcessEnvironment(environment);
     m_Engine.setWorkingDirectory(QFileInfo(hostExecutable()).absolutePath());
     m_Startup.start();

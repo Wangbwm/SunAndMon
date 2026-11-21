@@ -4,7 +4,7 @@
 [![CI](https://github.com/Wangbwm/SunAndMon/actions/workflows/ci.yml/badge.svg)](https://github.com/Wangbwm/SunAndMon/actions/workflows/ci.yml)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 
-**SunAndMon（日月同辉）** 取名自 **Sun**shine（日）与 **Mon**light（月）的融合，将 **Moonlight Qt 控制端**与 **Foundation Sunshine 被控引擎**整合进统一的 Windows 便携包与 Linux 安装包，并配套提供 **Android 控制端**与单进程 **Go 中心服务**。
+**SunAndMon（日月同辉）** 取名自 **Sun**shine（日）与 **Moon**light（月）的融合（为使前后对称将 Moonlight 缩写为 Mon），将 **Moonlight Qt 控制端**与 **Foundation Sunshine 被控引擎**整合进统一的 Windows 免安装包与 Linux 安装包，并配套提供 **Android 控制端**与单进程 **Go 中心服务**。
 
 在同一个窗口内即可查看并连接远端设备，或一键开启本机被控，支持跨网中心自动发现与免 PIN 短期票据配对，音视频与键鼠输入保持端到端直连。
 
@@ -72,7 +72,7 @@ go run . -listen 127.0.0.1:8787 -state state/devices.json
 
 ### 3. 使用桌面端与移动端
 
-- **Windows**：下载并解压 `SunAndMon-Windows-x64.zip` 到当前用户可写目录（保留内部 `host` 目录），运行 `SunAndMon.exe`。左下角打开「中心服务器」填写 HTTPS URL 与密钥后，本机被控会自动登记；在设备页选中在线主机点「连接桌面」即可由中心自动授权，无需输入 PIN。
+- **Windows**：下载并解压 `SunAndMon-Windows-x64.zip` 到任意目录（保留内部 `host` 目录），运行 `SunAndMon.exe`。用户配置（中心网址、直连 IP、加密保存的密钥、已配对主机与串流设置）默认保存在 `%APPDATA%\SunAndMon\SunAndMon.ini`，内置被控配置保存在 `%APPDATA%\SunAndMon\host\`，删掉程序目录更新版本不会丢失数据（如需随身便携模式，可将程序目录内的 `portable.dat.inactive` 改名为 `portable.dat`）。左下角打开「中心服务器」填写 HTTPS URL 与密钥后，本机被控会自动登记；在设备页选中在线主机点「连接桌面」即可由中心自动授权，无需输入 PIN。
   - 在「本机被控」中可开关「登录 Windows 时自动启动」、指定「发布 IP」或打开 Sunshine 原有控制面板（「主机设置」）。
   - 在「设置 → 软件 → 关闭按钮行为」中可选择确认退出或最小化到托盘。
   - 串流期间可在「控制中心 → 视频和显示」切换**隐私屏**（被控端需新版 SunAndMon、ZakoVDD 虚拟显示器与虚拟音频设备如 Steam Streaming Speakers 或 VB-CABLE）。

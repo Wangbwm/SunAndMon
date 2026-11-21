@@ -30,7 +30,12 @@ def add_portable(output, written, archive_path, target, executable, marker):
         for source, member in files.items():
             if not source.is_relative_to(prefix):
                 continue
-            path = (target / source.relative_to(prefix)).as_posix()
+            rel = source.relative_to(prefix)
+            if target == PurePosixPath("SunAndMon") and rel == PurePosixPath("portable.dat"):
+                # Default to storing Windows user config under %APPDATA%\SunAndMon
+                # so replacing or deleting the extracted app folder preserves settings.
+                rel = PurePosixPath("portable.dat.inactive")
+            path = (target / rel).as_posix()
             if path.casefold() in written:
                 raise ValueError(f"Duplicate ZIP path: {path}")
             written.add(path.casefold())

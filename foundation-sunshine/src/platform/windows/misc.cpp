@@ -148,6 +148,13 @@ namespace platf {
 
   std::filesystem::path
   appdata() {
+    if (const wchar_t *override_dir = _wgetenv(L"SUNANDMON_CONFIG_DIR");
+        override_dir != nullptr && override_dir[0] != L'\0') {
+      std::filesystem::path path { override_dir };
+      std::error_code ec;
+      std::filesystem::create_directories(path, ec);
+      return path;
+    }
     WCHAR sunshine_path[MAX_PATH];
     GetModuleFileNameW(NULL, sunshine_path, _countof(sunshine_path));
     return std::filesystem::path { sunshine_path }.remove_filename() / L"config"sv;

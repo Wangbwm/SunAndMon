@@ -1454,8 +1454,53 @@ namespace sunandmon_svc {
     return std::wstring(text.begin(), text.end());
   }
 
+  std::wstring
+  decode_utf8_hex_path(std::string_view hex) {
+    if (hex.empty() || (hex.size() % 2) != 0 || hex.size() > 1600) {
+      return {};
+    }
+    auto nibble = [](char c) -> int {
+      if (c >= '0' && c <= '9') return c - '0';
+      if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+      if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+      return -1;
+    };
+    std::string utf8;
+    utf8.reserve(hex.size() / 2);
+    for (size_t i = 0; i < hex.size(); i += 2) {
+      const int hi = nibble(hex[i]);
+      const int lo = nibble(hex[i + 1]);
+      if (hi < 0 || lo < 0) {
+        return {};
+      }
+      const char ch = static_cast<char>((hi << 4) | lo);
+      if (ch == '\0' || ch == '\r' || ch == '\n') {
+        return {};
+      }
+      utf8.push_back(ch);
+    }
+    const int needed = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8.data(), static_cast<int>(utf8.size()), nullptr, 0);
+    if (needed <= 0) {
+      return {};
+    }
+    std::wstring wide(static_cast<size_t>(needed), L'\0');
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8.data(), static_cast<int>(utf8.size()), wide.data(), needed) != needed) {
+      return {};
+    }
+    const std::filesystem::path candidate(wide);
+    if (!candidate.is_absolute()) {
+      return {};
+    }
+    for (const auto &part : candidate) {
+      if (part == L"..") {
+        return {};
+      }
+    }
+    return wide;
+  }
+
   std::vector<wchar_t>
-  build_environment_block(HANDLE token, const std::string &managed_token, const std::string &host_key, bool allow_alt_ports) {
+  build_environment_block(HANDLE token, const std::string &managed_token, const std::string &host_key, bool allow_alt_ports, const std::wstring &config_dir) {
     std::vector<wchar_t> block;
     LPVOID raw_env = nullptr;
     if (CreateEnvironmentBlock(&raw_env, token, FALSE) && raw_env != nullptr) {
@@ -1483,6 +1528,9 @@ namespace sunandmon_svc {
     append(L"SUNANDMON_MANAGED_TOKEN", ascii_to_wide(managed_token));
     if (!host_key.empty()) {
       append(L"SUNANDMON_HOST_KEY", ascii_to_wide(host_key));
+    }
+    if (!config_dir.empty()) {
+      append(L"SUNANDMON_CONFIG_DIR", config_dir);
     }
     block.push_back(L'\0');
     return block;
@@ -1523,7 +1571,7 @@ namespace sunandmon_svc {
     const auto deadline = GetTickCount64() + timeout_ms;
     char ch = '\0';
     bool ok = false;
-    while (line.size() < 512) {
+    while (line.size() < 2048) {
       ResetEvent(read_event);
       OVERLAPPED overlapped = {};
       overlapped.hEvent = read_event;
@@ -1585,6 +1633,7 @@ namespace sunandmon_svc {
     std::string managed_token;
     std::string host_key_field;
     std::string allow_alt_field;
+    std::string config_dir_hex;
     if (!(parser >> verb >> managed_token >> host_key_field >> allow_alt_field) ||
         verb != "START" ||
         !is_lower_hex(managed_token, 64) ||
@@ -1592,6 +1641,14 @@ namespace sunandmon_svc {
         (allow_alt_field != "0" && allow_alt_field != "1")) {
       write_pipe_bytes(pipe, write_mutex, "ERROR bad_request\n");
       return;
+    }
+    std::wstring config_dir;
+    if (parser >> config_dir_hex) {
+      config_dir = decode_utf8_hex_path(config_dir_hex);
+      if (config_dir.empty()) {
+        write_pipe_bytes(pipe, write_mutex, "ERROR bad_config_dir\n");
+        return;
+      }
     }
     const std::string host_key = host_key_field == "-" ? std::string {} : host_key_field;
     const bool allow_alt_ports = allow_alt_field == "1";
@@ -1605,7 +1662,7 @@ namespace sunandmon_svc {
       return;
     }
 
-    auto env_block = build_environment_block(console_token, managed_token, host_key, allow_alt_ports);
+    auto env_block = build_environment_block(console_token, managed_token, host_key, allow_alt_ports, config_dir);
     const auto job_handle = CreateJobObjectForChildProcess();
     if (job_handle == NULL) {
       CloseHandle(console_token);

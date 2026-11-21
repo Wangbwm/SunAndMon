@@ -783,9 +783,15 @@ int main(int argc, char *argv[])
     // Set these here to allow us to use the default QSettings constructor.
     // These also ensure that our cache directory is named correctly. As such,
     // it is critical that these be called before Path::initialize().
+#ifdef SUNANDMON_APP
+    QCoreApplication::setOrganizationName("SunAndMon");
+    QCoreApplication::setOrganizationDomain("sunandmon.local");
+    QCoreApplication::setApplicationName("SunAndMon");
+#else
     QCoreApplication::setOrganizationName("Moonlight Game Streaming Project");
     QCoreApplication::setOrganizationDomain("moonlight-stream.com");
     QCoreApplication::setApplicationName("Moonlight");
+#endif
 
     if (QFile(QDir(startupApplicationDir).filePath("portable.dat")).exists()) {
         QSettings::setDefaultFormat(QSettings::IniFormat);
@@ -796,6 +802,43 @@ int main(int argc, char *argv[])
         Path::initialize(true, startupApplicationDir);
     }
     else {
+#if defined(SUNANDMON_APP) && defined(Q_OS_WIN)
+        // Store Windows user config (center server, paired hosts, preferences)
+        // under %APPDATA%\SunAndMon\SunAndMon.ini so deleting or replacing the
+        // extracted app directory preserves all user data across updates.
+        QString userConfigBase = qEnvironmentVariable("APPDATA");
+        if (userConfigBase.isEmpty()) {
+            userConfigBase = QStandardPaths::writableLocation(QStandardPaths::GenericConfigLocation);
+        }
+        if (!userConfigBase.isEmpty()) {
+            const QDir userSunAndMonDir(QDir(userConfigBase).filePath(QStringLiteral("SunAndMon")));
+            QDir().mkpath(userSunAndMonDir.path());
+            const QString newIni = userSunAndMonDir.filePath(QStringLiteral("SunAndMon.ini"));
+            if (!QFileInfo::exists(newIni)) {
+                const QString legacyLocalIni = QDir(startupApplicationDir)
+                    .filePath(QStringLiteral("Moonlight Game Streaming Project/Moonlight.ini"));
+                if (QFileInfo::exists(legacyLocalIni)) {
+                    QFile::copy(legacyLocalIni, newIni);
+                }
+            }
+            QSettings::setDefaultFormat(QSettings::IniFormat);
+            QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, userConfigBase);
+            QSettings::setPath(QSettings::IniFormat, QSettings::SystemScope, userConfigBase);
+        }
+#elif defined(SUNANDMON_APP) && defined(Q_OS_LINUX)
+        QString cfgBase = QStandardPaths::writableLocation(QStandardPaths::GenericConfigLocation);
+        if (cfgBase.isEmpty()) {
+            cfgBase = QDir::home().filePath(QStringLiteral(".config"));
+        }
+        const QDir userSunAndMonDir(QDir(cfgBase).filePath(QStringLiteral("SunAndMon")));
+        QDir().mkpath(userSunAndMonDir.path());
+        const QString newConf = userSunAndMonDir.filePath(QStringLiteral("SunAndMon.conf"));
+        const QString legacyConf = QDir(cfgBase)
+            .filePath(QStringLiteral("Moonlight Game Streaming Project/Moonlight.conf"));
+        if (!QFileInfo::exists(newConf) && QFileInfo::exists(legacyConf)) {
+            QFile::copy(legacyConf, newConf);
+        }
+#endif
         // Initialize paths for standard installation
         Path::initialize(false);
     }

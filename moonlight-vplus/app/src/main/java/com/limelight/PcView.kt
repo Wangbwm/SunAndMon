@@ -31,6 +31,7 @@ import com.limelight.unlock.HostUnlockUi
 import com.limelight.binding.PlatformBinding
 import com.limelight.binding.crypto.AndroidCryptoProvider
 import com.limelight.computers.ComputerManagerService
+import com.limelight.computers.CenterCredentialStore
 import com.limelight.computers.CenterDirectory
 import com.limelight.computers.PairStatePreflight
 import com.limelight.networkquality.NetworkQualitySheet
@@ -401,6 +402,7 @@ class PcView : ThemedActivity(), AdapterFragmentCallbacks, ShakeDetector.Listene
         UiHelper.showDecoderCrashDialog(this)
         inForeground = true
         startComputerUpdates()
+        syncLanDevicesToHome()
 
         analyticsManager?.startUsageTracking()
         startShakeDetector()
@@ -710,32 +712,24 @@ class PcView : ThemedActivity(), AdapterFragmentCallbacks, ShakeDetector.Listene
 
     private fun installCenterHome() {
         val container = findViewById<FrameLayout>(android.R.id.content)
-        val legacy = findViewById<View>(R.id.pcViewRootLayout)
+        if (centerDirectory == null) {
+            centerDirectory = CenterCredentialStore.load(this)
+        }
         centerHome = CenterDeviceView(
             context = this,
             refresh = ::refreshCenterDevices,
             centerSettings = ::openCenterSettings,
-            localNetwork = {
-                centerHome?.visibility = View.GONE
-                legacy.visibility = View.VISIBLE
-                val bars = WindowCompat.getInsetsController(window, window.decorView)
-                legacyBarAppearance?.let { (status, navigation) ->
-                    bars.isAppearanceLightStatusBars = status
-                    bars.isAppearanceLightNavigationBars = navigation
-                }
-                legacyBarAppearance = null
-                returnToCenterOnBack = true
-                ViewCompat.requestApplyInsets(legacy)
-                maybeShowBackgroundSourceDialog()
-                maybeShowPcViewFeatureGuide()
-            },
+            addLanComputer = ::showAddComputerActionSheet,
+            refreshLan = ::refreshLanComputers,
             streamSettings = { startActivity(Intent(this, StreamSettings::class.java)) },
             deviceAction = ::connectCenterDevice,
+            lanDeviceAction = ::handleLanDeviceAction,
         ).also { page ->
             page.visibility = View.GONE
             container.addView(page, FrameLayout.LayoutParams(-1, -1))
         }
         renderCenterHome()
+        syncLanDevicesToHome()
         if (!packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_LEANBACK) && !returnToCenterOnBack) {
             showCenterHome()
         }
@@ -754,11 +748,77 @@ class PcView : ThemedActivity(), AdapterFragmentCallbacks, ShakeDetector.Listene
         findViewById<View>(R.id.pcViewRootLayout)?.visibility = View.INVISIBLE
         ViewCompat.requestApplyInsets(page)
         returnToCenterOnBack = false
+        syncLanDevicesToHome()
         if (centerDirectory != null) refreshCenterDevices()
     }
 
     private fun renderCenterHome(loading: Boolean = false) {
         centerHome?.update(registeredDevices, centerDirectory != null, loading)
+    }
+
+    private fun syncLanDevicesToHome() {
+        val page = centerHome ?: return
+        if (!::pcGridAdapter.isInitialized) return
+        val list = ArrayList<ComputerDetails>(pcGridAdapter.rawCount)
+        for (i in 0 until pcGridAdapter.rawCount) {
+            val item = pcGridAdapter.getRawItem(i)
+            if (!PcGridAdapter.isAddComputerCard(item)) {
+                list.add(item.details)
+            }
+        }
+        list.sortWith(
+            compareBy<ComputerDetails>(
+                {
+                    when {
+                        it.state == ComputerDetails.State.ONLINE && it.pairState == PairState.PAIRED -> 0
+                        it.state == ComputerDetails.State.ONLINE -> 1
+                        it.state == ComputerDetails.State.UNKNOWN -> 2
+                        else -> 3
+                    }
+                },
+                { it.name.orEmpty().lowercase() }
+            )
+        )
+        page.updateLanDevices(list)
+    }
+
+    private fun refreshLanComputers() {
+        if (managerBinder != null) {
+            stopComputerUpdates()
+            startComputerUpdates()
+        }
+        syncLanDevicesToHome()
+    }
+
+    private fun handleLanDeviceAction(computer: ComputerDetails, action: CenterDeviceView.LanAction) {
+        when (action) {
+            CenterDeviceView.LanAction.DESKTOP -> {
+                if (computer.state != ComputerDetails.State.ONLINE) {
+                    showToast(getString(R.string.error_pc_offline))
+                } else if (computer.pairState != PairState.PAIRED) {
+                    doPair(computer)
+                } else {
+                    quickStartStream(computer, null, false)
+                }
+            }
+            CenterDeviceView.LanAction.APPS -> {
+                if (computer.state != ComputerDetails.State.ONLINE) {
+                    showToast(getString(R.string.error_pc_offline))
+                } else if (computer.pairState != PairState.PAIRED) {
+                    doPair(computer)
+                } else if (computer.hasMultipleLanAddresses()) {
+                    showAddressSelectionDialog(computer)
+                } else {
+                    val temp = prepareComputerWithAddress(computer)
+                    if (temp != null) doAppList(temp, newlyPaired = false, showHiddenGames = false)
+                    else showToast(getString(R.string.error_pc_offline))
+                }
+            }
+            CenterDeviceView.LanAction.SECONDARY_SCREEN -> doSecondaryScreenStream(computer)
+            CenterDeviceView.LanAction.PAIR -> doPair(computer)
+            CenterDeviceView.LanAction.WAKE -> doWakeOnLan(computer)
+            CenterDeviceView.LanAction.DEVICE_OPTIONS -> showHostActionSheet(computer)
+        }
     }
 
     private fun refreshCenterDevices() {
@@ -771,10 +831,20 @@ class PcView : ThemedActivity(), AdapterFragmentCallbacks, ShakeDetector.Listene
         if (centerJob?.isActive == true) return
         val session = centerDirectory
         if (session != null) {
+            val summary = buildString {
+                append(session.url.toString())
+                if (session.directIp.isNotEmpty()) {
+                    append('\n')
+                    append(getString(R.string.center_direct_ip))
+                    append(": ")
+                    append(session.directIp)
+                }
+            }
             AlertDialog.Builder(this)
                 .setTitle(R.string.center_server)
-                .setMessage(session.url.toString())
+                .setMessage(summary)
                 .setNegativeButton(R.string.center_sign_out) { _, _ ->
+                    CenterCredentialStore.clearKey(this)
                     centerDirectory = null
                     registeredDevices = emptyList()
                     renderCenterHome()
@@ -783,18 +853,17 @@ class PcView : ThemedActivity(), AdapterFragmentCallbacks, ShakeDetector.Listene
                 .show()
             return
         }
-        val centerPreferences = getSharedPreferences("center", MODE_PRIVATE)
         val address = EditText(this).apply {
             hint = getString(R.string.center_url)
             inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_URI
             setSingleLine(true)
-            setText(centerPreferences.getString("url", ""))
+            setText(CenterCredentialStore.savedUrl(this@PcView))
         }
         val directIp = EditText(this).apply {
             hint = getString(R.string.center_direct_ip)
             inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_URI
             setSingleLine(true)
-            setText(centerPreferences.getString("directIp", ""))
+            setText(CenterCredentialStore.savedDirectIp(this@PcView))
         }
         val key = EditText(this).apply {
             hint = getString(R.string.center_key)
@@ -830,10 +899,7 @@ class PcView : ThemedActivity(), AdapterFragmentCallbacks, ShakeDetector.Listene
                 registeredDevices = withContext(Dispatchers.IO) { directory.devices() }
                 centerDirectory = directory
                 if (signingIn) {
-                    getSharedPreferences("center", MODE_PRIVATE).edit {
-                        putString("url", directory.url.toString())
-                        putString("directIp", directory.directIp)
-                    }
+                    CenterCredentialStore.save(this@PcView, directory)
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -1894,6 +1960,7 @@ class PcView : ThemedActivity(), AdapterFragmentCallbacks, ShakeDetector.Listene
         }
 
         debouncedNotifyDataSetChanged()
+        syncLanDevicesToHome()
     }
 
     private fun findComputerByUuid(uuid: String?): ComputerObject? {
@@ -1950,6 +2017,7 @@ class PcView : ThemedActivity(), AdapterFragmentCallbacks, ShakeDetector.Listene
                 break
             }
         }
+        syncLanDevicesToHome()
     }
 
     private fun countRealComputers(): Int {

@@ -22,6 +22,8 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import com.limelight.R
 import com.limelight.computers.CenterDirectory
+import com.limelight.nvstream.http.ComputerDetails
+import com.limelight.nvstream.http.PairingManager.PairState
 import com.limelight.utils.AppTheme
 import kotlin.math.roundToInt
 
@@ -29,11 +31,15 @@ internal class CenterDeviceView(
     context: Context,
     private val refresh: () -> Unit,
     private val centerSettings: () -> Unit,
-    private val localNetwork: () -> Unit,
+    private val addLanComputer: () -> Unit,
+    private val refreshLan: () -> Unit,
     private val streamSettings: () -> Unit,
     private val deviceAction: (CenterDirectory.Device, Action) -> Unit,
+    private val lanDeviceAction: (ComputerDetails, LanAction) -> Unit,
 ) : FrameLayout(context) {
+    enum class Page { CENTER, LAN }
     enum class Action { DESKTOP, APPS, SECONDARY_SCREEN, DEVICE_OPTIONS }
+    enum class LanAction { DESKTOP, APPS, SECONDARY_SCREEN, PAIR, WAKE, DEVICE_OPTIONS }
 
     private val palette = AppTheme.configurationContext(context)
     private val ink = color(R.color.center_ink)
@@ -48,9 +54,14 @@ internal class CenterDeviceView(
     private val onAccent = color(R.color.center_on_accent)
     private val rippleColor = ColorStateList.valueOf(color(R.color.center_ripple))
     private val root = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
+
+    private var currentPage = Page.CENTER
     private var devices = emptyList<CenterDirectory.Device>()
+    private var lanDevices = emptyList<ComputerDetails>()
+    private var lanSnapshot: List<String> = emptyList()
     private var connected = false
     private var selectedId: String? = null
+    private var selectedLanUuid: String? = null
     private var loading = false
 
     init {
@@ -67,14 +78,62 @@ internal class CenterDeviceView(
         this.devices = devices
         this.connected = connected
         this.loading = loading
-        render()
+        if (currentPage == Page.CENTER) {
+            render()
+        }
+    }
+
+    fun updateLanDevices(computers: List<ComputerDetails>) {
+        val snapshot = computers.map { c ->
+            val addr = bestLanAddress(c)
+            "${c.uuid}|${c.name}|${c.state}|${c.pairState}|${c.runningGameId}|${c.macAddress}|$addr"
+        }
+        val changed = snapshot != lanSnapshot
+        this.lanDevices = computers
+        this.lanSnapshot = snapshot
+        if (currentPage == Page.LAN && changed) {
+            render()
+        }
     }
 
     fun backToDevices(): Boolean {
-        if (selectedId == null) return false
+        if (currentPage == Page.CENTER && selectedId != null) {
+            selectedId = null
+            render()
+            return true
+        }
+        if (currentPage == Page.LAN && selectedLanUuid != null) {
+            selectedLanUuid = null
+            render()
+            return true
+        }
+        if (currentPage == Page.LAN) {
+            currentPage = Page.CENTER
+            render()
+            return true
+        }
+        return false
+    }
+
+    private fun switchPage(target: Page) {
+        if (currentPage == target) {
+            if (target == Page.CENTER) {
+                selectedId = null
+                refresh()
+            } else {
+                selectedLanUuid = null
+                refreshLan()
+                render()
+            }
+            return
+        }
+        currentPage = target
         selectedId = null
+        selectedLanUuid = null
+        if (target == Page.LAN) {
+            refreshLan()
+        }
         render()
-        return true
     }
 
     private fun render() {
@@ -86,12 +145,26 @@ internal class CenterDeviceView(
             addView(content, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         }
         root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
-        val selected = devices.firstOrNull { it.id == selectedId }
-        if (selected == null) {
-            selectedId = null
-            showDevices(content)
-        } else {
-            showDetails(content, selected)
+
+        when (currentPage) {
+            Page.CENTER -> {
+                val selected = devices.firstOrNull { it.id == selectedId }
+                if (selected == null) {
+                    selectedId = null
+                    showDevices(content)
+                } else {
+                    showDetails(content, selected)
+                }
+            }
+            Page.LAN -> {
+                val selected = lanDevices.firstOrNull { it.uuid != null && it.uuid == selectedLanUuid }
+                if (selected == null) {
+                    selectedLanUuid = null
+                    showLanDevices(content)
+                } else {
+                    showLanDetails(content, selected)
+                }
+            }
         }
     }
 
@@ -149,27 +222,63 @@ internal class CenterDeviceView(
                 gap(content, 9)
             }
         }
+        footer(bottomTabs())
+    }
+
+    private fun showLanDevices(content: LinearLayout) {
+        val header = row()
+        header.addView(label(R.string.center_local_network, 26, bold = true), LinearLayout.LayoutParams(0, -2, 1f))
+        header.addView(button(R.string.center_refresh, listener = refreshLan))
+        content.addView(header)
         gap(content, 14)
-        content.addView(button(R.string.center_local_network, listener = localNetwork))
-        val tabs = row().apply { setPadding(dp(8), 0, dp(8), 0) }
-        tabs.addView(tab(R.string.center_nav_devices, R.drawable.ic_center_monitor, active = true, listener = refresh),
-            LinearLayout.LayoutParams(0, -2, 1f))
-        tabs.addView(tab(R.string.center_nav_center, R.drawable.ic_center_server, listener = centerSettings),
-            LinearLayout.LayoutParams(0, -2, 1f))
-        tabs.addView(tab(R.string.center_settings, R.drawable.ic_center_sliders, listener = streamSettings),
-            LinearLayout.LayoutParams(0, -2, 1f))
-        footer(tabs)
+
+        val addStrip = row().apply {
+            setPadding(dp(12), 0, dp(12), 0)
+            action(sky, stroke = null, listener = addLanComputer)
+        }
+        addStrip.addView(icon(R.drawable.ic_center_add))
+        addStrip.addView(label(R.string.center_add_pc, 15), LinearLayout.LayoutParams(0, -2, 1f))
+        addStrip.addView(label(R.string.center_add_action, 13, color = accent))
+        addStrip.addView(chevron())
+        content.addView(addStrip, LinearLayout.LayoutParams(-1, dp(52)))
+        gap(content, 22)
+
+        if (lanDevices.isEmpty()) {
+            content.addView(label(R.string.center_lan_empty, 14, color = muted))
+        } else {
+            val caption = row()
+            caption.addView(label(R.string.center_all_devices, 13, bold = true), LinearLayout.LayoutParams(0, -2, 1f))
+            val online = lanDevices.count { it.state == ComputerDetails.State.ONLINE }
+            caption.addView(label(0, 13, color = muted).apply {
+                text = resources.getQuantityString(R.plurals.center_online_count, online, online)
+            })
+            content.addView(caption)
+            gap(content, 10)
+            lanDevices.forEach { computer ->
+                val tile = row().apply {
+                    setPadding(dp(12), 0, dp(12), 0)
+                    action(surface) {
+                        selectedLanUuid = computer.uuid
+                        render()
+                    }
+                }
+                tile.addView(icon(R.drawable.ic_center_monitor, tile = true))
+                val info = column()
+                info.addView(label(0, 15, bold = true).apply { text = computer.name.orEmpty() })
+                val (statusRes, dotColor) = lanStatusSpec(computer)
+                info.addView(statusWithColor(statusRes, dotColor))
+                tile.addView(info, LinearLayout.LayoutParams(0, -2, 1f))
+                tile.addView(chevron())
+                content.addView(tile, LinearLayout.LayoutParams(-1, -2))
+                tile.minimumHeight = dp(68)
+                gap(content, 9)
+            }
+        }
+        footer(bottomTabs())
     }
 
     private fun showDetails(content: LinearLayout, device: CenterDirectory.Device) {
-        content.addView(label(R.string.center_my_devices, 14, bold = true, color = accent).apply {
-            gravity = Gravity.CENTER_VERTICAL
-            minHeight = dp(48)
-            setPadding(dp(4), 0, dp(10), 0)
-            compoundDrawablePadding = dp(5)
-            setCompoundDrawablesRelative(glyph(R.drawable.ic_arrow_back_24, 16, accent), null, null, null)
-            action(Color.TRANSPARENT, stroke = null) { backToDevices() }
-        }, LinearLayout.LayoutParams(-2, -2))
+        content.addView(backLink(R.string.center_my_devices) { backToDevices() }, LinearLayout.LayoutParams(-2, -2))
         gap(content, 8)
         val heading = row()
         heading.addView(label(0, 26, bold = true).apply { text = device.name }, LinearLayout.LayoutParams(0, -2, 1f))
@@ -179,21 +288,7 @@ internal class CenterDeviceView(
         }, LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(10) })
         content.addView(heading)
         gap(content, 16)
-        val desktop = column().apply {
-            background = shape(surface, line, radius = 14)
-            clipToOutline = true
-        }
-        desktop.addView(ImageView(context).apply {
-            scaleType = ImageView.ScaleType.CENTER_CROP
-            setImageResource(R.drawable.center_device_cover)
-            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
-        }, LinearLayout.LayoutParams(-1, dp(171)))
-        desktop.addView(row().apply {
-            setPadding(dp(12), 0, dp(12), 0)
-            addView(icon(R.drawable.ic_center_monitor))
-            addView(label(R.string.center_remote_desktop, 15, bold = true))
-        }, LinearLayout.LayoutParams(-1, dp(49)))
-        content.addView(desktop)
+        content.addView(desktopCoverCard())
         gap(content, 20)
         content.addView(label(R.string.center_common_actions, 13, color = muted))
         gap(content, 10)
@@ -211,6 +306,118 @@ internal class CenterDeviceView(
             deviceAction(device, Action.DESKTOP)
         }, LinearLayout.LayoutParams(-1, -2))
         footer(bar)
+    }
+
+    private fun showLanDetails(content: LinearLayout, computer: ComputerDetails) {
+        content.addView(backLink(R.string.center_local_network) { backToDevices() }, LinearLayout.LayoutParams(-2, -2))
+        gap(content, 8)
+        val online = computer.state == ComputerDetails.State.ONLINE
+        val paired = computer.pairState == PairState.PAIRED
+        val (statusRes, dotColor) = lanStatusSpec(computer)
+
+        val heading = row()
+        heading.addView(label(0, 26, bold = true).apply { text = computer.name.orEmpty() }, LinearLayout.LayoutParams(0, -2, 1f))
+        heading.addView(statusWithColor(statusRes, dotColor).apply {
+            setPadding(dp(9), dp(4), dp(9), dp(4))
+            background = shape(if (online && paired) greenFill else sky, radius = 7)
+        }, LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(10) })
+        content.addView(heading)
+
+        val addressText = bestLanAddress(computer)
+        if (addressText.isNotEmpty()) {
+            gap(content, 4)
+            content.addView(label(0, 13, color = muted).apply { text = addressText })
+        }
+
+        gap(content, 16)
+        content.addView(desktopCoverCard())
+        gap(content, 20)
+        content.addView(label(R.string.center_common_actions, 13, color = muted))
+        gap(content, 10)
+
+        val canStream = online && paired
+        if (canStream) {
+            addDetailAction(content, R.string.center_app_list, R.drawable.ic_center_apps, true) {
+                lanDeviceAction(computer, LanAction.APPS)
+            }
+            addDetailAction(content, R.string.center_secondary_screen, R.drawable.ic_screen_mode_secondary, true) {
+                lanDeviceAction(computer, LanAction.SECONDARY_SCREEN)
+            }
+        } else if (!online) {
+            val canWake = !computer.macAddress.isNullOrBlank()
+            addDetailAction(content, R.string.center_wol_action, R.drawable.ic_center_monitor, canWake) {
+                lanDeviceAction(computer, LanAction.WAKE)
+            }
+        }
+        addDetailAction(content, R.string.center_stream_settings, R.drawable.ic_center_sliders, true, streamSettings)
+        addDetailAction(content, R.string.center_device_options, R.drawable.ic_more_vert, true) {
+            lanDeviceAction(computer, LanAction.DEVICE_OPTIONS)
+        }
+
+        val bar = row().apply { setPadding(dp(20), dp(10), dp(20), dp(10)) }
+        when {
+            canStream -> bar.addView(button(R.string.center_connect_desktop, primary = true, enabled = true) {
+                lanDeviceAction(computer, LanAction.DESKTOP)
+            }, LinearLayout.LayoutParams(-1, -2))
+            online && !paired -> bar.addView(button(R.string.center_pair_pc, primary = true, enabled = true) {
+                lanDeviceAction(computer, LanAction.PAIR)
+            }, LinearLayout.LayoutParams(-1, -2))
+            else -> {
+                val canWake = !computer.macAddress.isNullOrBlank()
+                bar.addView(button(R.string.center_wake_pc, primary = true, enabled = canWake) {
+                    lanDeviceAction(computer, LanAction.WAKE)
+                }, LinearLayout.LayoutParams(-1, -2))
+            }
+        }
+        footer(bar)
+    }
+
+    private fun bottomTabs(): LinearLayout = row().apply {
+        setPadding(dp(8), 0, dp(8), 0)
+        addView(
+            tab(R.string.center_nav_devices, R.drawable.ic_center_monitor, active = currentPage == Page.CENTER) {
+                switchPage(Page.CENTER)
+            },
+            LinearLayout.LayoutParams(0, -2, 1f)
+        )
+        addView(
+            tab(R.string.center_nav_lan, R.drawable.ic_center_lan, active = currentPage == Page.LAN) {
+                switchPage(Page.LAN)
+            },
+            LinearLayout.LayoutParams(0, -2, 1f)
+        )
+        addView(
+            tab(R.string.center_nav_center, R.drawable.ic_center_server, listener = centerSettings),
+            LinearLayout.LayoutParams(0, -2, 1f)
+        )
+        addView(
+            tab(R.string.center_settings, R.drawable.ic_center_sliders, listener = streamSettings),
+            LinearLayout.LayoutParams(0, -2, 1f)
+        )
+    }
+
+    private fun backLink(textId: Int, onClick: () -> Unit) = label(textId, 14, bold = true, color = accent).apply {
+        gravity = Gravity.CENTER_VERTICAL
+        minHeight = dp(48)
+        setPadding(dp(4), 0, dp(10), 0)
+        compoundDrawablePadding = dp(5)
+        setCompoundDrawablesRelative(glyph(R.drawable.ic_arrow_back_24, 16, accent), null, null, null)
+        action(Color.TRANSPARENT, stroke = null, listener = onClick)
+    }
+
+    private fun desktopCoverCard(): LinearLayout = column().apply {
+        background = shape(surface, line, radius = 14)
+        clipToOutline = true
+        addView(ImageView(context).apply {
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            setImageResource(R.drawable.center_device_cover)
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+        }, LinearLayout.LayoutParams(-1, dp(171)))
+        addView(row().apply {
+            setPadding(dp(12), 0, dp(12), 0)
+            addView(icon(R.drawable.ic_center_monitor))
+            addView(label(R.string.center_remote_desktop, 15, bold = true))
+        }, LinearLayout.LayoutParams(-1, dp(49)))
     }
 
     private fun addDetailAction(content: LinearLayout, name: Int, icon: Int, enabled: Boolean, listener: () -> Unit) {
@@ -234,8 +441,30 @@ internal class CenterDeviceView(
 
     private fun deviceStatus(online: Boolean) = if (online) R.string.center_online else R.string.center_offline_short
 
-    private fun status(textId: Int, online: Boolean) = label(textId, 13, color = if (online) green else muted).apply {
-        val dot = shape(if (online) green else muted).apply { setBounds(0, 0, dp(6), dp(6)) }
+    private fun lanStatusSpec(computer: ComputerDetails): Pair<Int, Int> = when (computer.state) {
+        ComputerDetails.State.ONLINE -> when {
+            computer.pairState != PairState.PAIRED -> R.string.center_unpaired to accent
+            computer.runningGameId != 0 -> R.string.center_streaming to green
+            else -> R.string.center_online to green
+        }
+        ComputerDetails.State.OFFLINE -> R.string.center_offline_short to muted
+        else -> R.string.center_checking to muted
+    }
+
+    private fun bestLanAddress(computer: ComputerDetails): String {
+        val tuple = computer.activeAddress
+            ?: computer.localAddress
+            ?: computer.manualAddress
+            ?: computer.remoteAddress
+            ?: computer.ipv6Address
+            ?: return ""
+        return tuple.address.orEmpty()
+    }
+
+    private fun status(textId: Int, online: Boolean) = statusWithColor(textId, if (online) green else muted)
+
+    private fun statusWithColor(textId: Int, color: Int) = label(textId, 13, color = color).apply {
+        val dot = shape(color).apply { setBounds(0, 0, dp(6), dp(6)) }
         compoundDrawablePadding = dp(6)
         setCompoundDrawablesRelative(dot, null, null, null)
     }

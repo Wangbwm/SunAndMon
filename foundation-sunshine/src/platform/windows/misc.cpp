@@ -2667,6 +2667,12 @@ namespace platf {
 #ifndef WDA_EXCLUDEFROMCAPTURE
   #define WDA_EXCLUDEFROMCAPTURE 0x00000011
 #endif
+#ifndef EVENT_OBJECT_UNCLOAKED
+  #define EVENT_OBJECT_UNCLOAKED 0x8018
+#endif
+#ifndef DWMWA_CLOAKED
+  #define DWMWA_CLOAKED 14
+#endif
 
   namespace {
     constexpr wchar_t kPrivacyCurtainClassName[] = L"SunAndMonPrivacyCurtainWnd";
@@ -2674,16 +2680,98 @@ namespace platf {
     std::atomic<bool> g_privacy_curtain_active { false };
     std::atomic<HWND> g_privacy_curtain_hwnd { nullptr };
 
+    DWORD
+    find_shell_tray_pid() {
+      HWND tray = FindWindowW(L"Shell_TrayWnd", nullptr);
+      if (!tray) {
+        tray = FindWindowW(L"Shell_SecondaryTrayWnd", nullptr);
+      }
+      if (!tray) {
+        return 0;
+      }
+      DWORD pid = 0;
+      GetWindowThreadProcessId(tray, &pid);
+      return pid;
+    }
+
+    bool
+    is_shell_preview_popup(HWND hwnd, DWORD shell_pid) {
+      if (!hwnd || !IsWindow(hwnd)) {
+        return false;
+      }
+      wchar_t cls[64] {};
+      if (GetClassNameW(hwnd, cls, 64) <= 0) {
+        return false;
+      }
+      if (wcscmp(cls, L"TaskListThumbnailWnd") == 0 ||
+          wcscmp(cls, L"TopLevelWindowForOverflowXamlIsland") == 0 ||
+          wcscmp(cls, L"NotifyIconOverflowWindow") == 0 ||
+          wcscmp(cls, L"Shell_LightDismissOverlay") == 0) {
+        return true;
+      }
+      if (wcscmp(cls, L"Xaml_WindowedPopupClass") == 0 && shell_pid != 0) {
+        DWORD pid = 0;
+        GetWindowThreadProcessId(hwnd, &pid);
+        if (pid != shell_pid) {
+          return false;
+        }
+        HWND owner = GetWindow(hwnd, GW_OWNER);
+        if (!owner) {
+          return true;
+        }
+        wchar_t owner_cls[64] {};
+        if (GetClassNameW(owner, owner_cls, 64) <= 0) {
+          return true;
+        }
+        return wcscmp(owner_cls, L"Shell_TrayWnd") == 0 ||
+               wcscmp(owner_cls, L"Shell_SecondaryTrayWnd") == 0 ||
+               wcscmp(owner_cls, L"TaskListThumbnailWnd") == 0 ||
+               wcscmp(owner_cls, L"TopLevelWindowForOverflowXamlIsland") == 0 ||
+               wcscmp(owner_cls, L"Progman") == 0 ||
+               wcscmp(owner_cls, L"WorkerW") == 0;
+      }
+      return false;
+    }
+
+    void
+    hide_shell_popup_window(HWND hwnd) {
+      if (!IsWindowVisible(hwnd)) {
+        return;
+      }
+      DWORD cloaked = 0;
+      if (SUCCEEDED(DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, &cloaked, sizeof(cloaked))) && cloaked != 0) {
+        return;
+      }
+      ShowWindowAsync(hwnd, SW_HIDE);
+      SetWindowPos(hwnd, HWND_BOTTOM, 0, 0, 0, 0,
+        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_HIDEWINDOW | SWP_ASYNCWINDOWPOS);
+    }
+
+    struct shell_enum_ctx_t {
+      HWND curtain;
+      DWORD shell_pid;
+    };
+
+    BOOL CALLBACK
+    enum_hide_shell_previews_proc(HWND hwnd, LPARAM lparam) {
+      const auto *ctx = reinterpret_cast<const shell_enum_ctx_t *>(lparam);
+      if (hwnd != ctx->curtain && is_shell_preview_popup(hwnd, ctx->shell_pid)) {
+        hide_shell_popup_window(hwnd);
+      }
+      return TRUE;
+    }
+
     void
     suppress_shell_previews_and_raise(HWND curtain) {
       if (!curtain || !IsWindow(curtain)) {
         return;
       }
-      // Hide Windows 10/11 taskbar hover preview popups which sit in a shell Z-band
+      // Hide Windows 10/11 taskbar hover preview popups (TaskListThumbnailWnd and
+      // Windows 11 Xaml_WindowedPopupClass PopupHost) which sit in a shell Z-band
       // above normal HWND_TOPMOST windows.
-      if (HWND thumb = FindWindowW(L"TaskListThumbnailWnd", nullptr); thumb && IsWindowVisible(thumb)) {
-        ShowWindowAsync(thumb, SW_HIDE);
-      }
+      shell_enum_ctx_t ctx { curtain, find_shell_tray_pid() };
+      EnumWindows(enum_hide_shell_previews_proc, reinterpret_cast<LPARAM>(&ctx));
+
       int vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
       int vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
       int vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
@@ -2706,9 +2794,8 @@ namespace platf {
       if (!curtain || hwnd == curtain) {
         return;
       }
-      wchar_t cls[64] {};
-      if (GetClassNameW(hwnd, cls, 64) > 0 && wcscmp(cls, L"TaskListThumbnailWnd") == 0) {
-        ShowWindowAsync(hwnd, SW_HIDE);
+      if (is_shell_preview_popup(hwnd, find_shell_tray_pid())) {
+        hide_shell_popup_window(hwnd);
       }
       suppress_shell_previews_and_raise(curtain);
     }
@@ -2891,11 +2978,19 @@ namespace platf {
           g_privacy_curtain_hwnd.store(created, std::memory_order_release);
           ShowWindow(created, SW_SHOWNOACTIVATE);
           suppress_shell_previews_and_raise(created);
-          SetTimer(created, kPrivacyCurtainTimerId, 40, nullptr);
+          SetTimer(created, kPrivacyCurtainTimerId, 30, nullptr);
 
           HWINEVENTHOOK hook_show = SetWinEventHook(
+            EVENT_OBJECT_CREATE,
             EVENT_OBJECT_SHOW,
-            EVENT_OBJECT_SHOW,
+            nullptr,
+            privacy_curtain_win_event_proc,
+            0,
+            0,
+            WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+          HWINEVENTHOOK hook_uncloak = SetWinEventHook(
+            EVENT_OBJECT_UNCLOAKED,
+            EVENT_OBJECT_UNCLOAKED,
             nullptr,
             privacy_curtain_win_event_proc,
             0,
@@ -2920,6 +3015,9 @@ namespace platf {
 
           if (hook_show) {
             UnhookWinEvent(hook_show);
+          }
+          if (hook_uncloak) {
+            UnhookWinEvent(hook_uncloak);
           }
           if (hook_fg) {
             UnhookWinEvent(hook_fg);

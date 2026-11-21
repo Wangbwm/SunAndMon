@@ -4368,6 +4368,10 @@
         <translation>连接桌面</translation>
     </message>
     <message>
+        <source>Open in new window</source>
+        <translation>新窗口连接</translation>
+    </message>
+    <message>
         <source>Common actions</source>
         <translation>常用操作</translation>
     </message>
@@ -4490,6 +4494,10 @@
     <message>
         <source>Host disabled</source>
         <translation>被控已关闭</translation>
+    </message>
+    <message>
+        <source>Managed by the main SunAndMon window</source>
+        <translation>由主 SunAndMon 窗口托管</translation>
     </message>
     <message>
         <source>Hosting is available in the Windows bundle.</source>
@@ -4752,6 +4760,10 @@
     <message>
         <source>Host disabled</source>
         <translation>被控已关闭</translation>
+    </message>
+    <message>
+        <source>Managed by the main SunAndMon window</source>
+        <translation>由主 SunAndMon 窗口托管</translation>
     </message>
     <message>
         <source>The host exited. Check the Sunshine log and local ports.</source>

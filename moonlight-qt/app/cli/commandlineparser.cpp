@@ -147,6 +147,16 @@ bool GlobalCommandLineParser::disableGamepadUiNavigation() const
     return m_DisableGamepadUiNavigation;
 }
 
+QString GlobalCommandLineParser::centerConnectDeviceId() const
+{
+    return m_CenterConnectDeviceId;
+}
+
+QString GlobalCommandLineParser::centerConnectAction() const
+{
+    return m_CenterConnectAction;
+}
+
 GlobalCommandLineParser::~GlobalCommandLineParser()
 {
 }
@@ -169,8 +179,12 @@ GlobalCommandLineParser::ParseResult GlobalCommandLineParser::parse(const QStrin
     );
     parser.addPositionalArgument("action", "Action to execute", "<action>");
     parser.addFlagOption("disable-ui-gamepad", "disable gamepad navigation in the Moonlight UI");
+    parser.addValueOption("center-connect", "center device ID to connect automatically in a new window");
+    parser.addValueOption("center-action", "center auto-connect action (desktop, apps, displays)");
     parser.parse(args);
     m_DisableGamepadUiNavigation = parser.isSet("disable-ui-gamepad");
+    m_CenterConnectDeviceId = parser.value("center-connect").trimmed();
+    m_CenterConnectAction = parser.value("center-action").trimmed();
     auto posArgs = parser.positionalArguments();
 
     if (posArgs.isEmpty()) {

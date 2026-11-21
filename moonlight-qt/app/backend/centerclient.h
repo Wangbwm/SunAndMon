@@ -45,6 +45,7 @@ class CenterClient : public QObject
     Q_PROPERTY(QString advertisedAddress READ advertisedAddress NOTIFY changed)
     Q_PROPERTY(TunnelManager* tunnel READ tunnel CONSTANT)
     Q_PROPERTY(QVariantMap centerTunnelDefaults READ centerTunnelDefaults NOTIFY changed)
+    Q_PROPERTY(bool secondaryInstance READ secondaryInstance NOTIFY changed)
 
 public:
     explicit CenterClient(ComputerManager* computers);
@@ -79,7 +80,11 @@ public:
     QString advertisedAddress() const { return m_AdvertisedAddress; }
     TunnelManager* tunnel() const { return m_Tunnel; }
     QVariantMap centerTunnelDefaults() const { return m_CenterTunnelDefaults; }
+    bool secondaryInstance() const { return m_SecondaryInstance; }
 
+    Q_INVOKABLE void setSecondaryMode(bool enabled);
+    Q_INVOKABLE bool openInNewWindow(const QString& id, const QString& action = QStringLiteral("desktop")) const;
+    Q_INVOKABLE bool openNewClientWindow() const;
     Q_INVOKABLE void signIn(const QString& url, const QString& key, const QString& directIp = {});
     Q_INVOKABLE void signOut();
     Q_INVOKABLE void refresh();
@@ -140,6 +145,9 @@ private:
     void publishHost();
     void withdrawHost();
     void setHostStatus(const QString& status);
+    bool acquirePrimaryInstanceLock();
+    void releasePrimaryInstanceLock();
+    void computeLocalHostId();
 
     ComputerManager* m_Computers;
     TunnelManager* m_Tunnel = nullptr;
@@ -195,4 +203,6 @@ private:
     QNetworkReply* m_StatusRequest = nullptr;
     QNetworkReply* m_Registration = nullptr;
     QNetworkReply* m_Withdrawal = nullptr;
+    bool m_SecondaryInstance = false;
+    void* m_PrimaryLockHandle = nullptr;
 };

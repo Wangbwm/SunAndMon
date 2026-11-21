@@ -863,7 +863,9 @@ int main(int argc, char *argv[])
     if (IS_UNSPECIFIED_HANDLE(oldConErr))
 #endif
     {
-        s_LoggerFile = new QFile(logDir.filePath(QString("Moonlight-%1.log").arg(QDateTime::currentSecsSinceEpoch())));
+        s_LoggerFile = new QFile(logDir.filePath(QString("Moonlight-%1-%2.log")
+                                                 .arg(QDateTime::currentSecsSinceEpoch())
+                                                 .arg(QCoreApplication::applicationPid())));
         if (s_LoggerFile->open(QIODevice::WriteOnly | QIODevice::Text)) {
             QTextStream(stderr) << "Redirecting log output to " << s_LoggerFile->fileName() << Qt::endl;
             s_LoggerStream.setDevice(s_LoggerFile);
@@ -1591,6 +1593,8 @@ int main(int argc, char *argv[])
 
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty("sunAndMonBundle", bundledHost);
+    engine.rootContext()->setContextProperty("autoConnectCenterDeviceId", parser.centerConnectDeviceId());
+    engine.rootContext()->setContextProperty("autoConnectCenterAction", parser.centerConnectAction());
     QString initialView;
     bool hasGUI = true;
 

@@ -47,6 +47,8 @@ CenteredGridView {
     }
 
     id: pcGrid
+    property bool autoConnectHandled: false
+    property bool autoConnectQuitAfter: false
     focus: true
     activeFocusOnTab: true
     topMargin: 124
@@ -144,14 +146,32 @@ CenteredGridView {
                     }
                 })
             } else {
+                const quitAfter = pcGrid.autoConnectQuitAfter
+                pcGrid.autoConnectQuitAfter = false
                 openAppView(row, computerModel.nameAt(row), false, deviceDashboard.connectionAction === "desktop",
-                            deviceDashboard.connectionAction === "displays")
+                            deviceDashboard.connectionAction === "displays", quitAfter)
             }
         }
     }
 
     Component.onCompleted: {
+        const autoId = (typeof autoConnectCenterDeviceId === "string") ? autoConnectCenterDeviceId : ""
+        if (autoId.length > 0) {
+            ComputerManager.center.setSecondaryMode(true)
+        }
         ComputerManager.center.startOnLaunch()
+        if (autoId.length > 0 && !autoConnectHandled) {
+            autoConnectHandled = true
+            const act = (typeof autoConnectCenterAction === "string" && autoConnectCenterAction.length > 0)
+                ? autoConnectCenterAction : "desktop"
+            deviceDashboard.connectionAction = act
+            autoConnectQuitAfter = (act === "desktop")
+            Qt.callLater(function() {
+                if (ComputerManager.center.connected) {
+                    ComputerManager.center.connectDevice(autoId)
+                }
+            })
+        }
         // Don't show any highlighted item until interacting with them.
         // We do this here instead of onActivated to avoid losing the user's
         // selection when backing out of a different page of the app.
@@ -223,7 +243,7 @@ CenteredGridView {
         return model
     }
 
-    function openAppView(computerIndex, computerName, showHiddenGames, openDesktop, openDisplayControls)
+    function openAppView(computerIndex, computerName, showHiddenGames, openDesktop, openDisplayControls, quitAfterStream)
     {
         // 造不出来时 createObject 返回 null，push(null) 只会往日志里丢一句
         // 「nothing to push」就完了 —— 界面上表现为「点了没反应」，非常难查。
@@ -253,6 +273,9 @@ CenteredGridView {
         }
         if (showHiddenGames === true) {
             properties.showHiddenGames = true
+        }
+        if (quitAfterStream === true) {
+            properties.quitAfterStream = true
         }
 
         var appView = component.createObject(stackView, properties)

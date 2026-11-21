@@ -87,7 +87,7 @@ public:
     QList<QPair<QString, QString>> connectedHostTunnels() const;
     bool isProviderConnected(const QString& provider) const;
 
-    Q_INVOKABLE void startOnLaunch();
+    Q_INVOKABLE void startOnLaunch(bool secondaryInstance = false);
     Q_INVOKABLE void saveAndConnectTailscale(bool autoConnect,
                                              const QString& hostname,
                                              const QString& controlUrl,
@@ -116,18 +116,25 @@ public:
 signals:
     void changed();
     void connectedStateChanged();
+    void daemonAttachFinished();
 
 private:
     QString daemonExecutable() const;
     QString tunnelStateDir() const;
+    QString daemonEndpointFile() const;
+    void writeDaemonEndpointFile() const;
+    void removeDaemonEndpointFileIfOwned() const;
     void loadSettings();
     void saveSettings() const;
     void ensureDaemonRunning();
+    void tryAttachExistingDaemon(bool spawnFallback);
+    void spawnLocalDaemon();
     void stopDaemon();
     void sendStartTailscale();
     void sendStartEasyTier();
     void sendStopProvider(const QString& provider);
     void pollStatus();
+    void applyStatusPayload(const QJsonObject& root);
     void queryCapabilities();
     void sendExposeRequest();
     QNetworkReply* apiRequest(const QByteArray& method, const QString& path, const QByteArray& body = {});
@@ -139,6 +146,10 @@ private:
     QByteArray m_Token;
     quint16 m_DaemonPort = 0;
     bool m_DaemonReady = false;
+    bool m_AttachedToExistingDaemon = false;
+    bool m_ProbingExistingDaemon = false;
+    bool m_SecondaryMode = false;
+    int m_PollFailures = 0;
     bool m_PendingStartTs = false;
     bool m_PendingStartEt = false;
 

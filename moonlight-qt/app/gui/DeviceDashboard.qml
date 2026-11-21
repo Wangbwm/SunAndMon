@@ -497,12 +497,21 @@ Rectangle {
                                 color: Theme.textDim
                                 elide: Text.ElideRight
                             }
-                            Action {
-                                text: dashboard.showingLan && dashboard.selectedDevice && !dashboard.selectedDevice.paired
-                                      ? qsTr("Pair device") : qsTr("Connect desktop")
-                                primary: true
-                                enabled: dashboard.canConnect
-                                onClicked: dashboard.connectSelected("desktop")
+                            RowLayout {
+                                spacing: 8
+                                Action {
+                                    text: dashboard.showingLan && dashboard.selectedDevice && !dashboard.selectedDevice.paired
+                                          ? qsTr("Pair device") : qsTr("Connect desktop")
+                                    primary: true
+                                    enabled: dashboard.canConnect
+                                    onClicked: dashboard.connectSelected("desktop")
+                                }
+                                Action {
+                                    visible: !dashboard.showingLan && !!dashboard.selectedDevice
+                                    text: qsTr("Open in new window")
+                                    enabled: dashboard.canConnect
+                                    onClicked: dashboard.center.openInNewWindow(dashboard.selectedDevice.id, "desktop")
+                                }
                             }
                         }
 
@@ -866,6 +875,11 @@ Rectangle {
         id: directoryMenu
         parent: dashboard
         property var device: null
+        NavigableMenuItem {
+            text: qsTr("Open in new window")
+            visible: !!directoryMenu.device && directoryMenu.device.online
+            onTriggered: if (directoryMenu.device) dashboard.center.openInNewWindow(directoryMenu.device.id, "desktop")
+        }
         NavigableMenuItem {
             text: qsTr("Device options")
             visible: !!directoryMenu.device && directoryMenu.device.online

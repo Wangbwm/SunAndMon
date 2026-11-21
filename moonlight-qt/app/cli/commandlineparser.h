@@ -24,8 +24,14 @@ public:
     // True when this process was started with --disable-ui-gamepad.
     bool disableGamepadUiNavigation() const;
 
+    // Optional center device auto-connect (used for multi-window streaming).
+    QString centerConnectDeviceId() const;
+    QString centerConnectAction() const;
+
 private:
     bool m_DisableGamepadUiNavigation;
+    QString m_CenterConnectDeviceId;
+    QString m_CenterConnectAction;
 };
 
 class QuitCommandLineParser

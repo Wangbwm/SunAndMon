@@ -32,6 +32,7 @@ CenteredGridView {
     property bool showGames
     property bool openDesktop
     property bool openDisplayControls
+    property bool quitAfterStream: false
 
     id: appGrid
     focus: true
@@ -706,7 +707,8 @@ CenteredGridView {
                                                    "appName": model.name,
                                                    "boxArtUrl": model.boxart,
                                                    "session": appModel.createSessionForApp(index, selectedDisplayTarget),
-                                                   "isResume": runningId === model.appid
+                                                   "isResume": runningId === model.appid,
+                                                   "quitAfter": appGrid.quitAfterStream
                                                })
             stackView.push(segue)
         }

@@ -588,6 +588,7 @@ CenterClient::~CenterClient()
             m_Engine.waitForFinished(1000);
         }
     }
+    releasePrimaryInstanceLock();
 }
 
 QString CenterClient::hostExecutable() const
@@ -686,12 +687,101 @@ bool CenterClient::openFirewallSettings() const
     return false;
 }
 
+bool CenterClient::acquirePrimaryInstanceLock()
+{
+    if (m_PrimaryLockHandle != nullptr) {
+        return true;
+    }
+#ifdef Q_OS_WIN
+    HANDLE mutex = CreateMutexW(nullptr, FALSE, L"Local\\SunAndMon.PrimaryInstance");
+    if (mutex == nullptr) {
+        return true;
+    }
+    if (GetLastError() == ERROR_ALREADY_EXISTS) {
+        CloseHandle(mutex);
+        return false;
+    }
+    m_PrimaryLockHandle = mutex;
+    return true;
+#elif defined(Q_OS_LINUX)
+    auto* lock = new QLockFile(QDir(linuxConfigDir()).filePath(QStringLiteral("primary-instance.lock")));
+    lock->setStaleLockTime(0);
+    if (!lock->tryLock(0)) {
+        delete lock;
+        return false;
+    }
+    m_PrimaryLockHandle = lock;
+    return true;
+#else
+    return true;
+#endif
+}
+
+void CenterClient::releasePrimaryInstanceLock()
+{
+    if (m_PrimaryLockHandle == nullptr) {
+        return;
+    }
+#ifdef Q_OS_WIN
+    CloseHandle(static_cast<HANDLE>(m_PrimaryLockHandle));
+#elif defined(Q_OS_LINUX)
+    auto* lock = static_cast<QLockFile*>(m_PrimaryLockHandle);
+    lock->unlock();
+    delete lock;
+#endif
+    m_PrimaryLockHandle = nullptr;
+}
+
+void CenterClient::computeLocalHostId()
+{
+    if (!connected()) {
+        return;
+    }
+    const auto seed = hostIdentitySeed();
+    if (seed.isEmpty()) {
+        return;
+    }
+    const auto hostKey = QMessageAuthenticationCode::hash(identityEndpoint(m_Endpoint.url) + "\n" + m_Key, seed,
+                                                          QCryptographicHash::Sha256).toHex();
+    m_HostId = QString::fromLatin1(QCryptographicHash::hash(hostKey, QCryptographicHash::Sha256).toHex().left(32));
+}
+
+void CenterClient::setSecondaryMode(bool enabled)
+{
+    if (m_SecondaryInstance != enabled) {
+        m_SecondaryInstance = enabled;
+        emit changed();
+    }
+}
+
+bool CenterClient::openInNewWindow(const QString& id, const QString& action) const
+{
+    static const QRegularExpression idFormat("^[a-f0-9]{32}$");
+    if (!idFormat.match(id).hasMatch()) {
+        return false;
+    }
+    const QString act = (action == QStringLiteral("apps") || action == QStringLiteral("displays"))
+                            ? action
+                            : QStringLiteral("desktop");
+    return QProcess::startDetached(QCoreApplication::applicationFilePath(),
+                                   {QStringLiteral("--center-connect"), id,
+                                    QStringLiteral("--center-action"), act});
+}
+
+bool CenterClient::openNewClientWindow() const
+{
+    return QProcess::startDetached(QCoreApplication::applicationFilePath(), {});
+}
+
 void CenterClient::startOnLaunch()
 {
     if (m_LaunchHandled || !hostAvailable()) {
         return;
     }
     m_LaunchHandled = true;
+    if (!m_SecondaryInstance && !acquirePrimaryInstanceLock()) {
+        m_SecondaryInstance = true;
+    }
 #if defined(Q_OS_WIN) || defined(Q_OS_LINUX)
 #ifdef Q_OS_WIN
     const auto key = protectCenterKey(QSettings().value(SavedCenterKey).toByteArray(), m_EnteredUrl.toUtf8(), false);
@@ -704,13 +794,16 @@ void CenterClient::startOnLaunch()
     if (!key.isEmpty() && validRoute) {
         m_Endpoint = {savedUrl, m_EnteredIp.isEmpty() ? QString() : savedIp.toString()};
         m_Key = key;
+        computeLocalHostId();
         m_Poll.start();
     }
 #endif
     if (m_Tunnel) {
-        m_Tunnel->startOnLaunch();
+        m_Tunnel->startOnLaunch(m_SecondaryInstance);
     }
-    if (startHostOnLaunch()) {
+    if (m_SecondaryInstance) {
+        setHostStatus(tr("Managed by the main SunAndMon window"));
+    } else if (startHostOnLaunch()) {
         startHost(m_AdvertisedAddress);
     }
     refresh();
@@ -940,6 +1033,7 @@ void CenterClient::loadDevices(const CenterEndpoint& endpoint, const QByteArray&
                 m_Key = key;
                 m_EnteredUrl = endpoint.url.toString();
                 m_EnteredIp = endpoint.directIp;
+                computeLocalHostId();
                 QSettings settings;
                 m_HiddenDevices = settings.value(hiddenDevicesKey()).toStringList();
                 settings.setValue("center/url", m_EnteredUrl);
@@ -1296,6 +1390,10 @@ void CenterClient::connectDevice(const QString& id)
 
 void CenterClient::startHost(const QString& address)
 {
+    if (m_SecondaryInstance) {
+        setHostStatus(tr("Managed by the main SunAndMon window"));
+        return;
+    }
     if (!hostAvailable() || hostActive() || m_ConflictRetry.isActive()) {
         return;
     }

@@ -3,6 +3,7 @@
 #include <QCoreApplication>
 #include <QDesktopServices>
 #include <QDir>
+#include <QFile>
 #include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -13,6 +14,7 @@
 #include <QProcessEnvironment>
 #include <QRandomGenerator>
 #include <QRegularExpression>
+#include <QSaveFile>
 #include <QSettings>
 #include <QStandardPaths>
 #include <QUrl>
@@ -79,6 +81,9 @@ TunnelManager::TunnelManager(QObject* parent)
                 if (ok && port > 0) {
                     m_DaemonPort = port;
                     m_DaemonReady = true;
+                    m_AttachedToExistingDaemon = false;
+                    m_PollFailures = 0;
+                    writeDaemonEndpointFile();
                     queryCapabilities();
                     if (m_PendingStartTs) {
                         m_PendingStartTs = false;
@@ -235,6 +240,47 @@ QString TunnelManager::tunnelStateDir() const
     return path;
 }
 
+QString TunnelManager::daemonEndpointFile() const
+{
+    return QDir(tunnelStateDir()).filePath(QStringLiteral("daemon.json"));
+}
+
+void TunnelManager::writeDaemonEndpointFile() const
+{
+    if (m_DaemonPort == 0 || m_Token.isEmpty() || m_AttachedToExistingDaemon) {
+        return;
+    }
+    const QString path = daemonEndpointFile();
+    QSaveFile file(path);
+    if (!file.open(QIODevice::WriteOnly)) {
+        return;
+    }
+    file.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+    const QJsonObject obj{
+        {QStringLiteral("port"), static_cast<int>(m_DaemonPort)},
+        {QStringLiteral("token"), QString::fromLatin1(m_Token)},
+        {QStringLiteral("ownerPid"), QCoreApplication::applicationPid()},
+    };
+    file.write(QJsonDocument(obj).toJson(QJsonDocument::Compact));
+    if (file.commit()) {
+        QFile::setPermissions(path, QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+    }
+}
+
+void TunnelManager::removeDaemonEndpointFileIfOwned() const
+{
+    const QString path = daemonEndpointFile();
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) {
+        return;
+    }
+    const auto obj = QJsonDocument::fromJson(file.read(4096)).object();
+    file.close();
+    if (obj.value(QStringLiteral("ownerPid")).toVariant().toLongLong() == QCoreApplication::applicationPid()) {
+        QFile::remove(path);
+    }
+}
+
 void TunnelManager::loadSettings()
 {
     QSettings settings;
@@ -282,11 +328,12 @@ void TunnelManager::saveSettings() const
     settings.setValue(QStringLiteral("tunnel/etCoreBinary"), m_EtCoreBinary);
 }
 
-void TunnelManager::startOnLaunch()
+void TunnelManager::startOnLaunch(bool secondaryInstance)
 {
     if (!available()) {
         return;
     }
+    m_SecondaryMode = secondaryInstance;
     bool needDaemon = false;
     if (m_TsAutoConnect) {
         m_PendingStartTs = true;
@@ -302,7 +349,11 @@ void TunnelManager::startOnLaunch()
     }
     if (needDaemon) {
         emit changed();
-        ensureDaemonRunning();
+        tryAttachExistingDaemon(true);
+    } else if (secondaryInstance) {
+        // Always attach to the primary instance's running tunnel daemon if present,
+        // even when auto-connect wasn't enabled in settings.
+        tryAttachExistingDaemon(false);
     }
 }
 
@@ -470,7 +521,89 @@ void TunnelManager::applyCenterDefaults(const QVariantMap& defaults)
 
 void TunnelManager::ensureDaemonRunning()
 {
-    if (m_Daemon.state() != QProcess::NotRunning) {
+    if (m_DaemonReady || m_Daemon.state() != QProcess::NotRunning || m_ProbingExistingDaemon) {
+        return;
+    }
+    tryAttachExistingDaemon(true);
+}
+
+void TunnelManager::tryAttachExistingDaemon(bool spawnFallback)
+{
+    if (m_DaemonReady || m_Daemon.state() != QProcess::NotRunning || m_ProbingExistingDaemon) {
+        return;
+    }
+    QFile file(daemonEndpointFile());
+    if (!file.open(QIODevice::ReadOnly)) {
+        if (spawnFallback) {
+            spawnLocalDaemon();
+        }
+        return;
+    }
+    const auto obj = QJsonDocument::fromJson(file.read(4096)).object();
+    file.close();
+    const int port = obj.value(QStringLiteral("port")).toInt();
+    const QByteArray token = obj.value(QStringLiteral("token")).toString().toLatin1();
+    const qint64 ownerPid = obj.value(QStringLiteral("ownerPid")).toVariant().toLongLong();
+    if (port <= 0 || port > 65535 || token.isEmpty() || ownerPid == QCoreApplication::applicationPid()) {
+        if (spawnFallback) {
+            spawnLocalDaemon();
+        }
+        return;
+    }
+
+    m_ProbingExistingDaemon = true;
+    QUrl url;
+    url.setScheme(QStringLiteral("http"));
+    url.setHost(QStringLiteral("127.0.0.1"));
+    url.setPort(port);
+    url.setPath(QStringLiteral("/v1/status"));
+    QNetworkRequest req(url);
+    req.setRawHeader("Authorization", "Bearer " + token);
+    req.setTransferTimeout(800);
+    auto* reply = m_Network.get(req);
+    connect(reply, &QNetworkReply::finished, this, [this, reply, port, token, spawnFallback] {
+        reply->deleteLater();
+        m_ProbingExistingDaemon = false;
+        const int code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        if (reply->error() == QNetworkReply::NoError && code == 200) {
+            const auto root = QJsonDocument::fromJson(reply->readAll()).object();
+            m_AttachedToExistingDaemon = true;
+            m_DaemonPort = static_cast<quint16>(port);
+            m_Token = token;
+            m_DaemonReady = true;
+            m_PollFailures = 0;
+            applyStatusPayload(root);
+            queryCapabilities();
+            if (m_PendingStartTs) {
+                m_PendingStartTs = false;
+                if (m_TsState == QStringLiteral("stopped") || m_TsState == QStringLiteral("error")) {
+                    sendStartTailscale();
+                }
+            }
+            if (m_PendingStartEt) {
+                m_PendingStartEt = false;
+                if (m_EtState == QStringLiteral("stopped") || m_EtState == QStringLiteral("error")) {
+                    sendStartEasyTier();
+                }
+            }
+            m_PollTimer.start();
+            emit daemonAttachFinished();
+            return;
+        }
+        // Stale descriptor or primary daemon exited; spawn locally if requested.
+        if (reply->error() == QNetworkReply::ConnectionRefusedError) {
+            QFile::remove(daemonEndpointFile());
+        }
+        if (spawnFallback) {
+            spawnLocalDaemon();
+        }
+        emit daemonAttachFinished();
+    });
+}
+
+void TunnelManager::spawnLocalDaemon()
+{
+    if (m_Daemon.state() != QProcess::NotRunning || m_DaemonReady) {
         return;
     }
     const QString exe = daemonExecutable();
@@ -479,6 +612,7 @@ void TunnelManager::ensureDaemonRunning()
     }
     m_StdoutBuf.clear();
     m_DaemonReady = false;
+    m_AttachedToExistingDaemon = false;
     m_DaemonPort = 0;
     m_Token = generateRandomHexToken();
 
@@ -492,6 +626,13 @@ void TunnelManager::ensureDaemonRunning()
 void TunnelManager::stopDaemon()
 {
     m_PollTimer.stop();
+    if (m_AttachedToExistingDaemon) {
+        m_AttachedToExistingDaemon = false;
+        m_DaemonReady = false;
+        m_DaemonPort = 0;
+        return;
+    }
+    removeDaemonEndpointFileIfOwned();
     if (m_Daemon.state() != QProcess::NotRunning) {
         m_Daemon.closeWriteChannel();
         if (!m_Daemon.waitForFinished(1500)) {
@@ -636,66 +777,82 @@ void TunnelManager::pollStatus()
     connect(reply, &QNetworkReply::finished, this, [this, reply] {
         reply->deleteLater();
         if (reply->error() != QNetworkReply::NoError) {
+            if (m_AttachedToExistingDaemon && ++m_PollFailures >= 3) {
+                m_PollTimer.stop();
+                m_AttachedToExistingDaemon = false;
+                m_DaemonReady = false;
+                m_DaemonPort = 0;
+                emit changed();
+            }
             return;
         }
+        m_PollFailures = 0;
         const auto root = QJsonDocument::fromJson(reply->readAll()).object();
-        const auto providers = root.value(QStringLiteral("providers")).toObject();
-        const auto ts = providers.value(QStringLiteral("tailscale")).toObject();
-        const auto et = providers.value(QStringLiteral("easytier")).toObject();
-
-        const QString newTsState = ts.value(QStringLiteral("state")).toString(QStringLiteral("stopped"));
-        const QString newTsVip = ts.value(QStringLiteral("virtualIp")).toString();
-        const QString newTsExp = ts.value(QStringLiteral("exposeIp")).toString();
-        const QString newTsAuth = ts.value(QStringLiteral("authUrl")).toString();
-        const QString newTsErr = ts.value(QStringLiteral("error")).toString();
-        const int newTsPeers = ts.value(QStringLiteral("peersOnline")).toInt();
-        const bool newTsHostExp = ts.value(QStringLiteral("hostExposed")).toBool();
-
-        const QString newEtState = et.value(QStringLiteral("state")).toString(QStringLiteral("stopped"));
-        const QString newEtVip = et.value(QStringLiteral("virtualIp")).toString();
-        const QString newEtExp = et.value(QStringLiteral("exposeIp")).toString();
-        const QString newEtErr = et.value(QStringLiteral("error")).toString();
-        const int newEtPeers = et.value(QStringLiteral("peersOnline")).toInt();
-        const bool newEtHostExp = et.value(QStringLiteral("hostExposed")).toBool();
-
-        const bool connChanged = (newTsState != m_TsState) || (newTsExp != m_TsExposeIp) ||
-                                 (newEtState != m_EtState) || (newEtExp != m_EtExposeIp);
-        const bool anyChanged = connChanged || (newTsVip != m_TsVirtualIp) || (newTsAuth != m_TsAuthUrl) ||
-                                (newTsErr != m_TsError) || (newTsPeers != m_TsPeersOnline) || (newTsHostExp != m_TsHostExposed) ||
-                                (newEtVip != m_EtVirtualIp) || (newEtErr != m_EtError) || (newEtPeers != m_EtPeersOnline) ||
-                                (newEtHostExp != m_EtHostExposed);
-
-        m_TsState = newTsState;
-        m_TsVirtualIp = newTsVip;
-        m_TsExposeIp = newTsExp;
-        m_TsAuthUrl = newTsAuth;
-        m_TsError = newTsErr;
-        m_TsPeersOnline = newTsPeers;
-        m_TsHostExposed = newTsHostExp;
-
-        m_EtState = newEtState;
-        m_EtVirtualIp = newEtVip;
-        m_EtExposeIp = newEtExp;
-        m_EtError = newEtErr;
-        m_EtPeersOnline = newEtPeers;
-        m_EtHostExposed = newEtHostExp;
-
-        if (m_WantHostExpose && m_HostHttpPort > 0 &&
-            ((m_TsState == QStringLiteral("connected") && !m_TsHostExposed) ||
-             (m_EtState == QStringLiteral("connected") && !m_EtHostExposed))) {
-            sendExposeRequest();
-        }
-        if (anyChanged) {
-            emit changed();
-        }
-        if (connChanged) {
-            emit connectedStateChanged();
-        }
+        applyStatusPayload(root);
     });
+}
+
+void TunnelManager::applyStatusPayload(const QJsonObject& root)
+{
+    const auto providers = root.value(QStringLiteral("providers")).toObject();
+    const auto ts = providers.value(QStringLiteral("tailscale")).toObject();
+    const auto et = providers.value(QStringLiteral("easytier")).toObject();
+
+    const QString newTsState = ts.value(QStringLiteral("state")).toString(QStringLiteral("stopped"));
+    const QString newTsVip = ts.value(QStringLiteral("virtualIp")).toString();
+    const QString newTsExp = ts.value(QStringLiteral("exposeIp")).toString();
+    const QString newTsAuth = ts.value(QStringLiteral("authUrl")).toString();
+    const QString newTsErr = ts.value(QStringLiteral("error")).toString();
+    const int newTsPeers = ts.value(QStringLiteral("peersOnline")).toInt();
+    const bool newTsHostExp = ts.value(QStringLiteral("hostExposed")).toBool();
+
+    const QString newEtState = et.value(QStringLiteral("state")).toString(QStringLiteral("stopped"));
+    const QString newEtVip = et.value(QStringLiteral("virtualIp")).toString();
+    const QString newEtExp = et.value(QStringLiteral("exposeIp")).toString();
+    const QString newEtErr = et.value(QStringLiteral("error")).toString();
+    const int newEtPeers = et.value(QStringLiteral("peersOnline")).toInt();
+    const bool newEtHostExp = et.value(QStringLiteral("hostExposed")).toBool();
+
+    const bool connChanged = (newTsState != m_TsState) || (newTsExp != m_TsExposeIp) ||
+                             (newEtState != m_EtState) || (newEtExp != m_EtExposeIp);
+    const bool anyChanged = connChanged || (newTsVip != m_TsVirtualIp) || (newTsAuth != m_TsAuthUrl) ||
+                            (newTsErr != m_TsError) || (newTsPeers != m_TsPeersOnline) || (newTsHostExp != m_TsHostExposed) ||
+                            (newEtVip != m_EtVirtualIp) || (newEtErr != m_EtError) || (newEtPeers != m_EtPeersOnline) ||
+                            (newEtHostExp != m_EtHostExposed);
+
+    m_TsState = newTsState;
+    m_TsVirtualIp = newTsVip;
+    m_TsExposeIp = newTsExp;
+    m_TsAuthUrl = newTsAuth;
+    m_TsError = newTsErr;
+    m_TsPeersOnline = newTsPeers;
+    m_TsHostExposed = newTsHostExp;
+
+    m_EtState = newEtState;
+    m_EtVirtualIp = newEtVip;
+    m_EtExposeIp = newEtExp;
+    m_EtError = newEtErr;
+    m_EtPeersOnline = newEtPeers;
+    m_EtHostExposed = newEtHostExp;
+
+    if (!m_SecondaryMode && !m_AttachedToExistingDaemon && m_WantHostExpose && m_HostHttpPort > 0 &&
+        ((m_TsState == QStringLiteral("connected") && !m_TsHostExposed) ||
+         (m_EtState == QStringLiteral("connected") && !m_EtHostExposed))) {
+        sendExposeRequest();
+    }
+    if (anyChanged) {
+        emit changed();
+    }
+    if (connChanged) {
+        emit connectedStateChanged();
+    }
 }
 
 void TunnelManager::syncHostExposure(bool hostReady, quint16 httpPort, quint16 httpsPort)
 {
+    if (m_SecondaryMode || m_AttachedToExistingDaemon) {
+        return;
+    }
     m_WantHostExpose = hostReady;
     m_HostHttpPort = httpPort;
     m_HostHttpsPort = httpsPort;
@@ -730,6 +887,14 @@ void TunnelManager::ensureForwardsAsync(const QList<QPair<QString, QString>>& en
                                         quint16 httpsPort,
                                         std::function<void(QStringList localHosts)> callback)
 {
+    if (m_ProbingExistingDaemon && !m_DaemonReady) {
+        QObject::connect(this, &TunnelManager::daemonAttachFinished, this,
+                         [this, endpoints, httpPort, httpsPort, cb = std::move(callback)]() mutable {
+                             ensureForwardsAsync(endpoints, httpPort, httpsPort, std::move(cb));
+                         },
+                         Qt::SingleShotConnection);
+        return;
+    }
     // Filter to connected providers and sort by user's routePolicy order.
     QList<QPair<QString, QString>> matched;
     for (const auto& preferred : orderedTunnelProviders()) {

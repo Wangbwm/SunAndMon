@@ -78,7 +78,7 @@ internal class CenterDirectory(url: String, private val key: String, directIp: S
     }
 
     fun tunnelDefaults(): JSONObject? = runCatching {
-        val obj = JSONObject(requestPath("/v1/tunnel"))
+        val obj = JSONObject(requestPath("/v1/tunnel-config"))
         val p = obj.optString("provider").trim().lowercase()
         if (p == "tailscale" || p == "easytier") obj else null
     }.getOrNull()

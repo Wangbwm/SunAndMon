@@ -748,10 +748,25 @@ class PcView : ThemedActivity(), AdapterFragmentCallbacks, ShakeDetector.Listene
     }
 
     private fun openTunnelSettings() {
+        val dir = centerDirectory
+        if (dir != null && centerTunnelDefaults == null) {
+            uiScope.launch {
+                val defaults = withContext(Dispatchers.IO) { dir.tunnelDefaults() } ?: return@launch
+                centerTunnelDefaults = defaults
+                val defProvider = defaults.optString("provider").trim().lowercase()
+                val unconfigured = (defProvider == "easytier" && (tunnelManager.etNetworkName.isEmpty() || tunnelManager.etNetworkSecret.isEmpty())) ||
+                    (defProvider == "tailscale" && tunnelManager.tsControlUrl.isEmpty() && tunnelManager.tsAuthKey.isEmpty())
+                if (unconfigured) {
+                    tunnelManager.applyCenterDefaults(defaults, autoStartIfIdle = true)
+                } else {
+                    tunnelManager.setCachedCenterDefaults(defaults)
+                }
+            }
+        }
         TunnelSettingsDialog(
             context = this,
             tunnel = tunnelManager,
-            centerDefaultsProvider = { centerTunnelDefaults }
+            centerDefaultsProvider = { centerTunnelDefaults ?: tunnelManager.centerDefaults }
         ).show()
     }
 
@@ -924,10 +939,12 @@ class PcView : ThemedActivity(), AdapterFragmentCallbacks, ShakeDetector.Listene
                 if (defaults != null) {
                     centerTunnelDefaults = defaults
                     val defProvider = defaults.optString("provider").trim().lowercase()
-                    val unconfigured = (defProvider == "easytier" && tunnelManager.etNetworkName.isEmpty()) ||
+                    val unconfigured = (defProvider == "easytier" && (tunnelManager.etNetworkName.isEmpty() || tunnelManager.etNetworkSecret.isEmpty())) ||
                         (defProvider == "tailscale" && tunnelManager.tsControlUrl.isEmpty() && tunnelManager.tsAuthKey.isEmpty())
                     if (signingIn || unconfigured) {
                         tunnelManager.applyCenterDefaults(defaults, autoStartIfIdle = true)
+                    } else {
+                        tunnelManager.setCachedCenterDefaults(defaults)
                     }
                 }
                 if (signingIn) {

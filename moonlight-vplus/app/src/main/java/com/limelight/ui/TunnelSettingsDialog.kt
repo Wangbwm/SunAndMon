@@ -42,9 +42,18 @@ internal class TunnelSettingsDialog(
     private val danger = Color.parseColor("#E5534B")
     private val rippleColor = ColorStateList.valueOf(color(R.color.center_ripple))
 
-    private var activeTab: String =
-        if (tunnel.etState == "connected" && tunnel.tsState != "connected") "easytier" else "tailscale"
+    private var activeTab: String = run {
+        val defP = (centerDefaultsProvider() ?: tunnel.centerDefaults)
+            ?.optString("provider")?.trim()?.lowercase().orEmpty()
+        when {
+            tunnel.etState == "connected" && tunnel.tsState != "connected" -> "easytier"
+            tunnel.tsState == "connected" && tunnel.etState != "connected" -> "tailscale"
+            defP == "easytier" || tunnel.etNetworkName.isNotEmpty() -> "easytier"
+            else -> "tailscale"
+        }
+    }
     private var useWebOAuth: Boolean = tunnel.tsUseWebOAuth
+    private var hadBannerOnBuild: Boolean = false
 
     private var dialog: AlertDialog? = null
     private lateinit var rootContainer: LinearLayout
@@ -81,7 +90,15 @@ internal class TunnelSettingsDialog(
 
     private val tunnelListener: () -> Unit = {
         if (dialog?.isShowing == true) {
-            refreshStatusViews()
+            val defaults = centerDefaultsProvider() ?: tunnel.centerDefaults
+            val hasBannerNow = defaults != null &&
+                defaults.optString("provider").trim().lowercase() in setOf("easytier", "tailscale")
+            val etJustPopulated = etNameEdit?.text?.toString()?.isBlank() == true && tunnel.etNetworkName.isNotEmpty()
+            if ((hasBannerNow && !hadBannerOnBuild) || etJustPopulated) {
+                rebuildContent(syncFieldsFromManager = true)
+            } else {
+                refreshStatusViews()
+            }
         }
     }
 
@@ -211,9 +228,10 @@ internal class TunnelSettingsDialog(
         gap(rootContainer, 10)
 
         // 2. Center defaults banner if available
-        val defaults = centerDefaultsProvider()
+        val defaults = centerDefaultsProvider() ?: tunnel.centerDefaults
         val defProvider = defaults?.optString("provider")?.trim()?.lowercase().orEmpty()
-        if (defaults != null && (defProvider == "easytier" || defProvider == "tailscale")) {
+        hadBannerOnBuild = defaults != null && (defProvider == "easytier" || defProvider == "tailscale")
+        if (hadBannerOnBuild && defaults != null) {
             val banner = row().apply {
                 setPadding(dp(10), dp(8), dp(10), dp(8))
                 background = shape(sky, accent, radius = 10)

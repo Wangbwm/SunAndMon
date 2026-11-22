@@ -52,6 +52,10 @@ internal class AndroidTunnelManager private constructor(context: Context) {
     @Volatile var hostname: String = prefs.getString(KEY_HOSTNAME, "").orEmpty().trim()
         .ifEmpty { defaultHostname() }
         private set
+    @Volatile var centerDefaults: JSONObject? = prefs.getString(KEY_CENTER_DEFAULTS, null)
+        ?.takeIf { it.isNotBlank() }
+        ?.let { runCatching { JSONObject(it) }.getOrNull() }
+        private set
 
     // Tailscale settings & state
     @Volatile var tsAutoConnect: Boolean = prefs.getBoolean(KEY_TS_AUTO, false)
@@ -200,6 +204,14 @@ internal class AndroidTunnelManager private constructor(context: Context) {
     }
 
     fun startOnLaunch() {
+        centerDefaults?.let { cached ->
+            val p = cached.optString("provider").trim().lowercase()
+            if ((p == "easytier" && etNetworkName.isEmpty()) ||
+                (p == "tailscale" && tsControlUrl.isEmpty() && tsAuthKey.isEmpty())
+            ) {
+                applyCenterDefaults(cached, autoStartIfIdle = false)
+            }
+        }
         if (tsAutoConnect && tsAvailable && tsState == "stopped") {
             tsState = "starting"
             tsError = ""
@@ -215,7 +227,15 @@ internal class AndroidTunnelManager private constructor(context: Context) {
         }
     }
 
+    fun setCachedCenterDefaults(defaults: JSONObject) {
+        centerDefaults = defaults
+        prefs.edit { putString(KEY_CENTER_DEFAULTS, defaults.toString()) }
+        notifyChanged()
+    }
+
     fun applyCenterDefaults(defaults: JSONObject, autoStartIfIdle: Boolean = false) {
+        centerDefaults = defaults
+        prefs.edit { putString(KEY_CENTER_DEFAULTS, defaults.toString()) }
         val provider = defaults.optString("provider").trim().lowercase()
         if (provider == "tailscale") {
             if (defaults.has("controlUrl")) {
@@ -225,6 +245,9 @@ internal class AndroidTunnelManager private constructor(context: Context) {
             if (key.isNotEmpty()) {
                 tsAuthKey = key
                 tsUseWebOAuth = false
+            }
+            if (autoStartIfIdle && tsAuthKey.isNotEmpty()) {
+                tsAutoConnect = true
             }
             saveSettings()
             notifyChanged()
@@ -252,6 +275,9 @@ internal class AndroidTunnelManager private constructor(context: Context) {
                 if (list.isNotEmpty()) {
                     etPeers = list.joinToString("\n")
                 }
+            }
+            if (autoStartIfIdle && etNetworkName.isNotEmpty()) {
+                etAutoConnect = true
             }
             saveSettings()
             notifyChanged()
@@ -884,6 +910,7 @@ internal class AndroidTunnelManager private constructor(context: Context) {
         private const val PREF_NAME = "sunandmon_tunnel"
         private const val KEY_ROUTE_POLICY = "routePolicy"
         private const val KEY_HOSTNAME = "hostname"
+        private const val KEY_CENTER_DEFAULTS = "centerDefaultsJson"
         private const val KEY_TS_AUTO = "tsAutoConnect"
         private const val KEY_TS_CONTROL_URL = "tsControlUrl"
         private const val KEY_TS_AUTH_KEY = "tsAuthKey"

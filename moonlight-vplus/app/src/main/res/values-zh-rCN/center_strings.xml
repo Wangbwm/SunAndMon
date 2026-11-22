@@ -13,6 +13,16 @@
     <string name="center_offline">此设备已离线。</string>
     <string name="center_connecting">正在连接主机…</string>
     <string name="center_connect_failed">无法连接，请检查主机网络和对此控制端的授权。</string>
+    <string name="center_connect_ticket_failed">中心未能签发配对票据（HTTP %1$d）。</string>
+    <string name="center_connect_route_failed">%1$s：%2$s</string>
+    <string name="center_connect_enrollment_failed">主机拒绝配对（HTTP %1$d）。</string>
+    <string name="center_connect_response_failed">主机返回了无效的授权响应。</string>
+    <string name="center_connect_tls_failed">读取主机信息时 TLS 连接失败。</string>
+    <string name="center_connect_certificate_mismatch">主机证书与中心下发的证书不一致。</string>
+    <string name="center_connect_tls_enrollment_failed">提交主机配对时 TLS 连接失败。</string>
+    <string name="center_connect_tls_verify_failed">验证主机配对时 TLS 连接失败。</string>
+    <string name="center_connect_timeout">等待主机响应超时。</string>
+    <string name="center_connect_unreachable">无法访问主机的 HTTPS 串流端口。</string>
     <string name="center_my_devices">我的设备</string>
     <string name="center_refresh">刷新</string>
     <string name="center_server">中心服务器</string>
@@ -66,6 +76,9 @@
     <string name="center_ts_connected">已连接 (Tailscale / Headscale)</string>
     <string name="center_ts_waiting_auth">等待浏览器登录授权 (Web OAuth)</string>
     <string name="center_ts_open_browser">打开浏览器登录</string>
+    <string name="center_ts_copy_url">复制授权链接</string>
+    <string name="center_ts_url_copied">已复制授权链接</string>
+    <string name="center_ts_browser_failed">无法打开浏览器。可以复制授权链接后手动打开。</string>
     <string name="center_ts_auto_connect">启动时自动连接 Tailscale</string>
     <string name="center_ts_control_url">Control Server 地址（留空使用官方 Tailscale，或填自建 Headscale）</string>
     <string name="center_ts_control_hint">https://headscale.example.com（可选）</string>

@@ -6,11 +6,14 @@ import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
 import androidx.core.content.edit
+import com.limelight.LimeLog
 import com.limelight.nvstream.http.ComputerDetails
+import com.limelight.nvstream.http.HostHttpResponseException
 import com.limelight.nvstream.http.LimelightCryptoProvider
 import com.limelight.nvstream.http.NvHTTP
 import com.limelight.nvstream.http.NvApp
 import java.io.IOException
+import java.io.InterruptedIOException
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Proxy
@@ -26,6 +29,7 @@ import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
+import javax.net.ssl.SSLException
 import okhttp3.Dns
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
@@ -35,12 +39,20 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
+import org.xmlpull.v1.XmlPullParserException
 
 internal class CenterDirectory(url: String, private val key: String, directIp: String = "") {
     data class Device(val id: String, val name: String, val online: Boolean)
     data class Connection(val computer: ComputerDetails, val app: NvApp?, val routeLabel: String = "")
     class TunnelRequiredException(val missingProviders: List<String>) :
         IOException("Missing built-in tunnel providers: ${missingProviders.joinToString(", ")}")
+
+    class CenterRequestException(val status: Int) : IOException("Center HTTP $status")
+    class HostConnectionException(val kind: Kind, val route: String, val status: Int? = null, cause: Throwable? = null) :
+        IOException("Host connection failed: $kind ($route${status?.let { ", HTTP $it" }.orEmpty()})", cause) {
+        enum class Kind { UNREACHABLE, TIMEOUT, TLS, HOST_RESPONSE, ENROLLMENT, CERTIFICATE_MISMATCH }
+        val tlsStage get() = (cause as? NvHTTP.CenterTlsException)?.stage
+    }
 
     internal val accessKey: String get() = key
 
@@ -131,17 +143,15 @@ internal class CenterDirectory(url: String, private val key: String, directIp: S
             }
         }
 
-        val tunnelAddressesLower = hostTunnels.map { it.second.lowercase() }.toSet()
         val directCandidates = mutableListOf<Pair<String, String>>()
         for (index in 0 until addresses.length()) {
             val address = addresses.getString(index)
-            if (address.lowercase() in tunnelAddressesLower) continue
-            if (!(address.matches(Regex("[0-9.]+")) && address.contains('.') ||
-                    address.matches(Regex("[a-fA-F0-9:.]+")) && address.contains(':'))) continue
-            val ip = runCatching { InetAddress.getByName(address) }.getOrNull() ?: continue
+            val ip = numericAddress(address) ?: continue
             if (ip.isAnyLocalAddress || ip.isLoopbackAddress || ip.isLinkLocalAddress || ip.isMulticastAddress) continue
             val routeLabel = classifyDirectRoute(ip)
             directCandidates.add(address to routeLabel)
+            // A Linux host can use the system tailscaled without advertising a built-in tunnel.
+            if (routeLabel == "Tailscale") hostTunnels.add("tailscale" to address)
         }
 
         val tunnelCandidates = mutableListOf<Pair<String, String>>()
@@ -162,13 +172,24 @@ internal class CenterDirectory(url: String, private val key: String, directIp: S
             orderedCandidates.addAll(tunnelCandidates)
         }
 
-        val candidatesToTry = filterReachableCandidates(orderedCandidates, httpsPort)
+        val candidatesToTry = prioritizeReachableCandidates(orderedCandidates.distinctBy { it.first }, httpsPort)
 
+        var bestFailure: HostConnectionException? = null
+        fun record(failure: HostConnectionException) {
+            val stage = failure.tlsStage
+            LimeLog.warning(failure.message.orEmpty() + stage?.let { " at $it" }.orEmpty())
+            val previous = bestFailure
+            val previousStage = previous?.tlsStage
+            if (previous == null || failure.kind > previous.kind ||
+                (failure.kind == previous.kind && stage != null && (previousStage == null || stage > previousStage))) {
+                bestFailure = failure
+            }
+        }
         for ((address, routeLabel) in candidatesToTry) {
             val endpoint = ComputerDetails.AddressTuple(address, port)
             try {
                 val http = NvHTTP(endpoint, httpsPort, uniqueId, name, cert, crypto)
-                val computer = http.connectViaCenter(ticket, name).apply {
+                val computer = http.connectViaCenter(ticket, name, tunnelRoute = routeLabel == "Tailscale" || routeLabel == "EasyTier").apply {
                     activeAddress = endpoint
                     manualAddress = endpoint
                     serverCert = cert
@@ -182,11 +203,26 @@ internal class CenterDirectory(url: String, private val key: String, directIp: S
                     }
                 }
                 return Connection(computer, app, routeLabel)
-            } catch (_: IOException) {
-                // Another advertised address may be reachable.
+            } catch (e: NvHTTP.CenterEnrollmentException) {
+                record(HostConnectionException(HostConnectionException.Kind.ENROLLMENT, routeLabel, e.status, e))
+            } catch (e: NvHTTP.CenterTlsException) {
+                val kind = if (e.certificateMismatch) HostConnectionException.Kind.CERTIFICATE_MISMATCH
+                    else HostConnectionException.Kind.TLS
+                record(HostConnectionException(kind, routeLabel, cause = e))
+            } catch (e: HostHttpResponseException) {
+                record(HostConnectionException(HostConnectionException.Kind.HOST_RESPONSE, routeLabel, e.getErrorCode(), e))
+            } catch (e: XmlPullParserException) {
+                record(HostConnectionException(HostConnectionException.Kind.HOST_RESPONSE, routeLabel, cause = e))
+            } catch (e: SSLException) {
+                record(HostConnectionException(HostConnectionException.Kind.TLS, routeLabel, cause = e))
+            } catch (e: InterruptedIOException) {
+                record(HostConnectionException(HostConnectionException.Kind.TIMEOUT, routeLabel, cause = e))
+            } catch (e: IOException) {
+                record(HostConnectionException(HostConnectionException.Kind.UNREACHABLE, routeLabel, cause = e))
             }
         }
 
+        bestFailure?.takeIf { it.kind >= HostConnectionException.Kind.TLS }?.let { throw it }
         if (hostProviders.isNotEmpty() && tunnelManager != null) {
             val missing = hostProviders.filter { !tunnelManager.isProviderConnected(it) }
                 .map { if (it == "easytier") "EasyTier" else "Tailscale" }
@@ -194,10 +230,10 @@ internal class CenterDirectory(url: String, private val key: String, directIp: S
                 throw TunnelRequiredException(missing)
             }
         }
-        throw IOException("The host is unreachable")
+        throw bestFailure ?: IOException("No usable host address")
     }
 
-    private fun filterReachableCandidates(
+    private fun prioritizeReachableCandidates(
         candidates: List<Pair<String, String>>,
         httpsPort: Int
     ): List<Pair<String, String>> {
@@ -218,7 +254,7 @@ internal class CenterDirectory(url: String, private val key: String, directIp: S
                 val ok = runCatching { fut.get(1800, TimeUnit.MILLISECONDS) }.getOrDefault(false)
                 if (ok) candidate else null
             }
-            reachable.ifEmpty { candidates.take(3) }
+            reachable + candidates.filterNot { it in reachable }
         } finally {
             pool.shutdownNow()
         }
@@ -231,6 +267,8 @@ internal class CenterDirectory(url: String, private val key: String, directIp: S
             val b1 = raw[1].toInt() and 0xFF
             // 100.64.0.0/10 (system Tailscale / CGNAT)
             if (b0 == 100 && (b1 and 0xC0) == 64) return "Tailscale"
+        } else if (raw.size == 16 && raw.copyOf(6).contentEquals(TAILSCALE_IPV6_PREFIX)) {
+            return "Tailscale"
         }
         return if (ip.isSiteLocalAddress || ip.isLoopbackAddress) "局域网直连" else "公网直连"
     }
@@ -249,7 +287,7 @@ internal class CenterDirectory(url: String, private val key: String, directIp: S
             .apply { if (body != null) post(body.toString().toRequestBody("application/json".toMediaType())) }
             .build()
         return client.newCall(request).execute().use { response ->
-            if (response.code != 200) throw IOException("Center returned HTTP ${response.code}")
+            if (response.code != 200) throw CenterRequestException(response.code)
             val source = response.body.source()
             if (source.request(MAX_RESPONSE + 1)) throw IOException("Center response is too large")
             source.readUtf8()
@@ -257,6 +295,7 @@ internal class CenterDirectory(url: String, private val key: String, directIp: S
     }
 
     private companion object {
+        val TAILSCALE_IPV6_PREFIX = byteArrayOf(0xfd.toByte(), 0x7a, 0x11, 0x5c, 0xa1.toByte(), 0xe0.toByte())
         const val MAX_RESPONSE = 2L * 1024 * 1024
 
         fun numericAddress(value: String): InetAddress? {

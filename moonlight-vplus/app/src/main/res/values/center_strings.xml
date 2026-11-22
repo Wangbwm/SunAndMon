@@ -13,6 +13,16 @@
     <string name="center_offline">This device is offline.</string>
     <string name="center_connecting">Connecting to the host…</string>
     <string name="center_connect_failed">Could not connect. Check that the host is reachable and allows this client.</string>
+    <string name="center_connect_ticket_failed">The center could not issue a pairing ticket (HTTP %1$d).</string>
+    <string name="center_connect_route_failed">%1$s: %2$s</string>
+    <string name="center_connect_enrollment_failed">The host rejected pairing (HTTP %1$d).</string>
+    <string name="center_connect_response_failed">The host returned an invalid authorization response.</string>
+    <string name="center_connect_tls_failed">TLS failed while reading host information.</string>
+    <string name="center_connect_certificate_mismatch">The host certificate differs from the certificate supplied by the center.</string>
+    <string name="center_connect_tls_enrollment_failed">TLS failed while submitting host pairing.</string>
+    <string name="center_connect_tls_verify_failed">TLS failed while verifying host pairing.</string>
+    <string name="center_connect_timeout">The host did not respond in time.</string>
+    <string name="center_connect_unreachable">The HTTPS streaming port is unreachable.</string>
     <string name="center_my_devices">My devices</string>
     <string name="center_refresh">Refresh</string>
     <string name="center_server">Center server</string>
@@ -66,6 +76,9 @@
     <string name="center_ts_connected">Connected (Tailscale / Headscale)</string>
     <string name="center_ts_waiting_auth">Waiting for browser sign-in (Web OAuth)</string>
     <string name="center_ts_open_browser">Open browser to sign in</string>
+    <string name="center_ts_copy_url">Copy sign-in link</string>
+    <string name="center_ts_url_copied">Sign-in link copied</string>
+    <string name="center_ts_browser_failed">Could not open a browser. Copy the sign-in link to open it manually.</string>
     <string name="center_ts_auto_connect">Auto-connect Tailscale on startup</string>
     <string name="center_ts_control_url">Control Server URL (leave blank for official Tailscale)</string>
     <string name="center_ts_control_hint">https://headscale.example.com (optional)</string>

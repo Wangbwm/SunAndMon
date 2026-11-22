@@ -996,6 +996,27 @@ class PcView : ThemedActivity(), AdapterFragmentCallbacks, ShakeDetector.Listene
                 throw e
             } catch (e: CenterDirectory.TunnelRequiredException) {
                 showToast(getString(R.string.center_connect_need_tunnel, e.missingProviders.joinToString(" / ")))
+            } catch (e: CenterDirectory.CenterRequestException) {
+                showToast(getString(R.string.center_connect_ticket_failed, e.status))
+            } catch (e: CenterDirectory.HostConnectionException) {
+                val failure = when (e.kind) {
+                    CenterDirectory.HostConnectionException.Kind.ENROLLMENT ->
+                        getString(R.string.center_connect_enrollment_failed, e.status)
+                    CenterDirectory.HostConnectionException.Kind.HOST_RESPONSE ->
+                        getString(R.string.center_connect_response_failed)
+                    CenterDirectory.HostConnectionException.Kind.CERTIFICATE_MISMATCH ->
+                        getString(R.string.center_connect_certificate_mismatch)
+                    CenterDirectory.HostConnectionException.Kind.TLS -> getString(when (e.tlsStage) {
+                        NvHTTP.CenterTlsException.Stage.ENROLLMENT -> R.string.center_connect_tls_enrollment_failed
+                        NvHTTP.CenterTlsException.Stage.VERIFY_PAIRING -> R.string.center_connect_tls_verify_failed
+                        else -> R.string.center_connect_tls_failed
+                    })
+                    CenterDirectory.HostConnectionException.Kind.TIMEOUT ->
+                        getString(R.string.center_connect_timeout)
+                    CenterDirectory.HostConnectionException.Kind.UNREACHABLE ->
+                        getString(R.string.center_connect_unreachable)
+                }
+                showToast(getString(R.string.center_connect_route_failed, e.route, failure))
             } catch (_: Exception) {
                 showToast(getString(R.string.center_connect_failed))
             } finally {

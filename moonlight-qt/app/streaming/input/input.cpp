@@ -1008,9 +1008,6 @@ bool SdlInputHandler::isCaptureActive()
 void SdlInputHandler::updateEmbeddedWin32KeyboardHook(bool enable)
 {
     if (!enable || m_Window == nullptr || Session::embedParentWindowId() == 0) {
-        if (s_EmbedKeyboardHook.active) {
-            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "Embedded keyboard capture released");
-        }
         s_EmbedKeyboardHook.active = false;
         s_EmbedKeyboardHook.winDown = false;
         s_EmbedKeyboardHook.childHwnd = nullptr;
@@ -1028,7 +1025,6 @@ void SdlInputHandler::updateEmbeddedWin32KeyboardHook(bool enable)
         return;
     }
 
-    const bool wasActive = s_EmbedKeyboardHook.active;
     s_EmbedKeyboardHook.childHwnd = wmInfo.info.win.window;
     s_EmbedKeyboardHook.parentHwnd = reinterpret_cast<HWND>(Session::embedParentWindowId());
     s_EmbedKeyboardHook.active = true;
@@ -1043,28 +1039,18 @@ void SdlInputHandler::updateEmbeddedWin32KeyboardHook(bool enable)
             s_EmbedKeyboardHook.active = false;
         }
     }
-    if (!wasActive && s_EmbedKeyboardHook.active) {
-        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "Embedded keyboard capture enabled (child %p, parent %p)",
-                    static_cast<void*>(s_EmbedKeyboardHook.childHwnd),
-                    static_cast<void*>(s_EmbedKeyboardHook.parentHwnd));
-    }
 }
 #endif
 
 void SdlInputHandler::updateKeyboardGrabState()
 {
     const bool windowFocused = isStreamWindowInputFocused(m_Window);
-    const bool embedded = Session::embedParentWindowId() != 0;
-    // An embedded tab is never a real fullscreen window, so "fullscreen only"
-    // has no meaning there. Treat a focused tab like CSK_ALWAYS; otherwise the
-    // grab and the system keys (Win, Alt+Tab, ...) never reach the host.
     bool shouldGrab = m_CaptureSystemKeysMode != StreamingPreferences::CSK_OFF &&
                       (isCaptureActive() ||
-                       ((m_CaptureSystemKeysMode == StreamingPreferences::CSK_ALWAYS || embedded) &&
+                       (m_CaptureSystemKeysMode == StreamingPreferences::CSK_ALWAYS &&
                         !m_InputExplicitlyReleased && windowFocused));
     if (shouldGrab) {
-        if (m_CaptureSystemKeysMode == StreamingPreferences::CSK_FULLSCREEN && !embedded &&
+        if (m_CaptureSystemKeysMode == StreamingPreferences::CSK_FULLSCREEN &&
             !isStreamWindowFullscreen(m_Window)) {
             // Ungrab if it's fullscreen only and we left fullscreen
             shouldGrab = false;
@@ -1079,19 +1065,10 @@ void SdlInputHandler::updateKeyboardGrabState()
 
 #ifdef Q_OS_WIN32
     if (Session::embedParentWindowId() != 0) {
-        // Keep the hook installed for the whole embedded session and let its
-        // per-event focus check decide, so a missed focus transition cannot
-        // leave Win keys to the local shell.
-        updateEmbeddedWin32KeyboardHook(m_CaptureSystemKeysMode != StreamingPreferences::CSK_OFF);
+        updateEmbeddedWin32KeyboardHook(shouldGrab && windowFocused);
     }
 #endif
 
-    if (shouldGrab != m_KeyboardCaptureActive) {
-        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "System key capture %s (embedded=%d, focused=%d, mode=%d)",
-                    shouldGrab ? "active" : "inactive", embedded ? 1 : 0,
-                    windowFocused ? 1 : 0, static_cast<int>(m_CaptureSystemKeysMode));
-    }
     m_KeyboardCaptureActive = shouldGrab;
 }
 
@@ -1105,15 +1082,6 @@ bool SdlInputHandler::isSystemKeyCaptureActive()
         return false;
     }
 
-#ifdef Q_OS_WIN32
-    // The embedded low-level hook only forwards events while the host-embedded
-    // child actually has focus, and SDL only receives keys in that state, so a
-    // live hook is itself proof that a Win key press belongs to the stream.
-    if (s_EmbedKeyboardHook.active) {
-        return true;
-    }
-#endif
-
     // NB: We used to check SDL_WINDOW_KEYBOARD_GRABBED here, but this isn't
     // always set when capture "fails" on SDL3, even though the user may have
     // configured the compositor to pass through system keys to us anyway.
@@ -1123,7 +1091,7 @@ bool SdlInputHandler::isSystemKeyCaptureActive()
     }
 
     if (m_CaptureSystemKeysMode == StreamingPreferences::CSK_FULLSCREEN &&
-        Session::embedParentWindowId() == 0 && !isStreamWindowFullscreen(m_Window)) {
+        !isStreamWindowFullscreen(m_Window)) {
         return false;
     }
 

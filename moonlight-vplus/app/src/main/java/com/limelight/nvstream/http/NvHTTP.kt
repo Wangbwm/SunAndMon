@@ -10,6 +10,7 @@ import java.io.StringReader
 import java.net.Inet4Address
 import java.net.InetAddress
 import java.net.Proxy
+import java.net.Socket
 import java.security.KeyManagementException
 import java.security.KeyStore
 import java.security.NoSuchAlgorithmException
@@ -31,8 +32,10 @@ import javax.net.ssl.HostnameVerifier
 import javax.net.ssl.HttpsURLConnection
 import javax.net.ssl.KeyManager
 import javax.net.ssl.SSLContext
+import javax.net.ssl.SSLException
 import javax.net.ssl.SSLHandshakeException
 import javax.net.ssl.SSLPeerUnverifiedException
+import javax.net.ssl.SSLSocketFactory
 import javax.net.ssl.TrustManager
 import javax.net.ssl.TrustManagerFactory
 import javax.net.ssl.X509KeyManager
@@ -273,7 +276,7 @@ class NvHTTP(
                 val pinnedCert = this@NvHTTP.serverCert
                 if (pinnedCert != null) {
                     if (certs.firstOrNull() != pinnedCert) {
-                        throw CertificateException("Certificate mismatch")
+                        throw PinnedHostCertificateException()
                     }
                     return
                 }
@@ -295,12 +298,10 @@ class NvHTTP(
             HttpsURLConnection.getDefaultHostnameVerifier().verify(hostname, session)
         }
 
-        val sc = createSslContext()
-
         httpClientLongConnectTimeout = OkHttpClient.Builder()
             .connectionPool(ConnectionPool(0, 1, TimeUnit.MILLISECONDS))
             .hostnameVerifier(hv)
-            .sslSocketFactory(sc.socketFactory, trustManager)
+            .sslSocketFactory(FreshContextSocketFactory { createSslContext().socketFactory }, trustManager)
             .readTimeout(timeoutConfig.readTimeoutMs.toLong(), TimeUnit.MILLISECONDS)
             .connectTimeout(timeoutConfig.connectTimeoutMs.toLong(), TimeUnit.MILLISECONDS)
             .proxy(Proxy.NO_PROXY)
@@ -499,17 +500,34 @@ class NvHTTP(
         return getComputerDetails(getServerInfo(likelyOnline))
     }
 
-    internal fun connectViaCenter(ticket: String, name: String): ComputerDetails {
+    internal class CenterEnrollmentException(val status: Int) : IOException("Host enrollment HTTP $status")
+
+    private class PinnedHostCertificateException : CertificateException("Pinned host certificate mismatch")
+
+    internal class CenterTlsException(val stage: Stage, val certificateMismatch: Boolean, cause: SSLException) :
+        IOException("Center host TLS failed at $stage (${cause.javaClass.simpleName})", cause) {
+        enum class Stage { SERVER_INFO, ENROLLMENT, VERIFY_PAIRING }
+    }
+
+    internal fun connectViaCenter(ticket: String, name: String, tunnelRoute: Boolean = false): ComputerDetails {
         check(serverCert != null && httpsPort in 1..65535)
         val base = getHttpsUrl(false)
-        val client = httpClientShortConnectTimeout.newBuilder()
+        val client = (if (tunnelRoute) httpClientLongConnectTimeout else httpClientShortConnectTimeout).newBuilder()
             .followRedirects(false)
             .followSslRedirects(false)
-            .callTimeout(3, TimeUnit.SECONDS)
+            .callTimeout(if (tunnelRoute) 8 else 3, TimeUnit.SECONDS)
             .build()
-        fun readAuthenticatedInfo(): String {
+
+        fun <T> atStage(stage: CenterTlsException.Stage, block: () -> T): T = try {
+            block()
+        } catch (e: SSLException) {
+            val causes = generateSequence<Throwable>(e) { it.cause }.take(12)
+            throw CenterTlsException(stage, causes.any { it is PinnedHostCertificateException }, e)
+        }
+
+        fun readAuthenticatedInfo(client: OkHttpClient, stage: CenterTlsException.Stage): String = atStage(stage) {
             val request = Request.Builder().url(getCompleteUrl(base, "serverinfo", null)).get().build()
-            return client.newCall(request).execute().use { response ->
+            client.newCall(request).execute().use { response ->
                 if (response.code != 200) throw HostHttpResponseException(response.code, response.message)
                 val xml = response.body.string()
                 getServerVersion(xml)
@@ -518,7 +536,7 @@ class NvHTTP(
         }
 
         val info = try {
-            readAuthenticatedInfo()
+            readAuthenticatedInfo(client, CenterTlsException.Stage.SERVER_INFO)
         } catch (e: HostHttpResponseException) {
             if (e.getErrorCode() != 401) throw e
             val request = Request.Builder().url(base.newBuilder().addPathSegment("sunandmon-pair").build())
@@ -526,10 +544,12 @@ class NvHTTP(
                 .header("X-SunAndMon-Name", name.filter { it in ' '..'~' }.take(100).ifBlank { "SunAndMon Android" })
                 .post(ByteArray(0).toRequestBody(null))
                 .build()
-            client.newCall(request).execute().use { response ->
-                if (response.code != 204) throw IOException("Host refused center pairing")
+            atStage(CenterTlsException.Stage.ENROLLMENT) {
+                client.newCall(request).execute().use { response ->
+                    if (response.code != 204) throw CenterEnrollmentException(response.code)
+                }
             }
-            readAuthenticatedInfo()
+            readAuthenticatedInfo(client, CenterTlsException.Stage.VERIFY_PAIRING)
         }
         lastServerInfoTrustedByCert = true
         lastPairStateTrusted = true
@@ -538,6 +558,37 @@ class NvHTTP(
                 throw IOException("Host pairing could not be verified")
             }
         }
+    }
+
+    // Sunshine answers a resumed TLS session with a fatal internal_error alert, which
+    // takes out the next connection on any context that has a cached session. Both
+    // JSSE and Conscrypt cache sessions per SSLContext and offer them automatically,
+    // so every socket gets a context with an empty session cache and always performs
+    // a full handshake.
+    private class FreshContextSocketFactory(
+        private val factoryProvider: () -> SSLSocketFactory
+    ) : SSLSocketFactory() {
+        override fun getDefaultCipherSuites() = factoryProvider().defaultCipherSuites
+        override fun getSupportedCipherSuites() = factoryProvider().supportedCipherSuites
+
+        override fun createSocket(s: Socket, host: String, port: Int, autoClose: Boolean): Socket =
+            factoryProvider().createSocket(s, host, port, autoClose)
+
+        override fun createSocket(host: String, port: Int): Socket =
+            factoryProvider().createSocket(host, port)
+
+        override fun createSocket(
+            host: String, port: Int, localHost: InetAddress, localPort: Int
+        ): Socket = factoryProvider().createSocket(host, port, localHost, localPort)
+
+        override fun createSocket(host: InetAddress, port: Int): Socket =
+            factoryProvider().createSocket(host, port)
+
+        override fun createSocket(
+            address: InetAddress, port: Int, localAddress: InetAddress, localPort: Int
+        ): Socket = factoryProvider().createSocket(address, port, localAddress, localPort)
+
+        override fun createSocket(): Socket = factoryProvider().createSocket()
     }
 
     private fun createSslContext(): SSLContext {

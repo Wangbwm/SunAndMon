@@ -16,17 +16,21 @@ import (
 )
 
 func configureAndroidCompatEnv() {
-	// Android stores system CA certificates in /system/etc/security/cacerts and /apex/com.android.conscrypt/cacerts
-	// instead of /etc/ssl/certs/ca-certificates.crt.
-	if os.Getenv("SSL_CERT_DIR") == "" {
-		if _, err := os.Stat("/etc/ssl/certs/ca-certificates.crt"); err != nil {
+	// Android 14+ stores system CA certificates in /apex/com.android.conscrypt/cacerts
+	// while older Android releases store them in /system/etc/security/cacerts.
+	// Ensure both directories are present in SSL_CERT_DIR even if androidbin's init()
+	// only set /system/etc/security/cacerts.
+	if _, err := os.Stat("/etc/ssl/certs/ca-certificates.crt"); err != nil {
+		cur := os.Getenv("SSL_CERT_DIR")
+		if cur == "" || !strings.Contains(cur, "/apex/com.android.conscrypt/cacerts") {
 			if _, err2 := os.Stat("/system/etc/security/cacerts"); err2 == nil {
-				_ = os.Setenv("SSL_CERT_DIR", "/system/etc/security/cacerts:/apex/com.android.conscrypt/cacerts")
+				_ = os.Setenv("SSL_CERT_DIR", "/apex/com.android.conscrypt/cacerts:/system/etc/security/cacerts")
 			}
 		}
 	}
 
-	// Android does not have /etc/resolv.conf, so pure-Go DNS resolution defaults to 127.0.0.1:53 and fails.
+	// Android does not have /etc/resolv.conf. Preserve androiddns's /dev/socket/dnsproxyd
+	// dialer if installed, and fall back to SUNANDMON_DNS + public DNS servers if needed.
 	dnsEnv := strings.TrimSpace(os.Getenv("SUNANDMON_DNS"))
 	_, resolvErr := os.Stat("/etc/resolv.conf")
 	if dnsEnv != "" || resolvErr != nil {
@@ -42,24 +46,28 @@ func configureAndroidCompatEnv() {
 			servers = append(servers, s)
 		}
 		servers = append(servers, "223.5.5.5:53", "119.29.29.29:53", "8.8.8.8:53", "1.1.1.1:53")
+		prevDial := net.DefaultResolver.Dial
 		dialer := &net.Dialer{Timeout: 2500 * time.Millisecond}
-		net.DefaultResolver = &net.Resolver{
-			PreferGo: true,
-			Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
-				proto := "udp4"
-				if strings.HasPrefix(network, "tcp") {
-					proto = "tcp4"
+		net.DefaultResolver.PreferGo = true
+		net.DefaultResolver.Dial = func(ctx context.Context, network, address string) (net.Conn, error) {
+			if prevDial != nil {
+				if conn, err := prevDial(ctx, network, address); err == nil {
+					return conn, nil
 				}
-				var lastErr error
-				for _, srv := range servers {
-					conn, err := dialer.DialContext(ctx, proto, srv)
-					if err == nil {
-						return conn, nil
-					}
-					lastErr = err
+			}
+			proto := "udp4"
+			if strings.HasPrefix(network, "tcp") {
+				proto = "tcp4"
+			}
+			var lastErr error
+			for _, srv := range servers {
+				conn, err := dialer.DialContext(ctx, proto, srv)
+				if err == nil {
+					return conn, nil
 				}
-				return nil, lastErr
-			},
+				lastErr = err
+			}
+			return nil, lastErr
 		}
 	}
 }

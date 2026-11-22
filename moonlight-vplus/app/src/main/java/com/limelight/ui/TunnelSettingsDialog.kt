@@ -17,6 +17,7 @@ import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import android.widget.Toast
 import androidx.core.content.ContextCompat
 import com.limelight.R
 import com.limelight.computers.AndroidTunnelManager
@@ -321,13 +322,30 @@ internal class TunnelSettingsDialog(
 
         tsAuthRow = column().apply {
             setPadding(0, dp(8), 0, 0)
-            addView(
+            val btnRow = row()
+            btnRow.addView(
                 pillButton(context.getString(R.string.center_ts_open_browser), primary = true) {
                     tunnel.openTailscaleAuthUrl(context)
-                }
+                },
+                LinearLayout.LayoutParams(0, -2, 1f).apply { marginEnd = dp(4) }
             )
+            btnRow.addView(
+                pillButton("复制授权链接", primary = false) {
+                    if (tunnel.copyTailscaleAuthUrl(context)) {
+                        Toast.makeText(context, "已复制授权链接", Toast.LENGTH_SHORT).show()
+                    }
+                },
+                LinearLayout.LayoutParams(0, -2, 1f).apply { marginStart = dp(4) }
+            )
+            addView(btnRow)
             tsAuthUrlLabel = label("", 11, color = muted).apply {
-                setPadding(0, dp(4), 0, 0)
+                setPadding(dp(8), dp(6), dp(8), dp(6))
+                setTextIsSelectable(true)
+                setOnClickListener {
+                    if (tunnel.copyTailscaleAuthUrl(context)) {
+                        Toast.makeText(context, "已复制授权链接", Toast.LENGTH_SHORT).show()
+                    }
+                }
             }
             addView(tsAuthUrlLabel)
         }

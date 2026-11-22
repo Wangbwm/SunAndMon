@@ -510,7 +510,7 @@ class NvHTTP(
         fun readAuthenticatedInfo(): String {
             val request = Request.Builder().url(getCompleteUrl(base, "serverinfo", null)).get().build()
             return client.newCall(request).execute().use { response ->
-                if (response.code != 200) throw IOException("Host returned HTTP ${response.code}")
+                if (response.code != 200) throw HostHttpResponseException(response.code, response.message)
                 val xml = response.body.string()
                 getServerVersion(xml)
                 xml

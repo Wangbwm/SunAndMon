@@ -1,5 +1,7 @@
 package com.limelight.computers
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.net.ConnectivityManager
@@ -107,6 +109,8 @@ internal class AndroidTunnelManager private constructor(context: Context) {
     @Volatile private var daemonToken: String = ""
     @Volatile private var daemonReady: Boolean = false
     @Volatile private var pendingStartTs: Boolean = false
+    @Volatile private var pendingAutoOpenAuthUrl: Boolean = false
+    @Volatile private var lastAutoOpenedAuthUrl: String = ""
 
     // EasyTier in-process userspace state & port forwards
     private val etLock = Any()
@@ -319,6 +323,8 @@ internal class AndroidTunnelManager private constructor(context: Context) {
         tsError = ""
         tsAuthUrl = ""
         pendingStartTs = true
+        pendingAutoOpenAuthUrl = useWebOAuth
+        if (useWebOAuth) lastAutoOpenedAuthUrl = ""
         notifyChanged()
 
         executor.execute {
@@ -328,6 +334,7 @@ internal class AndroidTunnelManager private constructor(context: Context) {
 
     fun stopTailscale() {
         pendingStartTs = false
+        pendingAutoOpenAuthUrl = false
         tsState = "stopped"
         tsVirtualIp = ""
         tsAuthUrl = ""
@@ -353,6 +360,17 @@ internal class AndroidTunnelManager private constructor(context: Context) {
             }
             context.startActivity(intent)
         }
+    }
+
+    fun copyTailscaleAuthUrl(context: Context): Boolean {
+        val url = tsAuthUrl.trim()
+        if (url.isEmpty()) return false
+        return runCatching {
+            val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                ?: return false
+            cm.setPrimaryClip(ClipData.newPlainText("Tailscale Auth URL", url))
+            true
+        }.getOrDefault(false)
     }
 
     fun saveAndConnectEasyTier(
@@ -737,6 +755,7 @@ internal class AndroidTunnelManager private constructor(context: Context) {
             env["SUNANDMON_TUNNEL_TOKEN"] = token
             env["HOME"] = workDir.absolutePath
             env["TMPDIR"] = appContext.cacheDir.absolutePath
+            env["SSL_CERT_DIR"] = "/apex/com.android.conscrypt/cacerts:/system/etc/security/cacerts"
             val dns = resolveActiveDnsServers()
             if (dns.isNotEmpty()) {
                 env["SUNANDMON_DNS"] = dns
@@ -843,6 +862,13 @@ internal class AndroidTunnelManager private constructor(context: Context) {
         tsAuthUrl = newAuth
         tsError = newErr
         tsPeersOnline = newPeers
+        if (newState == "connected") {
+            pendingAutoOpenAuthUrl = false
+        } else if (newAuth.isNotEmpty() && pendingAutoOpenAuthUrl && newAuth != lastAutoOpenedAuthUrl) {
+            pendingAutoOpenAuthUrl = false
+            lastAutoOpenedAuthUrl = newAuth
+            mainHandler.post { openTailscaleAuthUrl(appContext) }
+        }
         if (changed) notifyChanged()
     }
 

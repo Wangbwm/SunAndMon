@@ -12,11 +12,15 @@ import com.limelight.nvstream.http.NvHTTP
 import com.limelight.nvstream.http.NvApp
 import java.io.IOException
 import java.net.InetAddress
+import java.net.InetSocketAddress
 import java.net.Proxy
+import java.net.Socket
 import java.security.KeyStore
 import java.security.MessageDigest
 import java.security.cert.CertificateFactory
 import java.security.cert.X509Certificate
+import java.util.concurrent.Callable
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
@@ -127,9 +131,11 @@ internal class CenterDirectory(url: String, private val key: String, directIp: S
             }
         }
 
+        val tunnelAddressesLower = hostTunnels.map { it.second.lowercase() }.toSet()
         val directCandidates = mutableListOf<Pair<String, String>>()
         for (index in 0 until addresses.length()) {
             val address = addresses.getString(index)
+            if (address.lowercase() in tunnelAddressesLower) continue
             if (!(address.matches(Regex("[0-9.]+")) && address.contains('.') ||
                     address.matches(Regex("[a-fA-F0-9:.]+")) && address.contains(':'))) continue
             val ip = runCatching { InetAddress.getByName(address) }.getOrNull() ?: continue
@@ -156,7 +162,9 @@ internal class CenterDirectory(url: String, private val key: String, directIp: S
             orderedCandidates.addAll(tunnelCandidates)
         }
 
-        for ((address, routeLabel) in orderedCandidates) {
+        val candidatesToTry = filterReachableCandidates(orderedCandidates, httpsPort)
+
+        for ((address, routeLabel) in candidatesToTry) {
             val endpoint = ComputerDetails.AddressTuple(address, port)
             try {
                 val http = NvHTTP(endpoint, httpsPort, uniqueId, name, cert, crypto)
@@ -187,6 +195,33 @@ internal class CenterDirectory(url: String, private val key: String, directIp: S
             }
         }
         throw IOException("The host is unreachable")
+    }
+
+    private fun filterReachableCandidates(
+        candidates: List<Pair<String, String>>,
+        httpsPort: Int
+    ): List<Pair<String, String>> {
+        if (candidates.size <= 1) return candidates
+        val pool = Executors.newFixedThreadPool(candidates.size.coerceAtMost(8))
+        return try {
+            val futures = candidates.map { candidate ->
+                candidate to pool.submit(Callable {
+                    runCatching {
+                        Socket().use { sock ->
+                            sock.connect(InetSocketAddress(candidate.first, httpsPort), 1500)
+                            true
+                        }
+                    }.getOrDefault(false)
+                })
+            }
+            val reachable = futures.mapNotNull { (candidate, fut) ->
+                val ok = runCatching { fut.get(1800, TimeUnit.MILLISECONDS) }.getOrDefault(false)
+                if (ok) candidate else null
+            }
+            reachable.ifEmpty { candidates.take(3) }
+        } finally {
+            pool.shutdownNow()
+        }
     }
 
     private fun classifyDirectRoute(ip: InetAddress): String {

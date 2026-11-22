@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"tailscale.com/ipn"
 	"tailscale.com/tsnet"
 )
 
@@ -78,12 +79,31 @@ func (t *TailscaleProvider) Start(ctx context.Context, cfg Config) error {
 		}
 	}
 
+	captureLog := func(format string, args ...any) {
+		msg := fmt.Sprintf(format, args...)
+		if idx := strings.Index(msg, "or go to: "); idx >= 0 {
+			u := strings.TrimSpace(msg[idx+len("or go to: "):])
+			if fields := strings.Fields(u); len(fields) > 0 {
+				u = fields[0]
+			}
+			if strings.HasPrefix(u, "https://") || strings.HasPrefix(u, "http://") {
+				t.mu.Lock()
+				if t.state != "connected" {
+					t.authURL = u
+					t.state = "needs_auth"
+				}
+				t.mu.Unlock()
+			}
+		}
+	}
+
 	srv := &tsnet.Server{
 		Dir:        tsDir,
 		Hostname:   hostname,
 		ControlURL: strings.TrimSpace(cfg.ControlURL),
 		AuthKey:    strings.TrimSpace(cfg.AuthKey),
-		Logf:       func(string, ...any) {},
+		Logf:       captureLog,
+		UserLogf:   captureLog,
 	}
 	if err := srv.Start(); err != nil {
 		return fmt.Errorf("start tsnet: %w", err)
@@ -123,9 +143,34 @@ func (t *TailscaleProvider) pollStatus(ctx context.Context, srv *tsnet.Server) {
 	needInteractive := t.cfg.AuthKey == ""
 	t.mu.Unlock()
 
+	// Subscribe to IPN bus notifications so BrowseToURL is captured immediately.
+	go func() {
+		watcher, werr := lc.WatchIPNBus(ctx, ipn.NotifyInitialState)
+		if werr != nil {
+			return
+		}
+		defer watcher.Close()
+		for {
+			n, nerr := watcher.Next()
+			if nerr != nil {
+				return
+			}
+			if n.BrowseToURL != nil && *n.BrowseToURL != "" {
+				u := strings.TrimSpace(*n.BrowseToURL)
+				t.mu.Lock()
+				if t.state != "connected" {
+					t.authURL = u
+					t.state = "needs_auth"
+					t.lastErr = ""
+				}
+				t.mu.Unlock()
+			}
+		}
+	}()
+
 	ticker := time.NewTicker(800 * time.Millisecond)
 	defer ticker.Stop()
-	loginTriggered := false
+	var lastLoginTrigger time.Time
 
 	for {
 		st, err := lc.Status(ctx)
@@ -158,6 +203,10 @@ func (t *TailscaleProvider) pollStatus(ctx context.Context, srv *tsnet.Server) {
 
 			t.mu.Lock()
 			t.peersOnline = onlinePeers
+			if st.AuthURL != "" && st.BackendState != "Running" {
+				t.authURL = st.AuthURL
+			}
+			hasAuthURL := t.authURL != ""
 			switch st.BackendState {
 			case "Running":
 				t.state = "connected"
@@ -166,22 +215,27 @@ func (t *TailscaleProvider) pollStatus(ctx context.Context, srv *tsnet.Server) {
 				t.lastErr = ""
 			case "NeedsLogin":
 				t.state = "needs_auth"
-				if st.AuthURL != "" {
-					t.authURL = st.AuthURL
+				if hasAuthURL {
+					t.lastErr = ""
 				}
-				t.lastErr = ""
 			default:
 				if t.state != "connected" {
-					t.state = "starting"
+					if hasAuthURL {
+						t.state = "needs_auth"
+					} else {
+						t.state = "starting"
+					}
 				}
 			}
 			t.mu.Unlock()
 
-			if st.BackendState == "NeedsLogin" && st.AuthURL == "" && needInteractive && !loginTriggered {
-				loginTriggered = true
-				go func() {
-					_ = lc.StartLoginInteractive(ctx)
-				}()
+			if (st.BackendState == "NeedsLogin" || st.BackendState == "NoState") && !hasAuthURL && needInteractive {
+				if time.Since(lastLoginTrigger) >= 3200*time.Millisecond {
+					lastLoginTrigger = time.Now()
+					go func() {
+						_ = lc.StartLoginInteractive(ctx)
+					}()
+				}
 			}
 		}
 

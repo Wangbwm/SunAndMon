@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"os"
 	"runtime"
+	"strings"
 	"time"
 
 	_ "tailscale.com/feature/androidbin"
@@ -14,11 +15,21 @@ import (
 	"tailscale.com/net/netmon"
 )
 
+const androidDefaultCertDirs = "/apex/com.android.conscrypt/cacerts:/system/etc/security/cacerts"
+
 func init() {
 	if !isRunningOnAndroid() {
 		return
 	}
+	ensureAndroidCertDirs()
 	netmon.RegisterInterfaceGetter(androidSafeInterfaces)
+}
+
+func ensureAndroidCertDirs() {
+	cur := os.Getenv("SSL_CERT_DIR")
+	if cur == "" || !strings.Contains(cur, "/apex/com.android.conscrypt/cacerts") {
+		_ = os.Setenv("SSL_CERT_DIR", androidDefaultCertDirs)
+	}
 }
 
 func isRunningOnAndroid() bool {

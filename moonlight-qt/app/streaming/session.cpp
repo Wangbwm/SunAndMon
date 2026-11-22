@@ -98,6 +98,21 @@
 
 // Include SDL_syswm.h after Qt headers to avoid X11 macro conflicts on Linux
 #include <SDL_syswm.h>
+#ifdef None
+#undef None
+#endif
+#ifdef Status
+#undef Status
+#endif
+#ifdef Bool
+#undef Bool
+#endif
+#ifdef KeyPress
+#undef KeyPress
+#endif
+#ifdef KeyRelease
+#undef KeyRelease
+#endif
 
 namespace {
 

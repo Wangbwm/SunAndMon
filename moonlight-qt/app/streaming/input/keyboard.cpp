@@ -399,6 +399,7 @@ void SdlInputHandler::handleKeyEvent(SDL_KeyboardEvent* event)
                 break;
             case SDL_SCANCODE_LGUI:
                 if (!isSystemKeyCaptureActive()) {
+                    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "Dropping LGUI: system key capture inactive");
                     return;
                 }
                 keyCode = m_SwapWinAltKeys ? 0xA4 : 0x5B;
@@ -408,6 +409,7 @@ void SdlInputHandler::handleKeyEvent(SDL_KeyboardEvent* event)
                 break;
             case SDL_SCANCODE_RGUI:
                 if (!isSystemKeyCaptureActive()) {
+                    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "Dropping RGUI: system key capture inactive");
                     return;
                 }
                 keyCode = m_SwapWinAltKeys ? 0xA5 : 0x5C;

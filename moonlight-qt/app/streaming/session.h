@@ -174,6 +174,8 @@ public:
     // These route window-state operations through Qt only for the native
     // Wayland stream window. All other platforms retain SDL's behavior.
     bool isStreamingWindowFullscreen() const;
+    // Read by the embedded input handler (Linux branch) from the SDL thread.
+    bool isStreamingWindowFocused() const;
     bool usesQtWaylandStreamWindow() const;
     void minimizeStreamingWindow();
 
@@ -249,7 +251,6 @@ private:
     void hideQtOverlayMenu();
     void toggleQtOverlayMenu();
     bool isStreamingWindowVisible() const;
-    bool isStreamingWindowFocused() const;
     bool isStreamingWindowMinimized() const;
     void syncQtOverlayWindowsWithSdlWindowState();
     void ensureEmbeddedWindowAttached();

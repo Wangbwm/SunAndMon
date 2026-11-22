@@ -178,12 +178,44 @@ void SdlInputHandler::performSpecialKeyCombo(KeyCombo combo)
     }
 }
 
-void SdlInputHandler::handleKeyEvent(SDL_KeyboardEvent* event)
+#ifdef Q_OS_WIN32
+void SdlInputHandler::handleEmbeddedWinKey(SDL_Scancode scancode, bool pressed)
+{
+    if (scancode == SDL_SCANCODE_UNKNOWN) {
+        raiseAllKeys();
+        return;
+    }
+    const Uint16 modifier = scancode == SDL_SCANCODE_LGUI ? KMOD_LGUI :
+                            scancode == SDL_SCANCODE_RGUI ? KMOD_RGUI :
+                            scancode == SDL_SCANCODE_LSHIFT ? KMOD_LSHIFT : KMOD_RSHIFT;
+    if (pressed == ((m_EmbeddedWinModifiers & modifier) != 0) ||
+        (pressed && !isSystemKeyCaptureActive())) {
+        return;
+    }
+    if (pressed) {
+        m_EmbeddedWinModifiers |= modifier;
+    } else {
+        m_EmbeddedWinModifiers &= ~modifier;
+    }
+    SDL_KeyboardEvent event {};
+    event.state = pressed ? SDL_PRESSED : SDL_RELEASED;
+    event.keysym.scancode = scancode;
+    event.keysym.sym = SDL_GetKeyFromScancode(scancode);
+    event.keysym.mod = SDL_GetModState();
+    handleKeyEvent(&event, true);
+}
+#endif
+
+void SdlInputHandler::handleKeyEvent(SDL_KeyboardEvent* event, bool embeddedWinKey)
 {
     short keyCode;
     char modifiers;
     char flags;
     bool shouldNotConvertToScanCodeOnServer = false;
+    Uint16 keyModifiers = event->keysym.mod;
+#ifdef Q_OS_WIN32
+    keyModifiers |= m_EmbeddedWinModifiers;
+#endif
 
     if (event->repeat) {
         // Ignore repeat key down events
@@ -193,9 +225,9 @@ void SdlInputHandler::handleKeyEvent(SDL_KeyboardEvent* event)
 
     // Check for our special key combos
     if ((event->state == SDL_PRESSED) &&
-            (event->keysym.mod & KMOD_CTRL) &&
-            (event->keysym.mod & KMOD_ALT) &&
-            (event->keysym.mod & KMOD_SHIFT)) {
+            (keyModifiers & KMOD_CTRL) &&
+            (keyModifiers & KMOD_ALT) &&
+            (keyModifiers & KMOD_SHIFT)) {
         // First we test the SDLK combos for matches,
         // that way we ensure that latin keyboard users
         // can match to the key they see on their keyboards.
@@ -224,17 +256,17 @@ void SdlInputHandler::handleKeyEvent(SDL_KeyboardEvent* event)
 
     // Set modifier flags
     modifiers = 0;
-    if (event->keysym.mod & KMOD_CTRL) {
+    if (keyModifiers & KMOD_CTRL) {
         modifiers |= MODIFIER_CTRL;
     }
-    if (event->keysym.mod & KMOD_ALT) {
+    if (keyModifiers & KMOD_ALT) {
         modifiers |= m_SwapWinAltKeys ? MODIFIER_META : MODIFIER_ALT;
     }
-    if (event->keysym.mod & KMOD_SHIFT) {
+    if (keyModifiers & KMOD_SHIFT) {
         modifiers |= MODIFIER_SHIFT;
     }
-    if (event->keysym.mod & KMOD_GUI) {
-        if (isSystemKeyCaptureActive()) {
+    if (keyModifiers & KMOD_GUI) {
+        if (embeddedWinKey || isSystemKeyCaptureActive()) {
             modifiers |= m_SwapWinAltKeys ? MODIFIER_ALT : MODIFIER_META;
         }
     }
@@ -398,7 +430,7 @@ void SdlInputHandler::handleKeyEvent(SDL_KeyboardEvent* event)
                 modifiers |= MODIFIER_EXTENDED;
                 break;
             case SDL_SCANCODE_LGUI:
-                if (!isSystemKeyCaptureActive()) {
+                if (!embeddedWinKey && !isSystemKeyCaptureActive()) {
                     return;
                 }
                 keyCode = m_SwapWinAltKeys ? 0xA4 : 0x5B;
@@ -407,7 +439,7 @@ void SdlInputHandler::handleKeyEvent(SDL_KeyboardEvent* event)
                 }
                 break;
             case SDL_SCANCODE_RGUI:
-                if (!isSystemKeyCaptureActive()) {
+                if (!embeddedWinKey && !isSystemKeyCaptureActive()) {
                     return;
                 }
                 keyCode = m_SwapWinAltKeys ? 0xA5 : 0x5C;
@@ -551,6 +583,11 @@ void SdlInputHandler::handleKeyEvent(SDL_KeyboardEvent* event)
 void SdlInputHandler::raiseAllKeys(bool clearLocalKeys, bool includeForwardedKeys,
                                    bool clearForwardedKeys)
 {
+#ifdef Q_OS_WIN32
+    if (clearLocalKeys) {
+        m_EmbeddedWinModifiers = KMOD_NONE;
+    }
+#endif
     QSet<uint32_t> pendingKeys = m_KeysDown;
     if (includeForwardedKeys) {
         pendingKeys.unite(m_ForwardedKeys);

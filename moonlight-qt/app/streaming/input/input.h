@@ -161,7 +161,11 @@ public:
     void setWaylandWindowCoordinateMetrics(WaylandWindowMetrics::CoordinateMetrics metrics);
 #endif
 
-    void handleKeyEvent(SDL_KeyboardEvent* event);
+    void handleKeyEvent(SDL_KeyboardEvent* event, bool embeddedWinKey = false);
+#ifdef Q_OS_WIN32
+    static constexpr unsigned int EmbeddedWinKeyMessage = 0x8053; // WM_APP + 0x53
+    void handleEmbeddedWinKey(SDL_Scancode scancode, bool pressed);
+#endif
 
     void handleMouseButtonEvent(SDL_MouseButtonEvent* event);
 
@@ -459,6 +463,9 @@ private:
     int m_GamepadMask;
     GamepadState m_GamepadState[MAX_GAMEPADS];
     QSet<uint32_t> m_KeysDown;
+#ifdef Q_OS_WIN32
+    Uint16 m_EmbeddedWinModifiers = KMOD_NONE;
+#endif
     QSet<uint32_t> m_ForwardedKeys;
     bool m_FakeMouseCaptureActive;
     bool m_KeyboardCaptureActive;

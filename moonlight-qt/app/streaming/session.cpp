@@ -69,6 +69,7 @@
 #define SDL_CODE_APPLY_STREAM_SETTINGS 110
 #endif
 #define SDL_CODE_EMBED_COMMAND 111
+#define SDL_CODE_EMBED_WIN_KEY 112
 
 #include <openssl/rand.h>
 
@@ -212,6 +213,19 @@ static LRESULT CALLBACK embedChildSubclassProc(HWND hwnd, UINT message,
 {
     HWND parentHwnd = reinterpret_cast<HWND>(refData);
     switch (message) {
+    case SdlInputHandler::EmbeddedWinKeyMessage:
+    {
+        if (wParam == SDL_SCANCODE_UNKNOWN || wParam == SDL_SCANCODE_LGUI || wParam == SDL_SCANCODE_RGUI ||
+            wParam == SDL_SCANCODE_LSHIFT || wParam == SDL_SCANCODE_RSHIFT) {
+            SDL_Event ev {};
+            ev.type = SDL_USEREVENT;
+            ev.user.code = SDL_CODE_EMBED_WIN_KEY;
+            ev.user.data1 = reinterpret_cast<void*>(wParam);
+            ev.user.data2 = reinterpret_cast<void*>(lParam);
+            SDL_PushEvent(&ev);
+        }
+        return 0;
+    }
     case WM_MOUSEACTIVATE:
         focusEmbeddedWin32Child(hwnd, parentHwnd);
         return MA_ACTIVATE;
@@ -4473,6 +4487,14 @@ void Session::handleSdlUserEvent(const SDL_UserEvent& event)
         // The actual Qt processing happens after SDL dispatch below.
         // Keeping this event side-effect free also coalesces bursts of
         // native button messages without re-entering Qt from platform code.
+        break;
+#endif
+#ifdef Q_OS_WIN32
+    case SDL_CODE_EMBED_WIN_KEY:
+        if (m_InputHandler != nullptr) {
+            m_InputHandler->handleEmbeddedWinKey(
+                static_cast<SDL_Scancode>(reinterpret_cast<quintptr>(event.data1)), event.data2 != nullptr);
+        }
         break;
 #endif
     case SDL_CODE_EMBED_COMMAND: {

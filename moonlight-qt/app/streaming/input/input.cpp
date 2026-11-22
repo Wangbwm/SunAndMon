@@ -22,6 +22,7 @@
 #ifdef Q_OS_WIN32
 #include <Windows.h>
 #include <Imm.h>
+#include <bitset>
 #pragma comment(lib, "imm32.lib")
 #endif
 
@@ -85,6 +86,7 @@ struct EmbedKeyboardHookState {
     HWND childHwnd = nullptr;
     HWND parentHwnd = nullptr;
     bool active = false;
+    std::bitset<256> winChordKeys;
 };
 
 static EmbedKeyboardHookState s_EmbedKeyboardHook;
@@ -106,11 +108,39 @@ static LRESULT CALLBACK embedKeyboardHookProc(int nCode, WPARAM wParam, LPARAM l
             const DWORD vk = hookData->vkCode;
             const bool altDown = (hookData->flags & LLKHF_ALTDOWN) != 0;
             const bool ctrlDown = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+            const bool isKeyUp = (wParam == WM_KEYUP || wParam == WM_SYSKEYUP);
+            const bool isWinKey = vk == VK_LWIN || vk == VK_RWIN;
+            const bool directModifier = isWinKey || vk == VK_LSHIFT || vk == VK_RSHIFT;
+            auto& winChordKeys = s_EmbedKeyboardHook.winChordKeys;
+            const bool winHeld = winChordKeys[VK_LWIN] || winChordKeys[VK_RWIN];
+            bool winChord = vk < winChordKeys.size() &&
+                (winChordKeys[vk] || (!isKeyUp && (isWinKey || winHeld)));
+            if (winChord) {
+                GUITHREADINFO focusInfo {};
+                focusInfo.cbSize = sizeof(focusInfo);
+                const HWND child = s_EmbedKeyboardHook.childHwnd;
+                winChord = GetFocus() == child ||
+                    (GetGUIThreadInfo(0, &focusInfo) && focusInfo.hwndFocus == child);
+                if (!winChord && winChordKeys.any()) {
+                    PostMessageW(child, SdlInputHandler::EmbeddedWinKeyMessage, 0, 0);
+                    winChordKeys.reset();
+                }
+            }
+            if (directModifier && winChord) {
+                // SDL reconciles posted Win and Shift messages with the OS
+                // state. Queue them separately while forwarding a Win chord.
+                const auto scan = vk == VK_LWIN ? SDL_SCANCODE_LGUI :
+                                  vk == VK_RWIN ? SDL_SCANCODE_RGUI :
+                                  vk == VK_LSHIFT ? SDL_SCANCODE_LSHIFT : SDL_SCANCODE_RSHIFT;
+                if (PostMessageW(s_EmbedKeyboardHook.childHwnd,
+                                 SdlInputHandler::EmbeddedWinKeyMessage, scan, !isKeyUp)) {
+                    winChordKeys.set(vk, !isKeyUp);
+                    return 1;
+                }
+            }
 
-            bool shouldIntercept = false;
+            bool shouldIntercept = winChord && !directModifier;
             switch (vk) {
-            case VK_LWIN:
-            case VK_RWIN:
             case VK_APPS:
             case VK_SNAPSHOT:
                 shouldIntercept = true;
@@ -118,17 +148,16 @@ static LRESULT CALLBACK embedKeyboardHookProc(int nCode, WPARAM wParam, LPARAM l
             case VK_TAB:
             case VK_SPACE:
             case VK_F4:
-                shouldIntercept = altDown;
+                shouldIntercept = shouldIntercept || altDown;
                 break;
             case VK_ESCAPE:
-                shouldIntercept = altDown || ctrlDown;
+                shouldIntercept = shouldIntercept || altDown || ctrlDown;
                 break;
             default:
                 break;
             }
 
             if (shouldIntercept) {
-                const bool isKeyUp = (wParam == WM_KEYUP || wParam == WM_SYSKEYUP);
                 LPARAM msgLParam = 1;
                 msgLParam |= static_cast<LPARAM>(hookData->scanCode & 0xFF) << 16;
                 if (hookData->flags & LLKHF_EXTENDED) {
@@ -141,9 +170,13 @@ static LRESULT CALLBACK embedKeyboardHookProc(int nCode, WPARAM wParam, LPARAM l
                     msgLParam |= (1L << 30);
                     msgLParam |= (1L << 31);
                 }
-                PostMessageW(s_EmbedKeyboardHook.childHwnd, static_cast<UINT>(wParam),
-                             static_cast<WPARAM>(vk), msgLParam);
-                return 1;
+                if (PostMessageW(s_EmbedKeyboardHook.childHwnd, static_cast<UINT>(wParam),
+                                 static_cast<WPARAM>(vk), msgLParam)) {
+                    if (winChord) {
+                        winChordKeys.set(vk, !isKeyUp);
+                    }
+                    return 1;
+                }
             }
         }
     }
@@ -905,6 +938,9 @@ void SdlInputHandler::updateRemoteCursor(const RemoteCursorUpdate& update)
 
 void SdlInputHandler::notifyFocusLost()
 {
+#ifdef Q_OS_WIN32
+    s_EmbedKeyboardHook.winChordKeys.reset();
+#endif
     Uint32 windowFlags = SDL_GetWindowFlags(m_Window);
 
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
@@ -972,6 +1008,10 @@ void SdlInputHandler::updateEmbeddedWin32KeyboardHook(bool enable)
         if (s_EmbedKeyboardHook.hook != nullptr) {
             UnhookWindowsHookEx(s_EmbedKeyboardHook.hook);
             s_EmbedKeyboardHook.hook = nullptr;
+        }
+        if (s_EmbedKeyboardHook.winChordKeys.any() || m_EmbeddedWinModifiers != KMOD_NONE) {
+            s_EmbedKeyboardHook.winChordKeys.reset();
+            raiseAllKeys();
         }
         return;
     }

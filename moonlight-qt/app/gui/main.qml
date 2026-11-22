@@ -468,6 +468,18 @@ ApplicationWindow {
 
         // Poll for gamepad input only when the window is in focus and not streaming in a tab
         SdlGamepadKeyNavigation.notifyWindowFocus(visible && active && !StreamTabManager.streamTabActive)
+
+        if (!window.embeddedChildMode && StreamTabManager.hasTabs) {
+            StreamTabManager.notifyHostWindowVisibilityChanged(
+                visible && visibility !== Window.Minimized && visibility !== Window.Hidden)
+        }
+    }
+
+    onVisibilityChanged: {
+        if (!window.embeddedChildMode && StreamTabManager.hasTabs) {
+            StreamTabManager.notifyHostWindowVisibilityChanged(
+                visible && visibility !== Window.Minimized && visibility !== Window.Hidden)
+        }
     }
 
     onActiveChanged: {

@@ -32,6 +32,7 @@ private:
     static void ffNoopFree(void *opaque, uint8_t *data);
 
     int m_VideoFormat;
+    bool m_IgnoreAspectRatio = false;
     SDL_Renderer* m_Renderer;
     SDL_Texture* m_Texture;
     SDL_Texture* m_OverlayTextures[Overlay::OverlayMax];

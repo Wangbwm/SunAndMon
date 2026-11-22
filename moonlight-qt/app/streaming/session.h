@@ -526,6 +526,7 @@ private:
     static Session* s_ActiveSession;
     static QSemaphore s_ActiveSessionSemaphore;
     bool m_EmbedVisible = false;
+    bool m_EmbedHostHidden = false;
     QRect m_EmbedCurrentRect;
     QSize m_LastNotifiedEmbedSize;
     quintptr m_EmbedSubclassedHwnd = 0;

@@ -537,19 +537,21 @@ bool D3D11VARenderer::initialize(PDECODER_PARAMETERS params)
     m_OutputTexture.left = 0;
     m_OutputTexture.top = 0;
 
-    float ratioWidth = static_cast<float>(m_DisplayWidth) / static_cast<float>(m_DecoderParams.width);
-    float ratioHeight = static_cast<float>(m_DisplayHeight) / static_cast<float>(m_DecoderParams.height);
+    if (!m_DecoderParams.ignoreAspectRatio) {
+        float ratioWidth = static_cast<float>(m_DisplayWidth) / static_cast<float>(m_DecoderParams.width);
+        float ratioHeight = static_cast<float>(m_DisplayHeight) / static_cast<float>(m_DecoderParams.height);
 
-    if (ratioHeight < ratioWidth) {
-        m_OutputTexture.width = static_cast<int>(std::floor(m_DecoderParams.width * ratioHeight));
-        m_OutputTexture.width = m_OutputTexture.width & ~1;
-        m_OutputTexture.left = static_cast<int>(std::floor(abs(m_DisplayWidth - m_OutputTexture.width) / 2));
-        m_OutputTexture.left = m_OutputTexture.left & ~1;
-    } else if (ratioWidth < ratioHeight) {
-        m_OutputTexture.height = static_cast<int>(std::floor(m_DecoderParams.height * ratioWidth));
-        m_OutputTexture.height = m_OutputTexture.height & ~1;
-        m_OutputTexture.top = static_cast<int>(std::floor(abs(m_DisplayHeight - m_OutputTexture.height) / 2));
-        m_OutputTexture.top = m_OutputTexture.top & ~1;
+        if (ratioHeight < ratioWidth) {
+            m_OutputTexture.width = static_cast<int>(std::floor(m_DecoderParams.width * ratioHeight));
+            m_OutputTexture.width = m_OutputTexture.width & ~1;
+            m_OutputTexture.left = static_cast<int>(std::floor(abs(m_DisplayWidth - m_OutputTexture.width) / 2));
+            m_OutputTexture.left = m_OutputTexture.left & ~1;
+        } else if (ratioWidth < ratioHeight) {
+            m_OutputTexture.height = static_cast<int>(std::floor(m_DecoderParams.height * ratioWidth));
+            m_OutputTexture.height = m_OutputTexture.height & ~1;
+            m_OutputTexture.top = static_cast<int>(std::floor(abs(m_DisplayHeight - m_OutputTexture.height) / 2));
+            m_OutputTexture.top = m_OutputTexture.top & ~1;
+        }
     }
 
     hr = CreateDXGIFactory2(
@@ -1008,7 +1010,7 @@ void D3D11VARenderer::renderOverlay(Overlay::OverlayType type)
 void D3D11VARenderer::bindVideoVertexBuffer(bool frameChanged, AVFrame* frame)
 {
     if (frameChanged || !m_VideoVertexBuffer) {
-        // Scale video to the window size while preserving aspect ratio
+        // Scale video to the window size (preserving aspect ratio unless stretch presentation is enabled)
         SDL_Rect src, dst;
         src.x = src.y = 0;
         src.w = frame->width;
@@ -1016,7 +1018,9 @@ void D3D11VARenderer::bindVideoVertexBuffer(bool frameChanged, AVFrame* frame)
         dst.x = dst.y = 0;
         dst.w = m_DisplayWidth;
         dst.h = m_DisplayHeight;
-        StreamUtils::scaleSourceToDestinationSurface(&src, &dst);
+        if (!m_DecoderParams.ignoreAspectRatio) {
+            StreamUtils::scaleSourceToDestinationSurface(&src, &dst);
+        }
 
         // Convert screen space to normalized device coordinates
         SDL_FRect renderRect;

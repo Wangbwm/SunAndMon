@@ -41,6 +41,7 @@ public:
     Q_INVOKABLE void toggleActiveMenu();
     Q_INVOKABLE void notifyHostWindowMoved();
     Q_INVOKABLE void notifyHostWindowFocusChanged(bool active);
+    Q_INVOKABLE void notifyHostWindowVisibilityChanged(bool hostVisible);
 
 signals:
     void changed();

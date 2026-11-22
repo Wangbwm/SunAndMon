@@ -585,6 +585,8 @@ bool EGLRenderer::initialize(PDECODER_PARAMETERS params)
     // the Wayland viewport can be stale when using Super+Left/Right/Up
     // to resize the window. This seems to happen significantly more often
     // with vsync enabled, so this also mitigates that problem too.
+    m_IgnoreAspectRatio = params->ignoreAspectRatio;
+
     if (params->enableVsync
 #ifdef SDL_VIDEO_DRIVER_WAYLAND
             && info.subsystem != SDL_SYSWM_WAYLAND
@@ -811,7 +813,9 @@ void EGLRenderer::renderFrame(AVFrame* frame)
     src.h = frame->height;
     dst.w = drawableWidth;
     dst.h = drawableHeight;
-    StreamUtils::scaleSourceToDestinationSurface(&src, &dst);
+    if (!m_IgnoreAspectRatio) {
+        StreamUtils::scaleSourceToDestinationSurface(&src, &dst);
+    }
     glViewport(dst.x, dst.y, dst.w, dst.h);
 
     glUseProgram(m_ShaderProgram);

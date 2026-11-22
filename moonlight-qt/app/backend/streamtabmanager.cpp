@@ -562,3 +562,31 @@ void StreamTabManager::notifyHostWindowFocusChanged(bool active)
         });
     }
 }
+
+void StreamTabManager::notifyHostWindowVisibilityChanged(bool hostVisible)
+{
+    if (!hostVisible) {
+        for (auto& tab : m_Tabs) {
+            if (tab.embedded && tab.embeddedReady) {
+                sendCommand(tab, QByteArrayLiteral("HIDE_OVERLAY\n"));
+            }
+        }
+        return;
+    }
+    const QString tabId = m_ActiveTabId;
+    if (tabId.isEmpty()) {
+        return;
+    }
+    QTimer::singleShot(50, this, [this, tabId] {
+        if (m_ActiveTabId != tabId) {
+            return;
+        }
+        const int idx = indexOfTab(tabId);
+        if (idx >= 0 && m_Tabs[idx].embedded && m_Tabs[idx].embeddedReady) {
+            sendCommand(m_Tabs[idx], QByteArrayLiteral("SYNC_OVERLAY\n"));
+            if (m_HostWindow && m_HostWindow->isActive()) {
+                sendCommand(m_Tabs[idx], QByteArrayLiteral("FOCUS\n"));
+            }
+        }
+    });
+}

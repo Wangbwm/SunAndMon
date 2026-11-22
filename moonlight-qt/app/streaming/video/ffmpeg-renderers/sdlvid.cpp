@@ -142,6 +142,8 @@ bool SdlRenderer::initialize(PDECODER_PARAMETERS params)
         return false;
     }
 
+    m_IgnoreAspectRatio = params->ignoreAspectRatio;
+
     // Don't create a renderer or pump events for test-only
     // renderers. Test-only renderers might be created on
     // a non-main thread where interaction with the SDL
@@ -573,7 +575,9 @@ ReadbackRetry:
     src.h = frame->height;
     dst.x = dst.y = 0;
     SDL_GetRendererOutputSize(m_Renderer, &dst.w, &dst.h);
-    StreamUtils::scaleSourceToDestinationSurface(&src, &dst);
+    if (!m_IgnoreAspectRatio) {
+        StreamUtils::scaleSourceToDestinationSurface(&src, &dst);
+    }
 
     // Ensure the viewport is set to the desired video region
     SDL_RenderSetViewport(m_Renderer, &dst);

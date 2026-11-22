@@ -122,7 +122,7 @@ quintptr s_EmbedParentWinId = 0;
 QRect s_EmbedInitialRect;
 
 struct EmbedCommand {
-    enum Type { Resize, Show, Hide, Focus, SyncOverlay, ToggleMenu, Quit };
+    enum Type { Resize, Show, Hide, Focus, SyncOverlay, HideOverlay, ToggleMenu, Quit };
     Type type = Quit;
     int x = 0, y = 0, w = 0, h = 0;
 };
@@ -263,6 +263,8 @@ static void startEmbedStdinWatcher()
                 cmd->type = EmbedCommand::Focus;
             } else if (line == "SYNC_OVERLAY") {
                 cmd->type = EmbedCommand::SyncOverlay;
+            } else if (line == "HIDE_OVERLAY") {
+                cmd->type = EmbedCommand::HideOverlay;
             } else if (line == "TOGGLE_MENU") {
                 cmd->type = EmbedCommand::ToggleMenu;
             } else if (line == "QUIT") {
@@ -3155,7 +3157,7 @@ bool Session::isStreamingWindowVisible() const
     }
 
     if (s_EmbedParentWinId != 0) {
-        if (!m_EmbedVisible) {
+        if (!m_EmbedVisible || m_EmbedHostHidden) {
             return false;
         }
 #ifdef Q_OS_WIN32
@@ -4435,6 +4437,7 @@ void Session::handleSdlUserEvent(const SDL_UserEvent& event)
         }
         if (cmd->type == EmbedCommand::Show) {
             m_EmbedVisible = true;
+            m_EmbedHostHidden = false;
             ensureEmbeddedWindowAttached();
             SDL_ShowWindow(m_Window);
 #ifdef Q_OS_WIN32
@@ -4489,6 +4492,7 @@ void Session::handleSdlUserEvent(const SDL_UserEvent& event)
             break;
         }
         if (cmd->type == EmbedCommand::Focus) {
+            m_EmbedHostHidden = false;
             if (m_EmbedVisible) {
                 focusEmbeddedWindow();
                 syncQtOverlayWindowsWithSdlWindowState();
@@ -4496,7 +4500,21 @@ void Session::handleSdlUserEvent(const SDL_UserEvent& event)
             break;
         }
         if (cmd->type == EmbedCommand::SyncOverlay) {
+            m_EmbedHostHidden = false;
             syncQtOverlayWindowsWithSdlWindowState();
+            break;
+        }
+        if (cmd->type == EmbedCommand::HideOverlay) {
+            m_EmbedHostHidden = true;
+            if (m_MenuPanel && m_MenuPanel->isMenuVisible()) {
+                m_MenuPanel->closeMenu();
+            }
+            if (m_MenuButton) {
+                m_MenuButton->hideButton();
+            }
+            if (m_Toast) {
+                m_Toast->dismissImmediately();
+            }
             break;
         }
         if (cmd->type == EmbedCommand::ToggleMenu) {
@@ -6011,9 +6029,29 @@ void Session::exec()
         }
     };
 
+    constexpr Uint32 EMBED_OVERLAY_GUARD_INTERVAL_MS = 200;
+    Uint32 lastEmbedOverlayGuardTicks = 0;
+    bool lastEmbedOverlayAllowed = false;
+    auto processEmbeddedHostOverlayGuard = [this, embedMode, &lastEmbedOverlayGuardTicks, &lastEmbedOverlayAllowed]() {
+        if (!embedMode || !m_EmbedVisible) {
+            return;
+        }
+        const Uint32 now = SDL_GetTicks();
+        if (now - lastEmbedOverlayGuardTicks < EMBED_OVERLAY_GUARD_INTERVAL_MS) {
+            return;
+        }
+        lastEmbedOverlayGuardTicks = now;
+        const bool allowed = isStreamingWindowVisible() && isStreamingWindowFocused();
+        if (allowed != lastEmbedOverlayAllowed) {
+            lastEmbedOverlayAllowed = allowed;
+            syncQtOverlayWindowsWithSdlWindowState();
+        }
+    };
+
     SDL_Event event;
     for (;;) {
         hideGuiWindowWhenSettled(false);
+        processEmbeddedHostOverlayGuard();
         processSunshineAbrFeedback();
 #ifdef Q_OS_WIN32
         processClientSdrWhiteUpdate();
@@ -6037,7 +6075,7 @@ void Session::exec()
         // NB: This behavior was introduced in SDL 2.0.16, but had a few critical
         // issues that could cause indefinite timeouts, delayed joystick detection,
         // and other problems.
-        int waitTimeoutMs = (m_ClipboardHelper != nullptr && m_ClipboardHelper->isRunning()) ? 100 : 1000;
+        int waitTimeoutMs = (m_ClipboardHelper != nullptr && m_ClipboardHelper->isRunning()) ? 100 : (embedMode ? 200 : 1000);
         if (qtUiNeedsEventProcessing()) {
             waitTimeoutMs = qMin(waitTimeoutMs, static_cast<int>(QT_UI_EVENT_PUMP_INTERVAL_MS));
         }

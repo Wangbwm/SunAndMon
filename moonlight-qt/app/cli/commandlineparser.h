@@ -3,6 +3,7 @@
 #include "settings/streamingpreferences.h"
 
 #include <QMap>
+#include <QRect>
 #include <QString>
 
 class GlobalCommandLineParser
@@ -24,14 +25,18 @@ public:
     // True when this process was started with --disable-ui-gamepad.
     bool disableGamepadUiNavigation() const;
 
-    // Optional center device auto-connect (used for multi-window streaming).
+    // Optional center device auto-connect (used for multi-window / tabbed streaming).
     QString centerConnectDeviceId() const;
     QString centerConnectAction() const;
+    quintptr embedParentWindowId() const;
+    QRect embedInitialRect() const;
 
 private:
     bool m_DisableGamepadUiNavigation;
     QString m_CenterConnectDeviceId;
     QString m_CenterConnectAction;
+    quintptr m_EmbedParentWindowId = 0;
+    QRect m_EmbedInitialRect;
 };
 
 class QuitCommandLineParser

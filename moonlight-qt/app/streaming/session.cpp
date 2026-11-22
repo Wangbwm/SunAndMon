@@ -66,6 +66,7 @@
 #define SDL_CODE_PROCESS_QT_OVERLAY_EVENTS 109
 #define SDL_CODE_APPLY_STREAM_SETTINGS 110
 #endif
+#define SDL_CODE_EMBED_COMMAND 111
 
 #include <openssl/rand.h>
 
@@ -92,8 +93,82 @@
 
 #include <utility>
 #include <vector>
+#include <cstdio>
+#include <thread>
+
+// Include SDL_syswm.h after Qt headers to avoid X11 macro conflicts on Linux
+#include <SDL_syswm.h>
 
 namespace {
+
+quintptr s_EmbedParentWinId = 0;
+QRect s_EmbedInitialRect;
+
+struct EmbedCommand {
+    enum Type { Resize, Show, Hide, Quit };
+    Type type = Quit;
+    int x = 0, y = 0, w = 0, h = 0;
+};
+
+static void startEmbedStdinWatcher()
+{
+    static std::atomic<bool> started{false};
+    if (started.exchange(true)) {
+        return;
+    }
+    std::thread([] {
+        char buf[256];
+        while (std::fgets(buf, sizeof(buf), stdin) != nullptr) {
+            QByteArray line = QByteArray(buf).trimmed();
+            if (line.isEmpty()) {
+                continue;
+            }
+            auto* cmd = new EmbedCommand();
+            if (line.startsWith("RESIZE ")) {
+                const auto parts = line.mid(7).split(' ');
+                if (parts.size() == 4) {
+                    cmd->type = EmbedCommand::Resize;
+                    cmd->x = parts[0].toInt();
+                    cmd->y = parts[1].toInt();
+                    cmd->w = parts[2].toInt();
+                    cmd->h = parts[3].toInt();
+                } else {
+                    delete cmd;
+                    continue;
+                }
+            } else if (line == "SHOW") {
+                cmd->type = EmbedCommand::Show;
+            } else if (line == "HIDE") {
+                cmd->type = EmbedCommand::Hide;
+            } else if (line == "QUIT") {
+                cmd->type = EmbedCommand::Quit;
+            } else {
+                delete cmd;
+                continue;
+            }
+            SDL_Event ev = {};
+            ev.type = SDL_USEREVENT;
+            ev.user.code = SDL_CODE_EMBED_COMMAND;
+            ev.user.data1 = cmd;
+            if (SDL_PushEvent(&ev) < 0) {
+                delete cmd;
+            }
+            if (cmd->type == EmbedCommand::Quit) {
+                return;
+            }
+        }
+        // Parent closed stdin or crashed -> exit cleanly without leaving orphan stream process
+        auto* quitCmd = new EmbedCommand();
+        quitCmd->type = EmbedCommand::Quit;
+        SDL_Event ev = {};
+        ev.type = SDL_USEREVENT;
+        ev.user.code = SDL_CODE_EMBED_COMMAND;
+        ev.user.data1 = quitCmd;
+        if (SDL_PushEvent(&ev) < 0) {
+            delete quitCmd;
+        }
+    }).detach();
+}
 
 int SDLCALL keepNonRumbleEvent(void*, SDL_Event* event)
 {
@@ -226,6 +301,36 @@ QRect qtOverlayGeometryForSdlWindow(SDL_Window* window)
     int x, y, width, height;
     SDL_GetWindowPosition(window, &x, &y);
     SDL_GetWindowSize(window, &width, &height);
+#ifdef Q_OS_WIN32
+    if (Session::embedParentWindowId() != 0) {
+        SDL_SysWMinfo wmInfo;
+        SDL_VERSION(&wmInfo.version);
+        if (SDL_GetWindowWMInfo(window, &wmInfo) && wmInfo.subsystem == SDL_SYSWM_WINDOWS) {
+            RECT rc {};
+            if (GetWindowRect(wmInfo.info.win.window, &rc)) {
+                x = rc.left;
+                y = rc.top;
+                width = rc.right - rc.left;
+                height = rc.bottom - rc.top;
+            }
+        }
+    }
+#elif defined(Q_OS_LINUX)
+    if (Session::embedParentWindowId() != 0) {
+        SDL_SysWMinfo wmInfo;
+        SDL_VERSION(&wmInfo.version);
+        if (SDL_GetWindowWMInfo(window, &wmInfo) && wmInfo.subsystem == SDL_SYSWM_X11 && wmInfo.info.x11.display) {
+            Window childRet = 0;
+            int rootX = 0, rootY = 0;
+            if (XTranslateCoordinates(wmInfo.info.x11.display, wmInfo.info.x11.window,
+                                      DefaultRootWindow(wmInfo.info.x11.display),
+                                      0, 0, &rootX, &rootY, &childRet)) {
+                x = rootX;
+                y = rootY;
+            }
+        }
+    }
+#endif
     if (width <= 0 || height <= 0) {
         return {};
     }
@@ -2595,8 +2700,41 @@ void Session::updateOptimalWindowDisplayMode()
     SDL_SetWindowDisplayMode(m_Window, &bestMode);
 }
 
+void Session::setEmbedConfig(quintptr parentWinId, const QRect& initialRect)
+{
+    s_EmbedParentWinId = parentWinId;
+    s_EmbedInitialRect = initialRect;
+}
+
+quintptr Session::embedParentWindowId()
+{
+    return s_EmbedParentWinId;
+}
+
+QRect Session::embedInitialRect()
+{
+    return s_EmbedInitialRect;
+}
+
+void Session::emitEmbedLine(const QByteArray& line)
+{
+    if (s_EmbedParentWinId == 0 || line.isEmpty()) {
+        return;
+    }
+    QByteArray out = line;
+    out.replace('\r', ' ');
+    out.replace('\n', ' ');
+    out.append('\n');
+    std::fwrite(out.constData(), 1, static_cast<size_t>(out.size()), stdout);
+    std::fflush(stdout);
+}
+
 void Session::toggleFullscreen()
 {
+    if (s_EmbedParentWinId != 0) {
+        emitEmbedLine(QByteArrayLiteral("TAB_TOGGLE_FULLSCREEN"));
+        return;
+    }
     bool fullScreen = !isStreamingWindowFullscreen();
 
 #if defined(Q_OS_WIN32) || defined(Q_OS_DARWIN)
@@ -2976,6 +3114,11 @@ void Session::dispatchQtMenuAction(OverlayMenuPanel::MenuAction action)
         combo = SdlInputHandler::KeyComboQuitAndExit;
         break;
     case OverlayMenuPanel::MenuAction::ToggleFullScreen:
+        if (s_EmbedParentWinId != 0) {
+            m_WasCapturedBeforeMenu = false;
+            emitEmbedLine(QByteArrayLiteral("TAB_TOGGLE_FULLSCREEN"));
+            return;
+        }
         combo = SdlInputHandler::KeyComboToggleFullScreen;
         // Defer capture restore until after fullscreen toggle completes
         m_DeferCaptureRestore = true;
@@ -3006,6 +3149,10 @@ void Session::dispatchQtMenuAction(OverlayMenuPanel::MenuAction action)
         m_WasCapturedBeforeMenu = false;
         if (m_InputHandler) {
             m_InputHandler->setCaptureActive(false);
+        }
+        if (s_EmbedParentWinId != 0) {
+            emitEmbedLine(QByteArrayLiteral("TAB_OPEN_DEVICES"));
+            return;
         }
         if (m_Window && (SDL_GetWindowFlags(m_Window) & SDL_WINDOW_FULLSCREEN) &&
             !(SDL_GetWindowFlags(m_Window) & SDL_WINDOW_FULLSCREEN_DESKTOP)) {
@@ -3897,6 +4044,77 @@ void Session::handleSdlUserEvent(const SDL_UserEvent& event)
         // native button messages without re-entering Qt from platform code.
         break;
 #endif
+    case SDL_CODE_EMBED_COMMAND: {
+        std::unique_ptr<EmbedCommand> cmd(static_cast<EmbedCommand*>(event.data1));
+        if (!cmd || !m_Window) {
+            break;
+        }
+        if (cmd->type == EmbedCommand::Quit) {
+            SDL_Event quitEv = {};
+            quitEv.type = SDL_QUIT;
+            SDL_PushEvent(&quitEv);
+            break;
+        }
+#ifdef Q_OS_WIN32
+        SDL_SysWMinfo wmInfo;
+        SDL_VERSION(&wmInfo.version);
+        if (SDL_GetWindowWMInfo(m_Window, &wmInfo) && wmInfo.subsystem == SDL_SYSWM_WINDOWS) {
+            HWND hwnd = wmInfo.info.win.window;
+            if (cmd->type == EmbedCommand::Resize) {
+                SetWindowPos(hwnd, HWND_TOP, cmd->x, cmd->y, qMax(160, cmd->w), qMax(120, cmd->h),
+                             SWP_NOACTIVATE);
+                syncQtOverlayWindowsWithSdlWindowState();
+            } else if (cmd->type == EmbedCommand::Show) {
+                ShowWindow(hwnd, SW_SHOW);
+                SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+                SetFocus(hwnd);
+                syncQtOverlayWindowsWithSdlWindowState();
+            } else if (cmd->type == EmbedCommand::Hide) {
+                if (m_InputHandler) {
+                    m_InputHandler->setCaptureActive(false);
+                }
+                if (m_MenuPanel && m_MenuPanel->isMenuVisible()) {
+                    m_MenuPanel->closeMenu();
+                }
+                if (m_MenuButton) {
+                    m_MenuButton->hideButton();
+                }
+                ShowWindow(hwnd, SW_HIDE);
+            }
+        }
+#elif defined(Q_OS_LINUX)
+        SDL_SysWMinfo wmInfo;
+        SDL_VERSION(&wmInfo.version);
+        if (SDL_GetWindowWMInfo(m_Window, &wmInfo) && wmInfo.subsystem == SDL_SYSWM_X11 && wmInfo.info.x11.display) {
+            Display* dpy = wmInfo.info.x11.display;
+            Window win = wmInfo.info.x11.window;
+            if (cmd->type == EmbedCommand::Resize) {
+                XMoveResizeWindow(dpy, win, cmd->x, cmd->y,
+                                  static_cast<unsigned int>(qMax(160, cmd->w)),
+                                  static_cast<unsigned int>(qMax(120, cmd->h)));
+                XFlush(dpy);
+                syncQtOverlayWindowsWithSdlWindowState();
+            } else if (cmd->type == EmbedCommand::Show) {
+                XMapRaised(dpy, win);
+                XFlush(dpy);
+                syncQtOverlayWindowsWithSdlWindowState();
+            } else if (cmd->type == EmbedCommand::Hide) {
+                if (m_InputHandler) {
+                    m_InputHandler->setCaptureActive(false);
+                }
+                if (m_MenuPanel && m_MenuPanel->isMenuVisible()) {
+                    m_MenuPanel->closeMenu();
+                }
+                if (m_MenuButton) {
+                    m_MenuButton->hideButton();
+                }
+                XUnmapWindow(dpy, win);
+                XFlush(dpy);
+            }
+        }
+#endif
+        break;
+    }
     default:
         SDL_assert(false);
     }
@@ -4904,16 +5122,23 @@ void Session::exec()
     int x, y, width, height;
     getWindowDimensions(x, y, width, height);
 
-    // 全屏会话：让串流窗口从 Qt 界面窗口所在的位置和尺寸起步。
-    //
-    // getWindowDimensions() 给的是「屏幕居中 + 串流分辨率」，那是退出全屏之后
-    // 该有的窗口大小，但拿它当全屏动画的起点就不对了 —— 系统会从一个和刚才那个
-    // 界面窗口毫无关系的矩形开始放大，看起来像凭空弹出一个空窗口再被撑大。
-    // 用界面窗口自己的 frame 起步，动画读起来就是「刚才那个窗口变成了全屏」。
-    //
-    // 这里只改初始创建；运行中 Ctrl+Alt+Shift+F 退出全屏时走的是 toggleFullscreen()
-    // 里的那次 getWindowDimensions()，恢复的仍然是串流分辨率大小。
-    if (m_IsFullScreen && m_QtWindow != nullptr) {
+    const bool embedMode = (s_EmbedParentWinId != 0);
+    if (embedMode) {
+        m_IsFullScreen = false;
+        if (s_EmbedInitialRect.isValid()) {
+            x = s_EmbedInitialRect.x();
+            y = s_EmbedInitialRect.y();
+            width = s_EmbedInitialRect.width();
+            height = s_EmbedInitialRect.height();
+        } else {
+            x = 0;
+            y = 94;
+            width = 1280;
+            height = 546;
+        }
+    }
+
+    if (!embedMode && m_IsFullScreen && m_QtWindow != nullptr) {
         const QRect creationGeometry = qtWindowCreationGeometryForSdl(m_QtWindow);
         if (creationGeometry.isValid()) {
             x = creationGeometry.x();
@@ -4923,15 +5148,7 @@ void Session::exec()
         }
     }
 
-    // 让加载页的退场动画真正跑完，再去创建串流窗口。
-    //
-    // connectionStarted 和 exec() 是同一批投递到主线程的信号，所以那个 340ms 的
-    // 淡幕动画实际上拿不到任何主循环时间 —— 幕从来没黑下来过，SDL 窗口就直接盖在
-    // 加载页上，观感是硬切。这里主动把主循环喂满一段时间让它跑完。
-    //
-    // 必须在这儿做完：exec() 往下就进 SDL 事件循环了，那之后 Qt 的定时器和队列信号
-    // 只在串流覆盖层可见时才会被 pump，QML 侧再也等不到机会。
-    if (m_QtWindow != nullptr) {
+    if (!embedMode && m_QtWindow != nullptr) {
         QElapsedTimer veilTimer;
         veilTimer.start();
         while (veilTimer.elapsed() < k_StreamEnterVeilMs) {
@@ -4957,11 +5174,13 @@ void Session::exec()
     SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 0);
 
     // We always want a resizable window with High DPI enabled
-    Uint32 defaultWindowFlags = SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_RESIZABLE;
+    Uint32 defaultWindowFlags = embedMode
+        ? (SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_BORDERLESS | SDL_WINDOW_HIDDEN)
+        : (SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_RESIZABLE);
 
     // If we're starting in windowed mode and the Moonlight GUI is maximized or
     // minimized, match that with the streaming window.
-    if (!m_IsFullScreen && m_QtWindow != nullptr) {
+    if (!embedMode && !m_IsFullScreen && m_QtWindow != nullptr) {
 #if QT_VERSION >= QT_VERSION_CHECK(5, 10, 0)
         // Qt 5.10+ can propagate multiple states together
         if (m_QtWindow->windowStates() & Qt::WindowMaximized) {
@@ -5041,6 +5260,51 @@ void Session::exec()
 #ifdef HAS_QT_SDL_WAYLAND_BRIDGE
     syncWaylandSdlWindowState();
 #endif
+
+    if (embedMode) {
+        quintptr childWinId = 0;
+#ifdef Q_OS_WIN32
+        SDL_SysWMinfo wmInfo;
+        SDL_VERSION(&wmInfo.version);
+        if (SDL_GetWindowWMInfo(m_Window, &wmInfo) && wmInfo.subsystem == SDL_SYSWM_WINDOWS) {
+            HWND childHwnd = wmInfo.info.win.window;
+            HWND parentHwnd = reinterpret_cast<HWND>(s_EmbedParentWinId);
+            if (childHwnd && parentHwnd && IsWindow(parentHwnd)) {
+                LONG_PTR style = GetWindowLongPtrW(childHwnd, GWL_STYLE);
+                style &= ~(WS_POPUP | WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SYSMENU | WS_BORDER);
+                style |= WS_CHILD | WS_CLIPSIBLINGS | WS_CLIPCHILDREN;
+                SetWindowLongPtrW(childHwnd, GWL_STYLE, style);
+
+                LONG_PTR exStyle = GetWindowLongPtrW(childHwnd, GWL_EXSTYLE);
+                exStyle &= ~(WS_EX_APPWINDOW | WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE | WS_EX_CLIENTEDGE);
+                SetWindowLongPtrW(childHwnd, GWL_EXSTYLE, exStyle);
+
+                SetParent(childHwnd, parentHwnd);
+                SetWindowPos(childHwnd, HWND_TOP, x, y, qMax(160, width), qMax(120, height),
+                             SWP_FRAMECHANGED | SWP_NOACTIVATE);
+                childWinId = reinterpret_cast<quintptr>(childHwnd);
+            }
+        }
+#elif defined(Q_OS_LINUX)
+        SDL_SysWMinfo wmInfo;
+        SDL_VERSION(&wmInfo.version);
+        if (SDL_GetWindowWMInfo(m_Window, &wmInfo) && wmInfo.subsystem == SDL_SYSWM_X11 && wmInfo.info.x11.display) {
+            Display* dpy = wmInfo.info.x11.display;
+            Window childWin = wmInfo.info.x11.window;
+            XReparentWindow(dpy, childWin, static_cast<Window>(s_EmbedParentWinId), x, y);
+            XResizeWindow(dpy, childWin,
+                          static_cast<unsigned int>(qMax(160, width)),
+                          static_cast<unsigned int>(qMax(120, height)));
+            XSync(dpy, False);
+            childWinId = static_cast<quintptr>(childWin);
+        }
+#endif
+        if (childWinId != 0) {
+            emitEmbedLine(QByteArray("TAB_HWND ") + QByteArray::number(static_cast<qulonglong>(childWinId)));
+        }
+        startEmbedStdinWatcher();
+        emitEmbedLine(QByteArrayLiteral("TAB_READY"));
+    }
 
     QImage svgImage(ICON_SIZE, ICON_SIZE, QImage::Format_RGBA8888);
     if (QGuiApplication::applicationDisplayName() == QStringLiteral("SunAndMon")) {

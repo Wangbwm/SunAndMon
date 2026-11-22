@@ -62,6 +62,7 @@ chinesesimplified.TaskInstallVdd=安装 ZakoVDD 虚拟显示器驱动（可选�
 chinesesimplified.GroupAdditional=附加选项：
 chinesesimplified.LaunchAfterInstall=安装完成后立即启动 SunAndMon
 chinesesimplified.StatusStopping=正在停止旧版 SunAndMon 服务与相关进程…
+chinesesimplified.StatusFirewall=正在配置 Windows 防火墙放行规则…
 chinesesimplified.StatusInstallService=正在安装并启动 SunAndMon 后台系统服务…
 chinesesimplified.StatusInstallVdd=正在安装 ZakoVDD 虚拟显示器驱动…
 #endif
@@ -71,6 +72,7 @@ english.TaskInstallVdd=Install ZakoVDD virtual display driver (optional, for har
 english.GroupAdditional=Additional options:
 english.LaunchAfterInstall=Launch SunAndMon now
 english.StatusStopping=Stopping existing SunAndMon service and running processes...
+english.StatusFirewall=Configuring Windows Firewall rules...
 english.StatusInstallService=Installing and starting SunAndMon Host Service...
 english.StatusInstallVdd=Installing ZakoVDD virtual display driver...
 
@@ -87,12 +89,24 @@ Name: "{autoprograms}\SunAndMon"; Filename: "{app}\SunAndMon.exe"; WorkingDir: "
 Name: "{autodesktop}\SunAndMon"; Filename: "{app}\SunAndMon.exe"; WorkingDir: "{app}"; Tasks: desktopicon
 
 [Run]
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""SunAndMon Host"""; StatusMsg: "{cm:StatusFirewall}"; Flags: runhidden waituntilterminated
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""SunAndMon Host"" dir=in action=allow program=""{app}\host\sunshine.exe"" enable=yes profile=any"; StatusMsg: "{cm:StatusFirewall}"; Flags: runhidden waituntilterminated
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""SunAndMon Client"""; StatusMsg: "{cm:StatusFirewall}"; Flags: runhidden waituntilterminated
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""SunAndMon Client"" dir=in action=allow program=""{app}\SunAndMon.exe"" enable=yes profile=any"; StatusMsg: "{cm:StatusFirewall}"; Flags: runhidden waituntilterminated
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""SunAndMon Tunnel"""; StatusMsg: "{cm:StatusFirewall}"; Flags: runhidden waituntilterminated
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""SunAndMon Tunnel"" dir=in action=allow program=""{app}\tunnel\sunandmon-tunnel.exe"" enable=yes profile=any"; StatusMsg: "{cm:StatusFirewall}"; Flags: runhidden waituntilterminated
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""SunAndMon EasyTier"""; StatusMsg: "{cm:StatusFirewall}"; Flags: runhidden waituntilterminated
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""SunAndMon EasyTier"" dir=in action=allow program=""{app}\tunnel\easytier-core.exe"" enable=yes profile=any"; StatusMsg: "{cm:StatusFirewall}"; Flags: runhidden waituntilterminated
 Filename: "{app}\host\tools\sunshinesvc.exe"; Parameters: "--install-sunandmon-service"; StatusMsg: "{cm:StatusInstallService}"; Flags: runhidden waituntilterminated; Tasks: installservice
 Filename: "{app}\host\scripts\install-vdd.bat"; Parameters: "--preserve-healthy-existing"; WorkingDir: "{app}\host\scripts"; StatusMsg: "{cm:StatusInstallVdd}"; Flags: runhidden waituntilterminated; Tasks: installvdd
 Filename: "{app}\SunAndMon.exe"; Description: "{cm:LaunchAfterInstall}"; WorkingDir: "{app}"; Flags: nowait postinstall skipifsilent runasoriginaluser
 
 [UninstallRun]
 Filename: "{app}\host\tools\sunshinesvc.exe"; Parameters: "--uninstall-sunandmon-service"; Flags: runhidden waituntilterminated; RunOnceId: "UninstallSunAndMonService"
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""SunAndMon Host"""; Flags: runhidden waituntilterminated; RunOnceId: "RemoveFirewallHost"
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""SunAndMon Client"""; Flags: runhidden waituntilterminated; RunOnceId: "RemoveFirewallClient"
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""SunAndMon Tunnel"""; Flags: runhidden waituntilterminated; RunOnceId: "RemoveFirewallTunnel"
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""SunAndMon EasyTier"""; Flags: runhidden waituntilterminated; RunOnceId: "RemoveFirewallEasyTier"
 
 [Code]
 procedure RunHiddenCmd(const FileName, Params: string);

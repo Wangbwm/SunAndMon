@@ -157,6 +157,16 @@ QString GlobalCommandLineParser::centerConnectAction() const
     return m_CenterConnectAction;
 }
 
+quintptr GlobalCommandLineParser::embedParentWindowId() const
+{
+    return m_EmbedParentWindowId;
+}
+
+QRect GlobalCommandLineParser::embedInitialRect() const
+{
+    return m_EmbedInitialRect;
+}
+
 GlobalCommandLineParser::~GlobalCommandLineParser()
 {
 }
@@ -181,10 +191,26 @@ GlobalCommandLineParser::ParseResult GlobalCommandLineParser::parse(const QStrin
     parser.addFlagOption("disable-ui-gamepad", "disable gamepad navigation in the Moonlight UI");
     parser.addValueOption("center-connect", "center device ID to connect automatically in a new window");
     parser.addValueOption("center-action", "center auto-connect action (desktop, apps, displays)");
+    parser.addValueOption("embed-parent", "native parent window ID for single-window embedded streaming tab");
+    parser.addValueOption("embed-rect", "initial native x,y,w,h viewport inside embed-parent");
     parser.parse(args);
     m_DisableGamepadUiNavigation = parser.isSet("disable-ui-gamepad");
     m_CenterConnectDeviceId = parser.value("center-connect").trimmed();
     m_CenterConnectAction = parser.value("center-action").trimmed();
+    bool okParent = false;
+    const qulonglong parentId = parser.value("embed-parent").trimmed().toULongLong(&okParent, 0);
+    m_EmbedParentWindowId = okParent ? static_cast<quintptr>(parentId) : 0;
+    const QStringList rectParts = parser.value("embed-rect").trimmed().split(',');
+    if (rectParts.size() == 4) {
+        bool ok0 = false, ok1 = false, ok2 = false, ok3 = false;
+        const int rx = rectParts[0].toInt(&ok0);
+        const int ry = rectParts[1].toInt(&ok1);
+        const int rw = rectParts[2].toInt(&ok2);
+        const int rh = rectParts[3].toInt(&ok3);
+        if (ok0 && ok1 && ok2 && ok3 && rw > 0 && rh > 0) {
+            m_EmbedInitialRect = QRect(rx, ry, rw, rh);
+        }
+    }
     auto posArgs = parser.positionalArguments();
 
     if (posArgs.isEmpty()) {

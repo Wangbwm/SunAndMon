@@ -6,6 +6,7 @@ import SdlGamepadKeyNavigation 1.0
 import Session 1.0
 import SystemProperties 1.0
 import StreamingPreferences 1.0
+import ComputerManager 1.0
 
 import "theme"
 import "Brand.js" as Brand
@@ -56,6 +57,9 @@ Item {
     {
         // Update the spinner text
         stageText = qsTr("Starting %1...").arg(stage)
+        if ((typeof isEmbeddedChild === "boolean") && isEmbeddedChild) {
+            ComputerManager.center.reportEmbedLine("TAB_STAGE " + stageText)
+        }
     }
 
     function stageFailed(stage, errorCode, failingPorts)
@@ -65,6 +69,9 @@ Item {
 
         if (failingPorts) {
             streamSegueErrorDialog.text += "\n\n" + qsTr("Check your firewall and port forwarding rules for port(s): %1").arg(failingPorts)
+        }
+        if ((typeof isEmbeddedChild === "boolean") && isEmbeddedChild) {
+            ComputerManager.center.reportEmbedLine("TAB_ERROR " + streamSegueErrorDialog.text)
         }
     }
 
@@ -94,6 +101,9 @@ Item {
         // Display the error dialog after Session::exec() returns
         streamSegueErrorDialog.text = text
         console.error(text)
+        if ((typeof isEmbeddedChild === "boolean") && isEmbeddedChild) {
+            ComputerManager.center.reportEmbedLine("TAB_ERROR " + text)
+        }
     }
 
     function quitStarting()
@@ -108,6 +118,10 @@ Item {
 
     function sessionFinished(portTestResult)
     {
+        if ((typeof isEmbeddedChild === "boolean") && isEmbeddedChild) {
+            Qt.quit()
+            return
+        }
         if (portTestResult !== 0 && portTestResult !== -1 && streamSegueErrorDialog.text) {
             streamSegueErrorDialog.text += "\n\n" + Brand.text(qsTr("This PC's Internet connection is blocking Moonlight. Streaming over the Internet may not work while connected to this network."))
         }

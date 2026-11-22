@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Controls.Basic as Basic
 import QtQuick.Layouts
+import StreamTabManager 1.0
 import "theme"
 
 Rectangle {
@@ -75,9 +76,8 @@ Rectangle {
         if (showingLan) {
             lanActionRequested(selectedDevice, action)
         } else if (action === "desktop" && !dashboard.center.secondaryInstance) {
-            // Keep the main dashboard window open while streaming in an independent window
-            // so users can switch back anytime to launch additional concurrent streams.
-            dashboard.center.openInNewWindow(selectedDevice.id, "desktop")
+            // Open inside the single main window as a stream tab.
+            StreamTabManager.openCenterTab(selectedDevice.id, selectedDevice.name)
         } else {
             connectionAction = action
             center.connectDevice(selectedDevice.id)
@@ -501,21 +501,12 @@ Rectangle {
                                 color: Theme.textDim
                                 elide: Text.ElideRight
                             }
-                            RowLayout {
-                                spacing: 8
-                                Action {
-                                    text: dashboard.showingLan && dashboard.selectedDevice && !dashboard.selectedDevice.paired
-                                          ? qsTr("Pair device") : qsTr("Connect desktop")
-                                    primary: true
-                                    enabled: dashboard.canConnect
-                                    onClicked: dashboard.connectSelected("desktop")
-                                }
-                                Action {
-                                    visible: !dashboard.showingLan && !!dashboard.selectedDevice
-                                    text: qsTr("Open in new window")
-                                    enabled: dashboard.canConnect
-                                    onClicked: dashboard.center.openInNewWindow(dashboard.selectedDevice.id, "desktop")
-                                }
+                            Action {
+                                text: dashboard.showingLan && dashboard.selectedDevice && !dashboard.selectedDevice.paired
+                                      ? qsTr("Pair device") : qsTr("Connect desktop")
+                                primary: true
+                                enabled: dashboard.canConnect
+                                onClicked: dashboard.connectSelected("desktop")
                             }
                         }
 

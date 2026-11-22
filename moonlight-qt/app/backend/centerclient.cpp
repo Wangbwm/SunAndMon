@@ -21,6 +21,7 @@
 #include <QSettings>
 #include <QStandardPaths>
 #include <openssl/rand.h>
+#include <cstdio>
 #include <utility>
 
 #ifdef Q_OS_WIN
@@ -771,6 +772,19 @@ bool CenterClient::openInNewWindow(const QString& id, const QString& action) con
 bool CenterClient::openNewClientWindow() const
 {
     return QProcess::startDetached(QCoreApplication::applicationFilePath(), {});
+}
+
+void CenterClient::reportEmbedLine(const QString& line) const
+{
+    if (line.isEmpty()) {
+        return;
+    }
+    QByteArray utf8 = line.toUtf8();
+    utf8.replace('\r', ' ');
+    utf8.replace('\n', ' ');
+    utf8.append('\n');
+    fwrite(utf8.constData(), 1, static_cast<size_t>(utf8.size()), stdout);
+    fflush(stdout);
 }
 
 void CenterClient::startOnLaunch()

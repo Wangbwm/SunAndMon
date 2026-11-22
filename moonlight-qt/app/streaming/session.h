@@ -148,6 +148,11 @@ public:
         return s_ActiveSession;
     }
 
+    static void setEmbedConfig(quintptr parentWinId, const QRect& initialRect);
+    static quintptr embedParentWindowId();
+    static QRect embedInitialRect();
+    static void emitEmbedLine(const QByteArray& line);
+
     // Pull renderers receive decode units without drSubmitDecodeUnit(), so
     // they report the first one here. Auto-reconnect depends on it.
     static void markVideoReceived()

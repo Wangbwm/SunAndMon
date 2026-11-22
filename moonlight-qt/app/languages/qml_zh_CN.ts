@@ -4172,6 +4172,30 @@
         <translation>确定要退出吗？</translation>
     </message>
     <message>
+        <source>Devices</source>
+        <translation>设备列表</translation>
+    </message>
+    <message>
+        <source>Fullscreen</source>
+        <translation>全屏</translation>
+    </message>
+    <message>
+        <source>Close tab</source>
+        <translation>关闭标签</translation>
+    </message>
+    <message>
+        <source>Retry</source>
+        <translation>重试</translation>
+    </message>
+    <message>
+        <source>Connecting…</source>
+        <translation>正在连接…</translation>
+    </message>
+    <message>
+        <source>Connection failed.</source>
+        <translation>连接失败。</translation>
+    </message>
+    <message>
         <source>Exit SunAndMon?</source>
         <translation>退出 SunAndMon？</translation>
     </message>
@@ -5115,6 +5139,21 @@
     <message>
         <source>Save &amp; Connect</source>
         <translation>保存并连接</translation>
+    </message>
+</context>
+<context>
+    <name>StreamTabManager</name>
+    <message>
+        <source>Connecting to %1…</source>
+        <translation>正在连接 %1…</translation>
+    </message>
+    <message>
+        <source>The stream session ended unexpectedly.</source>
+        <translation>串流会话意外结束。</translation>
+    </message>
+    <message>
+        <source>Unable to start the stream process.</source>
+        <translation>无法启动串流子进程。</translation>
     </message>
 </context>
 </TS>

@@ -85,6 +85,7 @@ public:
     Q_INVOKABLE void setSecondaryMode(bool enabled);
     Q_INVOKABLE bool openInNewWindow(const QString& id, const QString& action = QStringLiteral("desktop")) const;
     Q_INVOKABLE bool openNewClientWindow() const;
+    Q_INVOKABLE void reportEmbedLine(const QString& line) const;
     Q_INVOKABLE void signIn(const QString& url, const QString& key, const QString& directIp = {});
     Q_INVOKABLE void signOut();
     Q_INVOKABLE void refresh();

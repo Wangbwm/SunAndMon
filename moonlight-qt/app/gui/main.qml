@@ -5,6 +5,7 @@ import QtQuick.Window 2.2
 import QtQuick.Controls.Material as MaterialStyle
 
 import ComputerManager 1.0
+import StreamTabManager 1.0
 import AutoUpdateChecker 1.0
 import StreamingPreferences 1.0
 import SystemProperties 1.0
@@ -20,6 +21,9 @@ ApplicationWindow {
     property bool revealAfterFirstFrame: false
     property bool configurationChecksStarted: false
     property bool initialBackgroundChoiceHandled: false
+    readonly property bool embeddedChildMode: (typeof isEmbeddedChild === "boolean") && isEmbeddedChild
+    readonly property int tabBarHeight: (!embeddedChildMode && StreamTabManager.hasTabs && !StreamTabManager.fullscreenStream) ? 38 : 0
+    property int preFullscreenVisibility: Window.Windowed
     readonly property var settingsItem: stackView.currentItem instanceof SettingsView
                                          ? stackView.currentItem : null
 
@@ -141,6 +145,12 @@ ApplicationWindow {
     }
 
     Component.onCompleted: {
+        if (embeddedChildMode) {
+            // Headless child mode for single-window embedded stream tabs:
+            // never flash or show a second top-level Qt window on the taskbar.
+            return
+        }
+        StreamTabManager.bindHostWindow(window)
         // Always fit the initial window to the current screen. When the preference
         // is enabled, restore the last normal window geometry before showing it.
         windowsWindowChrome.activate()
@@ -182,8 +192,35 @@ ApplicationWindow {
         }
     }
 
-    readonly property bool confirmWindowExit: (Qt.platform.os === "windows" || Qt.platform.os === "linux") && ComputerManager.center.hostAvailable
+    readonly property bool confirmWindowExit: !embeddedChildMode && !ComputerManager.center.secondaryInstance &&
+                                              (Qt.platform.os === "windows" || Qt.platform.os === "linux") &&
+                                              ComputerManager.center.hostAvailable
     property bool exitConfirmed: false
+
+    Connections {
+        target: StreamTabManager
+        function onFullscreenStreamChanged() {
+            if (window.embeddedChildMode) {
+                return
+            }
+            if (StreamTabManager.fullscreenStream) {
+                window.preFullscreenVisibility = (window.visibility === Window.Maximized)
+                    ? Window.Maximized : Window.Windowed
+                toolBar.shown = false
+                window.showFullScreen()
+            } else {
+                toolBar.shown = true
+                if (window.visibility === Window.FullScreen) {
+                    if (window.preFullscreenVisibility === Window.Maximized) {
+                        window.showMaximized()
+                    } else {
+                        window.showNormal()
+                    }
+                }
+            }
+            streamViewportContainer.syncViewport()
+        }
+    }
 
     onClosing: function(event) {
         if (confirmWindowExit && !exitConfirmed) {
@@ -196,6 +233,7 @@ ApplicationWindow {
             })
             return
         }
+        StreamTabManager.closeAllTabs()
         windowPlacement.flush()
     }
 
@@ -298,9 +336,10 @@ ApplicationWindow {
     StackView {
         id: stackView
         anchors.fill: parent
-        // 各页自己按 72 让出工具栏的高度，那个 72 是从窗口顶边算的
-        anchors.topMargin: -window.chromeInset
-        focus: true
+        // 各页自己按 72 让出工具栏的高度，那个 72 是从窗口顶边算的；多标签栏出现时再顺移 tabBarHeight
+        anchors.topMargin: -window.chromeInset + window.tabBarHeight
+        visible: !StreamTabManager.streamTabActive
+        focus: !StreamTabManager.streamTabActive
 
         // 切页动效：neo-brutalism 要更短更机械，所以不缩放（缩放读起来是「软」的），
         // 改成 12px 横向位移 + 淡入，150ms OutQuad。
@@ -897,6 +936,287 @@ ApplicationWindow {
         }
     }
 
+    // 单窗口多标签栏：存在至少一个串流标签时显示在工具栏正下方；进入全屏串流时自动隐藏。
+    Rectangle {
+        id: streamTabBar
+        anchors.top: toolBar.bottom
+        anchors.left: parent.left
+        anchors.right: parent.right
+        height: window.tabBarHeight
+        visible: height > 0
+        z: 3
+        color: Theme.railSurface
+
+        Rectangle {
+            anchors { left: parent.left; right: parent.right; bottom: parent.bottom }
+            height: 1
+            color: Theme.line
+        }
+
+        RowLayout {
+            anchors.fill: parent
+            anchors.leftMargin: 10
+            anchors.rightMargin: 10
+            spacing: 6
+
+            // 固定首页标签：设备列表
+            Rectangle {
+                id: homeTabBtn
+                Layout.preferredHeight: 28
+                Layout.preferredWidth: homeTabRow.implicitWidth + 20
+                radius: Theme.radiusControl
+                color: !StreamTabManager.streamTabActive ? Theme.accentSoft
+                     : homeTabMouse.containsMouse ? Theme.surface2 : "transparent"
+                border.color: !StreamTabManager.streamTabActive ? Theme.accent : "transparent"
+                border.width: 1
+
+                Row {
+                    id: homeTabRow
+                    anchors.centerIn: parent
+                    spacing: 6
+                    Text {
+                        text: qsTr("Devices")
+                        color: !StreamTabManager.streamTabActive ? Theme.text : Theme.textDim
+                        font.family: Theme.fontSans
+                        font.pixelSize: 12
+                        font.weight: !StreamTabManager.streamTabActive ? Font.DemiBold : Font.Normal
+                    }
+                }
+
+                MouseArea {
+                    id: homeTabMouse
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: StreamTabManager.activateTab("")
+                }
+            }
+
+            Rectangle {
+                Layout.preferredWidth: 1
+                Layout.preferredHeight: 18
+                color: Theme.line
+            }
+
+            Flickable {
+                id: tabStripFlick
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                contentWidth: tabStripRow.implicitWidth
+                contentHeight: height
+                clip: true
+                flickableDirection: Flickable.HorizontalFlick
+
+                Row {
+                    id: tabStripRow
+                    anchors.verticalCenter: parent.verticalCenter
+                    spacing: 6
+
+                    Repeater {
+                        model: StreamTabManager.tabs
+
+                        Rectangle {
+                            id: streamTabPill
+                            required property var modelData
+                            readonly property bool isActive: StreamTabManager.activeTabId === modelData.id
+                            height: 28
+                            width: Math.min(220, Math.max(118, tabContentRow.implicitWidth + 16))
+                            radius: Theme.radiusControl
+                            color: isActive ? Theme.surface
+                                 : tabArea.containsMouse ? Theme.surface2 : "transparent"
+                            border.color: isActive ? Theme.accent : Theme.line
+                            border.width: 1
+
+                            MouseArea {
+                                id: tabArea
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                acceptedButtons: Qt.LeftButton | Qt.MiddleButton
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: function(mouse) {
+                                    if (mouse.button === Qt.MiddleButton) {
+                                        StreamTabManager.closeTab(streamTabPill.modelData.id)
+                                    } else {
+                                        StreamTabManager.activateTab(streamTabPill.modelData.id)
+                                    }
+                                }
+                            }
+
+                            RowLayout {
+                                id: tabContentRow
+                                anchors.fill: parent
+                                anchors.leftMargin: 10
+                                anchors.rightMargin: 6
+                                spacing: 6
+
+                                Rectangle {
+                                    Layout.preferredWidth: 7
+                                    Layout.preferredHeight: 7
+                                    radius: 4
+                                    color: streamTabPill.modelData.state === "streaming" ? Theme.success
+                                         : streamTabPill.modelData.state === "error" ? Theme.danger
+                                         : Theme.accent
+                                }
+
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: streamTabPill.modelData.title
+                                    textFormat: Text.PlainText
+                                    elide: Text.ElideRight
+                                    color: streamTabPill.isActive ? Theme.text : Theme.textDim
+                                    font.family: Theme.fontSans
+                                    font.pixelSize: 12
+                                    font.weight: streamTabPill.isActive ? Font.DemiBold : Font.Normal
+                                }
+
+                                Rectangle {
+                                    Layout.preferredWidth: 20
+                                    Layout.preferredHeight: 20
+                                    radius: 4
+                                    color: tabCloseMouse.containsMouse ? Theme.danger : "transparent"
+
+                                    Text {
+                                        anchors.centerIn: parent
+                                        text: "×"
+                                        color: tabCloseMouse.containsMouse ? "#ffffff" : Theme.textDim
+                                        font.pixelSize: 13
+                                        font.weight: Font.Bold
+                                    }
+
+                                    MouseArea {
+                                        id: tabCloseMouse
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: StreamTabManager.closeTab(streamTabPill.modelData.id)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            Rectangle {
+                visible: StreamTabManager.streamTabActive
+                Layout.preferredHeight: 26
+                Layout.preferredWidth: fsLabel.implicitWidth + 16
+                radius: Theme.radiusControl
+                color: fsBtnMouse.containsMouse ? Theme.accentSoft : "transparent"
+                border.color: Theme.line
+                border.width: 1
+
+                Text {
+                    id: fsLabel
+                    anchors.centerIn: parent
+                    text: qsTr("Fullscreen")
+                    color: Theme.text
+                    font.family: Theme.fontSans
+                    font.pixelSize: 12
+                }
+
+                MouseArea {
+                    id: fsBtnMouse
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: StreamTabManager.setFullscreenStream(true)
+                }
+            }
+        }
+    }
+
+    // 嵌入式串流画面视口：同步像素矩形给当前激活的子进程 SDL 窗口，并在连接中/出错时展示状态页。
+    Item {
+        id: streamViewportContainer
+        x: 0
+        y: StreamTabManager.fullscreenStream ? 0 : (toolBar.height - window.chromeInset + window.tabBarHeight)
+        width: window.width
+        height: Math.max(120, window.height - y)
+        visible: !window.embeddedChildMode && StreamTabManager.streamTabActive
+        z: 2
+
+        function syncViewport() {
+            if (window.embeddedChildMode) {
+                return
+            }
+            StreamTabManager.updateViewport(x, y, width, height)
+        }
+
+        onXChanged: syncViewport()
+        onYChanged: syncViewport()
+        onWidthChanged: syncViewport()
+        onHeightChanged: syncViewport()
+        onVisibleChanged: syncViewport()
+
+        Connections {
+            target: window
+            function onVisibilityChanged() { Qt.callLater(streamViewportContainer.syncViewport) }
+            function onWidthChanged() { Qt.callLater(streamViewportContainer.syncViewport) }
+            function onHeightChanged() { Qt.callLater(streamViewportContainer.syncViewport) }
+        }
+
+        Rectangle {
+            anchors.fill: parent
+            color: "#0b1220"
+            visible: StreamTabManager.streamTabActive &&
+                     (!StreamTabManager.activeTab || StreamTabManager.activeTab.state !== "streaming")
+
+            ColumnLayout {
+                anchors.centerIn: parent
+                width: Math.min(parent.width - 64, 480)
+                spacing: 14
+
+                Text {
+                    Layout.fillWidth: true
+                    horizontalAlignment: Text.AlignHCenter
+                    text: StreamTabManager.activeTab ? (StreamTabManager.activeTab.title || "") : ""
+                    color: "#eef5ff"
+                    font.family: Theme.fontSans
+                    font.pixelSize: 22
+                    font.weight: Font.Bold
+                }
+
+                Text {
+                    Layout.fillWidth: true
+                    horizontalAlignment: Text.AlignHCenter
+                    wrapMode: Text.WordWrap
+                    text: {
+                        const tab = StreamTabManager.activeTab
+                        if (!tab) return ""
+                        if (tab.state === "error") return tab.errorText || qsTr("Connection failed.")
+                        return tab.statusText || qsTr("Connecting…")
+                    }
+                    color: StreamTabManager.activeTab && StreamTabManager.activeTab.state === "error"
+                           ? "#ff7b72" : "#a8bbd2"
+                    font.family: Theme.fontSans
+                    font.pixelSize: 13
+                }
+
+                HardProgress {
+                    Layout.fillWidth: true
+                    visible: StreamTabManager.activeTab && StreamTabManager.activeTab.state === "connecting"
+                }
+
+                RowLayout {
+                    Layout.alignment: Qt.AlignHCenter
+                    spacing: 10
+
+                    Button {
+                        visible: StreamTabManager.activeTab && StreamTabManager.activeTab.state === "error"
+                        text: qsTr("Retry")
+                        onClicked: if (StreamTabManager.activeTab) StreamTabManager.retryTab(StreamTabManager.activeTab.id)
+                    }
+
+                    Button {
+                        text: qsTr("Close tab")
+                        onClicked: if (StreamTabManager.activeTab) StreamTabManager.closeTab(StreamTabManager.activeTab.id)
+                    }
+                }
+            }
+        }
+    }
+
     ErrorMessageDialog {
         id: noHwDecoderDialog
         text: Brand.text(qsTr("No functioning hardware accelerated video decoder was detected by Moonlight. " +
@@ -972,6 +1292,7 @@ ApplicationWindow {
               ? qsTr("Exiting will stop local hosting and disconnect anyone connected to this computer.")
               : qsTr("Are you sure you want to quit?")
         onAccepted: {
+            StreamTabManager.closeAllTabs()
             if (window.confirmWindowExit) {
                 window.exitConfirmed = true
                 window.close()

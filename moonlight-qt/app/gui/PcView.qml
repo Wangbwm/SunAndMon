@@ -120,6 +120,14 @@ CenteredGridView {
 
     Connections {
         target: ComputerManager.center
+        function onChanged() {
+            const embedded = (typeof isEmbeddedChild === "boolean") && isEmbeddedChild
+            if (embedded && pcGrid.autoConnectHandled && !ComputerManager.center.busy &&
+                ComputerManager.center.centerStatus.length > 0 && pcGrid.StackView.status === StackView.Active) {
+                ComputerManager.center.reportEmbedLine("TAB_ERROR " + ComputerManager.center.centerStatus)
+                Qt.quit()
+            }
+        }
         function onHostConnected(uuid) {
             if (pcGrid.StackView.status !== StackView.Active) {
                 return
@@ -169,6 +177,9 @@ CenteredGridView {
             Qt.callLater(function() {
                 if (ComputerManager.center.connected) {
                     ComputerManager.center.connectDevice(autoId)
+                } else if ((typeof isEmbeddedChild === "boolean") && isEmbeddedChild) {
+                    ComputerManager.center.reportEmbedLine("TAB_ERROR " + qsTr("Center session is not signed in."))
+                    Qt.quit()
                 }
             })
         }

@@ -87,6 +87,7 @@ static QString getStartupApplicationDir(const char* argv0)
 #include "gui/appmodel.h"
 #include "backend/autoupdatechecker.h"
 #include "backend/computermanager.h"
+#include "backend/streamtabmanager.h"
 #include "backend/systemproperties.h"
 #include "backend/usbforwardingenvironment.h"
 #include "backend/usbforwardingbackend.h"
@@ -1411,6 +1412,11 @@ int main(int argc, char *argv[])
                                               [](QQmlEngine* qmlEngine, QJSEngine*) -> QObject* {
                                                   return new ComputerManager(StreamingPreferences::get(qmlEngine));
                                               });
+    qmlRegisterSingletonType<StreamTabManager>("StreamTabManager", 1, 0,
+                                               "StreamTabManager",
+                                               [](QQmlEngine*, QJSEngine*) -> QObject* {
+                                                   return new StreamTabManager();
+                                               });
     qmlRegisterSingletonType<AutoUpdateChecker>("AutoUpdateChecker", 1, 0,
                                                 "AutoUpdateChecker",
                                                 [](QQmlEngine*, QJSEngine*) -> QObject* {
@@ -1591,10 +1597,13 @@ int main(int argc, char *argv[])
         app.setFont(uiFont);
     }
 
+    Session::setEmbedConfig(parser.embedParentWindowId(), parser.embedInitialRect());
+
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty("sunAndMonBundle", bundledHost);
     engine.rootContext()->setContextProperty("autoConnectCenterDeviceId", parser.centerConnectDeviceId());
     engine.rootContext()->setContextProperty("autoConnectCenterAction", parser.centerConnectAction());
+    engine.rootContext()->setContextProperty("isEmbeddedChild", parser.embedParentWindowId() != 0);
     QString initialView;
     bool hasGUI = true;
 

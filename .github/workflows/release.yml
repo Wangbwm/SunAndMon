@@ -250,6 +250,15 @@ jobs:
       - name: Accept Android licenses
         run: yes | sdkmanager --licenses > /dev/null || true
 
+      - name: Set up Go for Android tunnel daemon
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: tunnel/go.mod
+          cache-dependency-path: tunnel/go.sum
+
+      - name: Build Android tunnel daemon jniLibs
+        run: bash scripts/build-android-tunnel.sh
+
       - name: Build signed APK (Release when keystore configured, else Debug)
         working-directory: moonlight-vplus
         env:

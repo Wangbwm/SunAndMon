@@ -31,6 +31,7 @@ internal class CenterDeviceView(
     context: Context,
     private val refresh: () -> Unit,
     private val centerSettings: () -> Unit,
+    private val tunnelSettings: () -> Unit,
     private val addLanComputer: () -> Unit,
     private val refreshLan: () -> Unit,
     private val streamSettings: () -> Unit,
@@ -60,6 +61,8 @@ internal class CenterDeviceView(
     private var lanDevices = emptyList<ComputerDetails>()
     private var lanSnapshot: List<String> = emptyList()
     private var connected = false
+    private var tunnelBadge = ""
+    private var tunnelConnected = false
     private var selectedId: String? = null
     private var selectedLanUuid: String? = null
     private var loading = false
@@ -79,6 +82,14 @@ internal class CenterDeviceView(
         this.connected = connected
         this.loading = loading
         if (currentPage == Page.CENTER) {
+            render()
+        }
+    }
+
+    fun updateTunnelStatus(badge: String, isConnected: Boolean) {
+        if (this.tunnelBadge != badge || this.tunnelConnected != isConnected) {
+            this.tunnelBadge = badge
+            this.tunnelConnected = isConnected
             render()
         }
     }
@@ -185,7 +196,28 @@ internal class CenterDeviceView(
             else label(R.string.center_sign_in, 13, color = accent))
         center.addView(chevron())
         content.addView(center, LinearLayout.LayoutParams(-1, dp(52)))
-        gap(content, 22)
+        gap(content, 8)
+
+        val tunnelRow = row().apply {
+            setPadding(dp(12), 0, dp(12), 0)
+            action(sky, stroke = null, listener = tunnelSettings)
+        }
+        tunnelRow.addView(icon(R.drawable.ic_center_lan))
+        tunnelRow.addView(label(R.string.center_builtin_tunnel, 15), LinearLayout.LayoutParams(0, -2, 1f))
+        if (tunnelBadge.isNotEmpty()) {
+            val badgeColor = if (tunnelConnected) green else accent
+            tunnelRow.addView(label(0, 13, color = badgeColor).apply {
+                text = tunnelBadge
+                val dot = shape(badgeColor).apply { setBounds(0, 0, dp(6), dp(6)) }
+                compoundDrawablePadding = dp(6)
+                setCompoundDrawablesRelative(dot, null, null, null)
+            })
+        } else {
+            tunnelRow.addView(label(R.string.center_tunnel_configure, 13, color = accent))
+        }
+        tunnelRow.addView(chevron())
+        content.addView(tunnelRow, LinearLayout.LayoutParams(-1, dp(52)))
+        gap(content, 20)
 
         if (devices.isEmpty()) {
             val emptyText = when {
@@ -384,6 +416,10 @@ internal class CenterDeviceView(
             tab(R.string.center_nav_lan, R.drawable.ic_center_lan, active = currentPage == Page.LAN) {
                 switchPage(Page.LAN)
             },
+            LinearLayout.LayoutParams(0, -2, 1f)
+        )
+        addView(
+            tab(R.string.center_nav_tunnel, R.drawable.ic_center_tunnel, listener = tunnelSettings),
             LinearLayout.LayoutParams(0, -2, 1f)
         )
         addView(

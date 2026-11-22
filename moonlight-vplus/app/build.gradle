@@ -231,6 +231,12 @@ android {
         }
     }
 
+    packagingOptions {
+        jniLibs {
+            useLegacyPackaging = true
+        }
+    }
+
     externalNativeBuild {
         ndkBuild {
             path "src/main/jni/Android.mk"

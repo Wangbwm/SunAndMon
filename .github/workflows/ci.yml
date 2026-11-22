@@ -139,11 +139,13 @@ jobs:
           go vet ./...
           go test -v -race ./...
 
-      - name: Verify Linux & Windows cross-compilation
+      - name: Verify Linux, Windows & Android cross-compilation
         run: |
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /tmp/sunandmon-tunnel-linux-amd64 .
           CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /tmp/sunandmon-tunnel-windows-amd64.exe .
-          ls -lh /tmp/sunandmon-tunnel-*
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o /tmp/libsunandmon_tunnel-arm64.so .
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go build -trimpath -ldflags="-s -w" -o /tmp/libsunandmon_tunnel-arm.so .
+          ls -lh /tmp/sunandmon-tunnel-* /tmp/libsunandmon_tunnel-*
 
   android-verify:
     name: Android Debug APK verification
@@ -183,6 +185,21 @@ jobs:
 
       - name: Accept Android licenses
         run: yes | sdkmanager --licenses > /dev/null || true
+
+      - name: Set up Go for Android tunnel daemon
+        uses: actions/setup-go@v5
+        with:
+          go-version: "stable"
+          cache-dependency-path: tunnel/go.sum
+
+      - name: Build Android tunnel daemon jniLibs
+        working-directory: tunnel
+        env:
+          GOTOOLCHAIN: auto
+        run: |
+          mkdir -p ../moonlight-vplus/app/src/main/jniLibs/arm64-v8a ../moonlight-vplus/app/src/main/jniLibs/armeabi-v7a
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o ../moonlight-vplus/app/src/main/jniLibs/arm64-v8a/libsunandmon_tunnel.so .
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go build -trimpath -ldflags="-s -w" -o ../moonlight-vplus/app/src/main/jniLibs/armeabi-v7a/libsunandmon_tunnel.so .
 
       - name: Build & verify NonRoot Debug APK
         working-directory: moonlight-vplus

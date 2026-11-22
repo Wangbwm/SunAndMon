@@ -34,7 +34,9 @@ import org.json.JSONObject
 
 internal class CenterDirectory(url: String, private val key: String, directIp: String = "") {
     data class Device(val id: String, val name: String, val online: Boolean)
-    data class Connection(val computer: ComputerDetails, val app: NvApp?)
+    data class Connection(val computer: ComputerDetails, val app: NvApp?, val routeLabel: String = "")
+    class TunnelRequiredException(val missingProviders: List<String>) :
+        IOException("Missing built-in tunnel providers: ${missingProviders.joinToString(", ")}")
 
     internal val accessKey: String get() = key
 
@@ -75,7 +77,19 @@ internal class CenterDirectory(url: String, private val key: String, directIp: S
         }
     }
 
-    fun connect(device: Device, uniqueId: String, name: String, crypto: LimelightCryptoProvider): Connection {
+    fun tunnelDefaults(): JSONObject? = runCatching {
+        val obj = JSONObject(requestPath("/v1/tunnel"))
+        val p = obj.optString("provider").trim().lowercase()
+        if (p == "tailscale" || p == "easytier") obj else null
+    }.getOrNull()
+
+    fun connect(
+        device: Device,
+        uniqueId: String,
+        name: String,
+        crypto: LimelightCryptoProvider,
+        tunnelManager: AndroidTunnelManager? = null
+    ): Connection {
         val fingerprint = MessageDigest.getInstance("SHA-256").digest(crypto.getClientCertificate().encoded)
             .joinToString("") { "%02x".format(it.toInt() and 0xff) }
         val grant = JSONObject(request(device.id, JSONObject().put("fingerprint", fingerprint)))
@@ -89,12 +103,60 @@ internal class CenterDirectory(url: String, private val key: String, directIp: S
         val addresses = grant.getJSONArray("addresses")
         require(addresses.length() in 1..16)
 
+        // Collect all tunnel endpoints advertised by the host (supports Tailscale + EasyTier simultaneously).
+        val hostTunnels = mutableListOf<Pair<String, String>>()
+        val hostProviders = mutableListOf<String>()
+        val tunnelsArr = grant.optJSONArray("tunnels")
+        if (tunnelsArr != null) {
+            for (i in 0 until tunnelsArr.length()) {
+                val obj = tunnelsArr.optJSONObject(i) ?: continue
+                val p = obj.optString("provider").trim().lowercase()
+                val a = obj.optString("address").trim()
+                if (p.isNotEmpty() && a.isNotEmpty()) {
+                    hostTunnels.add(p to a)
+                    if (p !in hostProviders) hostProviders.add(p)
+                }
+            }
+        }
+        if (hostTunnels.isEmpty()) {
+            val lp = grant.optString("tunnelProvider").trim().lowercase()
+            val la = grant.optString("tunnelAddress").trim()
+            if (lp.isNotEmpty() && la.isNotEmpty()) {
+                hostTunnels.add(lp to la)
+                hostProviders.add(lp)
+            }
+        }
+
+        val directCandidates = mutableListOf<Pair<String, String>>()
         for (index in 0 until addresses.length()) {
             val address = addresses.getString(index)
             if (!(address.matches(Regex("[0-9.]+")) && address.contains('.') ||
                     address.matches(Regex("[a-fA-F0-9:.]+")) && address.contains(':'))) continue
             val ip = runCatching { InetAddress.getByName(address) }.getOrNull() ?: continue
             if (ip.isAnyLocalAddress || ip.isLoopbackAddress || ip.isLinkLocalAddress || ip.isMulticastAddress) continue
+            val routeLabel = classifyDirectRoute(ip)
+            directCandidates.add(address to routeLabel)
+        }
+
+        val tunnelCandidates = mutableListOf<Pair<String, String>>()
+        if (tunnelManager != null && hostTunnels.isNotEmpty()) {
+            val forwards = tunnelManager.ensureForwards(hostTunnels, port, httpsPort)
+            for ((localHost, provider) in forwards) {
+                val label = if (provider.equals("easytier", ignoreCase = true)) "EasyTier" else "Tailscale"
+                tunnelCandidates.add(localHost to label)
+            }
+        }
+
+        val orderedCandidates = mutableListOf<Pair<String, String>>()
+        if (tunnelManager?.preferTunnelFirst() == true) {
+            orderedCandidates.addAll(tunnelCandidates)
+            orderedCandidates.addAll(directCandidates)
+        } else {
+            orderedCandidates.addAll(directCandidates)
+            orderedCandidates.addAll(tunnelCandidates)
+        }
+
+        for ((address, routeLabel) in orderedCandidates) {
             val endpoint = ComputerDetails.AddressTuple(address, port)
             try {
                 val http = NvHTTP(endpoint, httpsPort, uniqueId, name, cert, crypto)
@@ -111,18 +173,41 @@ internal class CenterDirectory(url: String, private val key: String, directIp: S
                         else it.appName == "Desktop" || it.appName == "桌面"
                     }
                 }
-                return Connection(computer, app)
+                return Connection(computer, app, routeLabel)
             } catch (_: IOException) {
                 // Another advertised address may be reachable.
+            }
+        }
+
+        if (hostProviders.isNotEmpty() && tunnelManager != null) {
+            val missing = hostProviders.filter { !tunnelManager.isProviderConnected(it) }
+                .map { if (it == "easytier") "EasyTier" else "Tailscale" }
+            if (missing.isNotEmpty()) {
+                throw TunnelRequiredException(missing)
             }
         }
         throw IOException("The host is unreachable")
     }
 
+    private fun classifyDirectRoute(ip: InetAddress): String {
+        val raw = ip.address
+        if (raw.size == 4) {
+            val b0 = raw[0].toInt() and 0xFF
+            val b1 = raw[1].toInt() and 0xFF
+            // 100.64.0.0/10 (system Tailscale / CGNAT)
+            if (b0 == 100 && (b1 and 0xC0) == 64) return "Tailscale"
+        }
+        return if (ip.isSiteLocalAddress || ip.isLoopbackAddress) "局域网直连" else "公网直连"
+    }
+
     private fun request(deviceId: String? = null, body: JSONObject? = null): String {
+        val path = if (deviceId != null) "/v1/devices/$deviceId/pair" else "/v1/devices"
+        return requestPath(path, body)
+    }
+
+    private fun requestPath(subPath: String, body: JSONObject? = null): String {
         val endpoint = url.newBuilder()
-            .encodedPath(url.encodedPath.trimEnd('/') + "/v1/devices")
-            .apply { if (deviceId != null) addPathSegment(deviceId).addPathSegment("pair") }
+            .encodedPath(url.encodedPath.trimEnd('/') + subPath)
             .build()
         val request = Request.Builder().url(endpoint)
             .header("Authorization", "Bearer $key")

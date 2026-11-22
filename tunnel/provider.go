@@ -177,6 +177,11 @@ func (a *LoopbackAllocator) Allocate(remoteIP string) (string, error) {
 	lo := byte(a.nextOct%250) + 1
 	a.nextOct++
 	ip := fmt.Sprintf("127.18.%d.%d", hi, lo)
+	if ln, err := net.Listen("tcp4", ip+":0"); err == nil {
+		_ = ln.Close()
+	} else {
+		ip = "127.0.0.1"
+	}
 	a.byPeer[remoteIP] = ip
 	return ip, nil
 }

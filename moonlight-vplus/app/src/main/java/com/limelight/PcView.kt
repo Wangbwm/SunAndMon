@@ -31,8 +31,10 @@ import com.limelight.unlock.HostUnlockUi
 import com.limelight.binding.PlatformBinding
 import com.limelight.binding.crypto.AndroidCryptoProvider
 import com.limelight.computers.ComputerManagerService
+import com.limelight.computers.AndroidTunnelManager
 import com.limelight.computers.CenterCredentialStore
 import com.limelight.computers.CenterDirectory
+import com.limelight.ui.TunnelSettingsDialog
 import com.limelight.computers.PairStatePreflight
 import com.limelight.networkquality.NetworkQualitySheet
 import com.limelight.networkquality.StreamDeviceDisplay
@@ -478,6 +480,7 @@ class PcView : ThemedActivity(), AdapterFragmentCallbacks, ShakeDetector.Listene
         super.onDestroy()
 
         uiScope.cancel()
+        tunnelManager.removeListener(tunnelStatusListener)
         easyTierController?.onDestroy()
         if (managerBinder != null) {
             unbindService(serviceConnection)
@@ -704,6 +707,11 @@ class PcView : ThemedActivity(), AdapterFragmentCallbacks, ShakeDetector.Listene
     }
 
     private var centerDirectory: CenterDirectory? = null
+    private var centerTunnelDefaults: JSONObject? = null
+    private val tunnelManager by lazy { AndroidTunnelManager.get(this) }
+    private val tunnelStatusListener: () -> Unit = {
+        centerHome?.updateTunnelStatus(tunnelManager.summaryBadge(), tunnelManager.isAnyConnected())
+    }
     private var centerJob: Job? = null
     private var centerHome: CenterDeviceView? = null
     private var registeredDevices = emptyList<CenterDirectory.Device>()
@@ -719,6 +727,7 @@ class PcView : ThemedActivity(), AdapterFragmentCallbacks, ShakeDetector.Listene
             context = this,
             refresh = ::refreshCenterDevices,
             centerSettings = ::openCenterSettings,
+            tunnelSettings = ::openTunnelSettings,
             addLanComputer = ::showAddComputerActionSheet,
             refreshLan = ::refreshLanComputers,
             streamSettings = { startActivity(Intent(this, StreamSettings::class.java)) },
@@ -728,11 +737,22 @@ class PcView : ThemedActivity(), AdapterFragmentCallbacks, ShakeDetector.Listene
             page.visibility = View.GONE
             container.addView(page, FrameLayout.LayoutParams(-1, -1))
         }
+        tunnelManager.addListener(tunnelStatusListener)
+        tunnelManager.startOnLaunch()
+        centerHome?.updateTunnelStatus(tunnelManager.summaryBadge(), tunnelManager.isAnyConnected())
         renderCenterHome()
         syncLanDevicesToHome()
         if (!packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_LEANBACK) && !returnToCenterOnBack) {
             showCenterHome()
         }
+    }
+
+    private fun openTunnelSettings() {
+        TunnelSettingsDialog(
+            context = this,
+            tunnel = tunnelManager,
+            centerDefaultsProvider = { centerTunnelDefaults }
+        ).show()
     }
 
     private fun showCenterHome() {
@@ -896,8 +916,20 @@ class PcView : ThemedActivity(), AdapterFragmentCallbacks, ShakeDetector.Listene
         renderCenterHome(loading = true)
         centerJob = uiScope.launch {
             try {
-                registeredDevices = withContext(Dispatchers.IO) { directory.devices() }
+                val (devices, defaults) = withContext(Dispatchers.IO) {
+                    directory.devices() to directory.tunnelDefaults()
+                }
+                registeredDevices = devices
                 centerDirectory = directory
+                if (defaults != null) {
+                    centerTunnelDefaults = defaults
+                    val defProvider = defaults.optString("provider").trim().lowercase()
+                    val unconfigured = (defProvider == "easytier" && tunnelManager.etNetworkName.isEmpty()) ||
+                        (defProvider == "tailscale" && tunnelManager.tsControlUrl.isEmpty() && tunnelManager.tsAuthKey.isEmpty())
+                    if (signingIn || unconfigured) {
+                        tunnelManager.applyCenterDefaults(defaults, autoStartIfIdle = true)
+                    }
+                }
                 if (signingIn) {
                     CenterCredentialStore.save(this@PcView, directory)
                 }
@@ -925,9 +957,12 @@ class PcView : ThemedActivity(), AdapterFragmentCallbacks, ShakeDetector.Listene
                 stopComputerUpdatesAndWait()
                 val connection = withContext(Dispatchers.IO) {
                     val crypto = PlatformBinding.getCryptoProvider(this@PcView)
-                    directory.connect(device, binder.getUniqueId(), clientName, crypto).also {
+                    directory.connect(device, binder.getUniqueId(), clientName, crypto, tunnelManager).also {
                         check(binder.saveCenterComputer(it.computer))
                     }
+                }
+                if (connection.routeLabel.isNotEmpty()) {
+                    showToast(getString(R.string.center_connected_via_route, connection.routeLabel))
                 }
                 when (action) {
                     CenterDeviceView.Action.DESKTOP -> {
@@ -942,6 +977,8 @@ class PcView : ThemedActivity(), AdapterFragmentCallbacks, ShakeDetector.Listene
                 }
             } catch (e: CancellationException) {
                 throw e
+            } catch (e: CenterDirectory.TunnelRequiredException) {
+                showToast(getString(R.string.center_connect_need_tunnel, e.missingProviders.joinToString(" / ")))
             } catch (_: Exception) {
                 showToast(getString(R.string.center_connect_failed))
             } finally {

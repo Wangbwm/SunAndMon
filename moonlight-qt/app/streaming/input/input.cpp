@@ -44,6 +44,31 @@ bool isStreamWindowFullscreen(SDL_Window* window)
     return window != nullptr && (SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN) != 0;
 }
 
+bool isStreamWindowInputFocused(SDL_Window* window)
+{
+    if (window == nullptr) {
+        return false;
+    }
+    if ((SDL_GetWindowFlags(window) & SDL_WINDOW_INPUT_FOCUS) != 0) {
+        return true;
+    }
+#ifdef Q_OS_WIN32
+    if (Session::embedParentWindowId() != 0) {
+        SDL_SysWMinfo wmInfo;
+        SDL_VERSION(&wmInfo.version);
+        if (SDL_GetWindowWMInfo(window, &wmInfo) && wmInfo.subsystem == SDL_SYSWM_WINDOWS) {
+            HWND childHwnd = wmInfo.info.win.window;
+            HWND parentHwnd = reinterpret_cast<HWND>(Session::embedParentWindowId());
+            if (IsWindowVisible(childHwnd) &&
+                (GetFocus() == childHwnd || GetForegroundWindow() == parentHwnd)) {
+                return true;
+            }
+        }
+    }
+#endif
+    return false;
+}
+
 bool toSdlSystemCursor(NativeCursorShape shape, SDL_SystemCursor& systemCursor)
 {
     switch (shape) {
@@ -855,7 +880,7 @@ bool SdlInputHandler::isCaptureActive()
 
 void SdlInputHandler::updateKeyboardGrabState()
 {
-    const bool windowFocused = m_Window != nullptr && (SDL_GetWindowFlags(m_Window) & SDL_WINDOW_INPUT_FOCUS);
+    const bool windowFocused = isStreamWindowInputFocused(m_Window);
     bool shouldGrab = m_CaptureSystemKeysMode != StreamingPreferences::CSK_OFF &&
                       (isCaptureActive() ||
                        (m_CaptureSystemKeysMode == StreamingPreferences::CSK_ALWAYS &&
@@ -891,8 +916,7 @@ bool SdlInputHandler::isSystemKeyCaptureActive()
     // always set when capture "fails" on SDL3, even though the user may have
     // configured the compositor to pass through system keys to us anyway.
     // See issues #1776 and #1900 for details.
-    Uint32 windowFlags = SDL_GetWindowFlags(m_Window);
-    if (!(windowFlags & SDL_WINDOW_INPUT_FOCUS) || !m_KeyboardCaptureActive) {
+    if (!isStreamWindowInputFocused(m_Window) || !m_KeyboardCaptureActive) {
         return false;
     }
 
@@ -927,6 +951,19 @@ void SdlInputHandler::setCaptureActive(bool active)
 
             // Convert global mouse state to window-relative
             SDL_GetWindowPosition(m_Window, &windowX, &windowY);
+#ifdef Q_OS_WIN32
+            if (Session::embedParentWindowId() != 0) {
+                SDL_SysWMinfo wmInfo;
+                SDL_VERSION(&wmInfo.version);
+                if (SDL_GetWindowWMInfo(m_Window, &wmInfo) && wmInfo.subsystem == SDL_SYSWM_WINDOWS) {
+                    RECT rc {};
+                    if (GetWindowRect(wmInfo.info.win.window, &rc)) {
+                        windowX = rc.left;
+                        windowY = rc.top;
+                    }
+                }
+            }
+#endif
             mouseX -= windowX;
             mouseY -= windowY;
 
@@ -943,7 +980,7 @@ void SdlInputHandler::setCaptureActive(bool active)
         }
     }
     else {
-        if (m_Window != nullptr && (SDL_GetWindowFlags(m_Window) & SDL_WINDOW_INPUT_FOCUS)) {
+        if (isStreamWindowInputFocused(m_Window)) {
             m_InputExplicitlyReleased = true;
         }
         // A capture transition can happen without a window focus event (for

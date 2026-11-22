@@ -111,7 +111,7 @@ public:
     void ensureForwardsAsync(const QList<QPair<QString, QString>>& endpoints,
                              quint16 httpPort,
                              quint16 httpsPort,
-                             std::function<void(QStringList localHosts)> callback);
+                             std::function<void(QList<QPair<QString, QString>> localForwards)> callback);
 
 signals:
     void changed();

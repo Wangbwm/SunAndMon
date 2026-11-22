@@ -12,7 +12,7 @@ AbstractButton {
     readonly property bool lightChrome: parent && parent.lightChrome === true
 
     width: 44
-    height: 56
+    height: parent ? parent.height : 56
     focusPolicy: Qt.NoFocus
     hoverEnabled: true
 

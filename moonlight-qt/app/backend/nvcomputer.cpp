@@ -695,6 +695,7 @@ bool NvComputer::update(const NvComputer& that)
         changed = true;
     }
     ASSIGN_IF_CHANGED(state);
+    ASSIGN_IF_CHANGED_AND_NONEMPTY(connectionTransport);
     ASSIGN_IF_CHANGED(gfeVersion);
     ASSIGN_IF_CHANGED(appVersion);
     ASSIGN_IF_CHANGED(isSupportedServerVersion);

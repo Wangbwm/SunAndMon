@@ -38,6 +38,9 @@ public:
     Q_INVOKABLE void retryTab(const QString& tabId);
     Q_INVOKABLE void closeAllTabs();
     Q_INVOKABLE void setFullscreenStream(bool enabled);
+    Q_INVOKABLE void toggleActiveMenu();
+    Q_INVOKABLE void notifyHostWindowMoved();
+    Q_INVOKABLE void notifyHostWindowFocusChanged(bool active);
 
 signals:
     void changed();
@@ -51,6 +54,8 @@ private:
         QString state; // connecting | streaming | error
         QString statusText;
         QString errorText;
+        QString routeType;  // lan | easytier | tailscale | direct | tunnel
+        QString routeLabel; // localized display label
         QProcess* proc = nullptr;
         QByteArray stdoutBuf;
         quintptr childWinId = 0;
@@ -63,16 +68,16 @@ private:
     QRect nativeViewportRect() const;
     void sendCommand(TabEntry& tab, const QByteArray& cmd);
     void applyNativeHide(quintptr childWinId);
-    void applyNativeResize(quintptr childWinId, const QRect& rect);
     void handleChildLine(const QString& tabId, const QByteArray& line);
 
     QPointer<QWindow> m_HostWindow;
     QList<TabEntry> m_Tabs;
     QString m_ActiveTabId;
     qreal m_LogicalX = 0;
-    qreal m_LogicalY = 94;
+    qreal m_LogicalY = 40;
     qreal m_LogicalW = 1280;
-    qreal m_LogicalH = 546;
+    qreal m_LogicalH = 600;
+    QRect m_LastSentNativeRect;
     bool m_FullscreenStream = false;
     int m_NextTabSeq = 1;
 };

@@ -252,6 +252,12 @@ private:
     bool isStreamingWindowFocused() const;
     bool isStreamingWindowMinimized() const;
     void syncQtOverlayWindowsWithSdlWindowState();
+    void ensureEmbeddedWindowAttached();
+    void detachEmbeddedWindowSubclass();
+    void applyEmbeddedWindowRect(const QRect& rect, bool forceNotify);
+    void focusEmbeddedWindow();
+    void restoreEmbeddedParentFocus();
+    void emitEmbeddedRouteInfo();
     QRect qtOverlayParentGeometry() const;
     QPoint qtOverlayPositionForSdlPoint(int x, int y) const;
 #ifdef HAS_QT_SDL_WAYLAND_BRIDGE
@@ -519,6 +525,10 @@ private:
     static CONNECTION_LISTENER_CALLBACKS k_ConnCallbacks;
     static Session* s_ActiveSession;
     static QSemaphore s_ActiveSessionSemaphore;
+    bool m_EmbedVisible = false;
+    QRect m_EmbedCurrentRect;
+    QSize m_LastNotifiedEmbedSize;
+    quintptr m_EmbedSubclassedHwnd = 0;
 #ifndef STEAM_LINK
     MicStream* m_MicStream;
 #else

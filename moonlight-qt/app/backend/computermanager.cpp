@@ -621,6 +621,7 @@ void ComputerManager::connectFromCenter(const QJsonObject& grant)
     const auto ticket = grant.value("ticket").toString();
     const auto addresses = grant.value("addresses").toArray();
     const auto tunnelLocalAddresses = grant.value("tunnelLocalAddresses").toArray();
+    const auto tunnelProviderByLocalHost = grant.value("tunnelProviderByLocalHost").toObject();
     const bool preferTunnelFirst = grant.value("preferTunnelFirst").toBool(false);
     const int port = grant.value("port").toInt();
     const int httpsPort = grant.value("httpsPort").toInt();
@@ -631,7 +632,7 @@ void ComputerManager::connectFromCenter(const QJsonObject& grant)
         return;
     }
 
-    m_CenterPool.start([this, cert, ticket, addresses, tunnelLocalAddresses, preferTunnelFirst, port, httpsPort] {
+    m_CenterPool.start([this, cert, ticket, addresses, tunnelLocalAddresses, tunnelProviderByLocalHost, preferTunnelFirst, port, httpsPort] {
         QList<QHostAddress> directCandidates;
         for (const auto addressValue : addresses) {
             const QHostAddress ip(addressValue.toString());
@@ -684,6 +685,21 @@ void ComputerManager::connectFromCenter(const QJsonObject& grant)
                 if (computer->uuid.isEmpty() || computer->pairState != NvComputer::PS_PAIRED ||
                     computer->activeHttpsPort != httpsPort) {
                     continue;
+                }
+                const QString provider = tunnelProviderByLocalHost.value(ip.toString()).toString().trimmed().toLower();
+                if (!provider.isEmpty()) {
+                    computer->connectionTransport = provider;
+                } else {
+                    bool okV4 = false;
+                    const quint32 v4 = ip.toIPv4Address(&okV4);
+                    if (okV4 && (v4 & 0xFFC00000u) == 0x64400000u) {
+                        // 100.64.0.0/10 (system Tailscale / CGNAT mesh)
+                        computer->connectionTransport = QStringLiteral("tailscale");
+                    } else if (ip.isPrivateUse() || ip.isSiteLocal() || ip.isLoopback()) {
+                        computer->connectionTransport = QStringLiteral("lan");
+                    } else {
+                        computer->connectionTransport = QStringLiteral("direct");
+                    }
                 }
                 computer->manualAddress = address;
                 if (m_Closing) {

@@ -46,6 +46,8 @@
 // Scaling the icon down on Win32 looks dreadful, so render at lower res
 #define ICON_SIZE 32
 #include <windows.h>
+#include <commctrl.h>
+#include <imm.h>
 #include <dxgi1_6.h>
 #include <wrl/client.h>
 #else
@@ -120,10 +122,112 @@ quintptr s_EmbedParentWinId = 0;
 QRect s_EmbedInitialRect;
 
 struct EmbedCommand {
-    enum Type { Resize, Show, Hide, Quit };
+    enum Type { Resize, Show, Hide, Focus, SyncOverlay, ToggleMenu, Quit };
     Type type = Quit;
     int x = 0, y = 0, w = 0, h = 0;
 };
+
+#ifdef Q_OS_WIN32
+struct EmbedWin32SubclassApis {
+    using SetWindowSubclassFn = BOOL (WINAPI *)(HWND, SUBCLASSPROC, UINT_PTR, DWORD_PTR);
+    using RemoveWindowSubclassFn = BOOL (WINAPI *)(HWND, SUBCLASSPROC, UINT_PTR);
+    using DefSubclassProcFn = LRESULT (WINAPI *)(HWND, UINT, WPARAM, LPARAM);
+
+    HMODULE module = nullptr;
+    SetWindowSubclassFn setWindowSubclass = nullptr;
+    RemoveWindowSubclassFn removeWindowSubclass = nullptr;
+    DefSubclassProcFn defSubclassProc = nullptr;
+
+    EmbedWin32SubclassApis()
+    {
+        module = LoadLibraryW(L"comctl32.dll");
+        if (!module) {
+            return;
+        }
+        setWindowSubclass = reinterpret_cast<SetWindowSubclassFn>(GetProcAddress(module, "SetWindowSubclass"));
+        removeWindowSubclass = reinterpret_cast<RemoveWindowSubclassFn>(GetProcAddress(module, "RemoveWindowSubclass"));
+        defSubclassProc = reinterpret_cast<DefSubclassProcFn>(GetProcAddress(module, "DefSubclassProc"));
+    }
+
+    bool available() const
+    {
+        return setWindowSubclass && removeWindowSubclass && defSubclassProc;
+    }
+
+    static EmbedWin32SubclassApis& instance()
+    {
+        static EmbedWin32SubclassApis apis;
+        return apis;
+    }
+};
+
+constexpr UINT_PTR kEmbedChildSubclassId = 0x53414D01;
+
+static void focusEmbeddedWin32Child(HWND childHwnd, HWND parentHwnd)
+{
+    if (!childHwnd || !IsWindow(childHwnd) || !IsWindowVisible(childHwnd)) {
+        return;
+    }
+    const DWORD childTid = GetCurrentThreadId();
+    const DWORD parentTid = parentHwnd && IsWindow(parentHwnd)
+                                ? GetWindowThreadProcessId(parentHwnd, nullptr)
+                                : 0;
+    HWND fgHwnd = GetForegroundWindow();
+    const DWORD fgTid = fgHwnd ? GetWindowThreadProcessId(fgHwnd, nullptr) : 0;
+
+    const bool attachedParent = (parentTid != 0 && parentTid != childTid) &&
+                                AttachThreadInput(childTid, parentTid, TRUE);
+    const bool attachedFg = (fgTid != 0 && fgTid != childTid && fgTid != parentTid) &&
+                            AttachThreadInput(childTid, fgTid, TRUE);
+
+    SetFocus(childHwnd);
+    ImmAssociateContext(childHwnd, NULL);
+
+    if (attachedFg) {
+        AttachThreadInput(childTid, fgTid, FALSE);
+    }
+    if (attachedParent) {
+        AttachThreadInput(childTid, parentTid, FALSE);
+    }
+}
+
+static void restoreParentWin32Focus(HWND parentHwnd)
+{
+    if (!parentHwnd || !IsWindow(parentHwnd)) {
+        return;
+    }
+    const DWORD childTid = GetCurrentThreadId();
+    const DWORD parentTid = GetWindowThreadProcessId(parentHwnd, nullptr);
+    const bool attached = (parentTid != 0 && parentTid != childTid) &&
+                          AttachThreadInput(childTid, parentTid, TRUE);
+    SetFocus(parentHwnd);
+    if (attached) {
+        AttachThreadInput(childTid, parentTid, FALSE);
+    }
+}
+
+static LRESULT CALLBACK embedChildSubclassProc(HWND hwnd, UINT message,
+                                               WPARAM wParam, LPARAM lParam,
+                                               UINT_PTR, DWORD_PTR refData)
+{
+    HWND parentHwnd = reinterpret_cast<HWND>(refData);
+    switch (message) {
+    case WM_MOUSEACTIVATE:
+        focusEmbeddedWin32Child(hwnd, parentHwnd);
+        return MA_ACTIVATE;
+    case WM_LBUTTONDOWN:
+    case WM_RBUTTONDOWN:
+    case WM_MBUTTONDOWN:
+        if (GetFocus() != hwnd) {
+            focusEmbeddedWin32Child(hwnd, parentHwnd);
+        }
+        break;
+    default:
+        break;
+    }
+    return EmbedWin32SubclassApis::instance().defSubclassProc(hwnd, message, wParam, lParam);
+}
+#endif
 
 static void startEmbedStdinWatcher()
 {
@@ -155,6 +259,12 @@ static void startEmbedStdinWatcher()
                 cmd->type = EmbedCommand::Show;
             } else if (line == "HIDE") {
                 cmd->type = EmbedCommand::Hide;
+            } else if (line == "FOCUS") {
+                cmd->type = EmbedCommand::Focus;
+            } else if (line == "SYNC_OVERLAY") {
+                cmd->type = EmbedCommand::SyncOverlay;
+            } else if (line == "TOGGLE_MENU") {
+                cmd->type = EmbedCommand::ToggleMenu;
             } else if (line == "QUIT") {
                 cmd->type = EmbedCommand::Quit;
             } else {
@@ -3044,6 +3154,24 @@ bool Session::isStreamingWindowVisible() const
         return false;
     }
 
+    if (s_EmbedParentWinId != 0) {
+        if (!m_EmbedVisible) {
+            return false;
+        }
+#ifdef Q_OS_WIN32
+        HWND parentHwnd = reinterpret_cast<HWND>(s_EmbedParentWinId);
+        if (!IsWindow(parentHwnd) || !IsWindowVisible(parentHwnd) || IsIconic(parentHwnd)) {
+            return false;
+        }
+        SDL_SysWMinfo wmInfo;
+        SDL_VERSION(&wmInfo.version);
+        if (SDL_GetWindowWMInfo(m_Window, &wmInfo) && wmInfo.subsystem == SDL_SYSWM_WINDOWS) {
+            return IsWindowVisible(wmInfo.info.win.window) != FALSE;
+        }
+#endif
+        return true;
+    }
+
     Uint32 windowFlags = SDL_GetWindowFlags(m_Window);
     return (windowFlags & SDL_WINDOW_SHOWN) &&
            !(windowFlags & (SDL_WINDOW_HIDDEN | SDL_WINDOW_MINIMIZED));
@@ -3055,7 +3183,233 @@ bool Session::isStreamingWindowFocused() const
         return m_WaylandStreamWindow->isActive();
     }
 
-    return m_Window != nullptr && (SDL_GetWindowFlags(m_Window) & SDL_WINDOW_INPUT_FOCUS) != 0;
+    if (m_Window == nullptr) {
+        return false;
+    }
+
+    if (s_EmbedParentWinId != 0) {
+        if (!isStreamingWindowVisible()) {
+            return false;
+        }
+#ifdef Q_OS_WIN32
+        HWND parentHwnd = reinterpret_cast<HWND>(s_EmbedParentWinId);
+        HWND fgHwnd = GetForegroundWindow();
+        if (fgHwnd == parentHwnd) {
+            return true;
+        }
+        if (fgHwnd != nullptr) {
+            DWORD fgPid = 0;
+            GetWindowThreadProcessId(fgHwnd, &fgPid);
+            if (fgPid == GetCurrentProcessId()) {
+                return true;
+            }
+        }
+        SDL_SysWMinfo wmInfo;
+        SDL_VERSION(&wmInfo.version);
+        if (SDL_GetWindowWMInfo(m_Window, &wmInfo) && wmInfo.subsystem == SDL_SYSWM_WINDOWS) {
+            if (GetFocus() == wmInfo.info.win.window) {
+                return true;
+            }
+        }
+        return false;
+#else
+        return true;
+#endif
+    }
+
+    return (SDL_GetWindowFlags(m_Window) & SDL_WINDOW_INPUT_FOCUS) != 0;
+}
+
+void Session::ensureEmbeddedWindowAttached()
+{
+    if (s_EmbedParentWinId == 0 || m_Window == nullptr) {
+        return;
+    }
+
+    quintptr childWinId = 0;
+#ifdef Q_OS_WIN32
+    SDL_SysWMinfo wmInfo;
+    SDL_VERSION(&wmInfo.version);
+    if (SDL_GetWindowWMInfo(m_Window, &wmInfo) && wmInfo.subsystem == SDL_SYSWM_WINDOWS) {
+        HWND childHwnd = wmInfo.info.win.window;
+        HWND parentHwnd = reinterpret_cast<HWND>(s_EmbedParentWinId);
+        if (childHwnd && parentHwnd && IsWindow(parentHwnd)) {
+            if (GetParent(childHwnd) != parentHwnd) {
+                LONG_PTR style = GetWindowLongPtrW(childHwnd, GWL_STYLE);
+                style &= ~(WS_POPUP | WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SYSMENU | WS_BORDER);
+                style |= WS_CHILD | WS_CLIPSIBLINGS | WS_CLIPCHILDREN;
+                SetWindowLongPtrW(childHwnd, GWL_STYLE, style);
+
+                LONG_PTR exStyle = GetWindowLongPtrW(childHwnd, GWL_EXSTYLE);
+                exStyle &= ~(WS_EX_APPWINDOW | WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE | WS_EX_CLIENTEDGE);
+                SetWindowLongPtrW(childHwnd, GWL_EXSTYLE, exStyle);
+
+                SetParent(childHwnd, parentHwnd);
+            }
+
+            if (m_EmbedSubclassedHwnd != reinterpret_cast<quintptr>(childHwnd)) {
+                detachEmbeddedWindowSubclass();
+                if (EmbedWin32SubclassApis::instance().available()) {
+                    if (EmbedWin32SubclassApis::instance().setWindowSubclass(
+                            childHwnd, embedChildSubclassProc, kEmbedChildSubclassId,
+                            reinterpret_cast<DWORD_PTR>(parentHwnd))) {
+                        m_EmbedSubclassedHwnd = reinterpret_cast<quintptr>(childHwnd);
+                    }
+                }
+            }
+            childWinId = reinterpret_cast<quintptr>(childHwnd);
+        }
+    }
+#elif defined(Q_OS_LINUX)
+    SDL_SysWMinfo wmInfo;
+    SDL_VERSION(&wmInfo.version);
+    if (SDL_GetWindowWMInfo(m_Window, &wmInfo) && wmInfo.subsystem == SDL_SYSWM_X11 && wmInfo.info.x11.display) {
+        Display* dpy = wmInfo.info.x11.display;
+        Window childWin = wmInfo.info.x11.window;
+        XReparentWindow(dpy, childWin, static_cast<Window>(s_EmbedParentWinId),
+                        m_EmbedCurrentRect.x(), m_EmbedCurrentRect.y());
+        XResizeWindow(dpy, childWin,
+                      static_cast<unsigned int>(qMax(160, m_EmbedCurrentRect.width())),
+                      static_cast<unsigned int>(qMax(120, m_EmbedCurrentRect.height())));
+        XSync(dpy, False);
+        childWinId = static_cast<quintptr>(childWin);
+    }
+#endif
+
+    if (childWinId != 0) {
+        emitEmbedLine(QByteArray("TAB_HWND ") + QByteArray::number(static_cast<qulonglong>(childWinId)));
+    }
+}
+
+void Session::detachEmbeddedWindowSubclass()
+{
+#ifdef Q_OS_WIN32
+    if (m_EmbedSubclassedHwnd != 0) {
+        HWND hwnd = reinterpret_cast<HWND>(m_EmbedSubclassedHwnd);
+        if (IsWindow(hwnd) && EmbedWin32SubclassApis::instance().available()) {
+            EmbedWin32SubclassApis::instance().removeWindowSubclass(
+                hwnd, embedChildSubclassProc, kEmbedChildSubclassId);
+        }
+        m_EmbedSubclassedHwnd = 0;
+    }
+#endif
+}
+
+void Session::applyEmbeddedWindowRect(const QRect& rect, bool forceNotify)
+{
+    if (s_EmbedParentWinId == 0 || m_Window == nullptr) {
+        return;
+    }
+    const int x = qMax(0, rect.x());
+    const int y = qMax(0, rect.y());
+    const int w = qMax(160, rect.width());
+    const int h = qMax(120, rect.height());
+    m_EmbedCurrentRect = QRect(x, y, w, h);
+
+#ifdef Q_OS_WIN32
+    SDL_SysWMinfo wmInfo;
+    SDL_VERSION(&wmInfo.version);
+    if (SDL_GetWindowWMInfo(m_Window, &wmInfo) && wmInfo.subsystem == SDL_SYSWM_WINDOWS) {
+        HWND hwnd = wmInfo.info.win.window;
+        SetWindowPos(hwnd, HWND_TOP, x, y, w, h, SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        SDL_SetWindowSize(m_Window, w, h);
+    }
+#elif defined(Q_OS_LINUX)
+    SDL_SysWMinfo wmInfo;
+    SDL_VERSION(&wmInfo.version);
+    if (SDL_GetWindowWMInfo(m_Window, &wmInfo) && wmInfo.subsystem == SDL_SYSWM_X11 && wmInfo.info.x11.display) {
+        Display* dpy = wmInfo.info.x11.display;
+        Window win = wmInfo.info.x11.window;
+        XMoveResizeWindow(dpy, win, x, y, static_cast<unsigned int>(w), static_cast<unsigned int>(h));
+        XFlush(dpy);
+        SDL_SetWindowSize(m_Window, w, h);
+    }
+#endif
+
+    const QSize targetSize(w, h);
+    if (m_EmbedVisible && (forceNotify || m_LastNotifiedEmbedSize != targetSize)) {
+        m_LastNotifiedEmbedSize = targetSize;
+        SDL_Event sizeEv = {};
+        sizeEv.type = SDL_WINDOWEVENT;
+        sizeEv.window.windowID = SDL_GetWindowID(m_Window);
+        sizeEv.window.event = SDL_WINDOWEVENT_SIZE_CHANGED;
+        sizeEv.window.data1 = w;
+        sizeEv.window.data2 = h;
+        SDL_PushEvent(&sizeEv);
+    }
+    syncQtOverlayWindowsWithSdlWindowState();
+}
+
+void Session::focusEmbeddedWindow()
+{
+    if (s_EmbedParentWinId == 0 || m_Window == nullptr || !m_EmbedVisible) {
+        return;
+    }
+#ifdef Q_OS_WIN32
+    SDL_SysWMinfo wmInfo;
+    SDL_VERSION(&wmInfo.version);
+    if (SDL_GetWindowWMInfo(m_Window, &wmInfo) && wmInfo.subsystem == SDL_SYSWM_WINDOWS) {
+        focusEmbeddedWin32Child(wmInfo.info.win.window, reinterpret_cast<HWND>(s_EmbedParentWinId));
+    }
+#elif defined(Q_OS_LINUX)
+    SDL_SysWMinfo wmInfo;
+    SDL_VERSION(&wmInfo.version);
+    if (SDL_GetWindowWMInfo(m_Window, &wmInfo) && wmInfo.subsystem == SDL_SYSWM_X11 && wmInfo.info.x11.display) {
+        XSetInputFocus(wmInfo.info.x11.display, wmInfo.info.x11.window, RevertToParent, CurrentTime);
+        XFlush(wmInfo.info.x11.display);
+    }
+#endif
+    if (m_InputHandler != nullptr) {
+        m_InputHandler->notifyFocusGained();
+    }
+}
+
+void Session::restoreEmbeddedParentFocus()
+{
+    if (s_EmbedParentWinId == 0) {
+        return;
+    }
+#ifdef Q_OS_WIN32
+    restoreParentWin32Focus(reinterpret_cast<HWND>(s_EmbedParentWinId));
+#endif
+}
+
+void Session::emitEmbeddedRouteInfo()
+{
+    if (s_EmbedParentWinId == 0 || m_Computer == nullptr) {
+        return;
+    }
+    QString routeType = m_Computer->connectionTransport.trimmed().toLower();
+    if (routeType.isEmpty()) {
+        const QHostAddress addr(m_Computer->activeAddress.address());
+        bool okV4 = false;
+        const quint32 v4 = addr.toIPv4Address(&okV4);
+        if (okV4 && (v4 >> 16) == ((127u << 8) | 18u)) {
+            routeType = QStringLiteral("tunnel");
+        } else if (okV4 && (v4 & 0xFFC00000u) == 0x64400000u) {
+            routeType = QStringLiteral("tailscale");
+        } else if (addr.isPrivateUse() || addr.isSiteLocal() || addr.isLoopback()) {
+            routeType = QStringLiteral("lan");
+        } else if (!addr.isNull()) {
+            routeType = QStringLiteral("direct");
+        } else {
+            routeType = QStringLiteral("direct");
+        }
+    }
+
+    QString label;
+    if (routeType == QStringLiteral("easytier")) {
+        label = QStringLiteral("EasyTier");
+    } else if (routeType == QStringLiteral("tailscale")) {
+        label = QStringLiteral("Tailscale");
+    } else if (routeType == QStringLiteral("lan")) {
+        label = tr("LAN Direct");
+    } else if (routeType == QStringLiteral("tunnel")) {
+        label = tr("Tunnel");
+    } else {
+        label = tr("Direct");
+    }
+    emitEmbedLine(QByteArray("TAB_ROUTE ") + routeType.toUtf8() + " " + label.toUtf8());
 }
 
 bool Session::isStreamingWindowMinimized() const
@@ -4070,64 +4424,82 @@ void Session::handleSdlUserEvent(const SDL_UserEvent& event)
             SDL_PushEvent(&quitEv);
             break;
         }
+        if (cmd->type == EmbedCommand::Resize) {
+            applyEmbeddedWindowRect(QRect(cmd->x, cmd->y, cmd->w, cmd->h), false);
+            break;
+        }
+        if (cmd->type == EmbedCommand::Show) {
+            m_EmbedVisible = true;
+            ensureEmbeddedWindowAttached();
+            SDL_ShowWindow(m_Window);
 #ifdef Q_OS_WIN32
-        SDL_SysWMinfo wmInfo;
-        SDL_VERSION(&wmInfo.version);
-        if (SDL_GetWindowWMInfo(m_Window, &wmInfo) && wmInfo.subsystem == SDL_SYSWM_WINDOWS) {
-            HWND hwnd = wmInfo.info.win.window;
-            if (cmd->type == EmbedCommand::Resize) {
-                SetWindowPos(hwnd, HWND_TOP, cmd->x, cmd->y, qMax(160, cmd->w), qMax(120, cmd->h),
-                             SWP_NOACTIVATE);
-                syncQtOverlayWindowsWithSdlWindowState();
-            } else if (cmd->type == EmbedCommand::Show) {
-                ShowWindow(hwnd, SW_SHOW);
-                SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
-                SetFocus(hwnd);
-                syncQtOverlayWindowsWithSdlWindowState();
-            } else if (cmd->type == EmbedCommand::Hide) {
-                if (m_InputHandler) {
-                    m_InputHandler->setCaptureActive(false);
-                }
-                if (m_MenuPanel && m_MenuPanel->isMenuVisible()) {
-                    m_MenuPanel->closeMenu();
-                }
-                if (m_MenuButton) {
-                    m_MenuButton->hideButton();
-                }
-                ShowWindow(hwnd, SW_HIDE);
+            SDL_SysWMinfo wmInfo;
+            SDL_VERSION(&wmInfo.version);
+            if (SDL_GetWindowWMInfo(m_Window, &wmInfo) && wmInfo.subsystem == SDL_SYSWM_WINDOWS) {
+                ShowWindow(wmInfo.info.win.window, SW_SHOW);
             }
-        }
 #elif defined(Q_OS_LINUX)
-        SDL_SysWMinfo wmInfo;
-        SDL_VERSION(&wmInfo.version);
-        if (SDL_GetWindowWMInfo(m_Window, &wmInfo) && wmInfo.subsystem == SDL_SYSWM_X11 && wmInfo.info.x11.display) {
-            Display* dpy = wmInfo.info.x11.display;
-            Window win = wmInfo.info.x11.window;
-            if (cmd->type == EmbedCommand::Resize) {
-                XMoveResizeWindow(dpy, win, cmd->x, cmd->y,
-                                  static_cast<unsigned int>(qMax(160, cmd->w)),
-                                  static_cast<unsigned int>(qMax(120, cmd->h)));
-                XFlush(dpy);
-                syncQtOverlayWindowsWithSdlWindowState();
-            } else if (cmd->type == EmbedCommand::Show) {
-                XMapRaised(dpy, win);
-                XFlush(dpy);
-                syncQtOverlayWindowsWithSdlWindowState();
-            } else if (cmd->type == EmbedCommand::Hide) {
-                if (m_InputHandler) {
-                    m_InputHandler->setCaptureActive(false);
-                }
-                if (m_MenuPanel && m_MenuPanel->isMenuVisible()) {
-                    m_MenuPanel->closeMenu();
-                }
-                if (m_MenuButton) {
-                    m_MenuButton->hideButton();
-                }
-                XUnmapWindow(dpy, win);
-                XFlush(dpy);
+            SDL_SysWMinfo wmInfo;
+            SDL_VERSION(&wmInfo.version);
+            if (SDL_GetWindowWMInfo(m_Window, &wmInfo) && wmInfo.subsystem == SDL_SYSWM_X11 && wmInfo.info.x11.display) {
+                XMapRaised(wmInfo.info.x11.display, wmInfo.info.x11.window);
+                XFlush(wmInfo.info.x11.display);
             }
-        }
 #endif
+            applyEmbeddedWindowRect(m_EmbedCurrentRect, true);
+            focusEmbeddedWindow();
+            syncQtOverlayWindowsWithSdlWindowState();
+            break;
+        }
+        if (cmd->type == EmbedCommand::Hide) {
+            m_EmbedVisible = false;
+            if (m_InputHandler) {
+                m_InputHandler->setCaptureActive(false);
+            }
+            if (m_MenuPanel && m_MenuPanel->isMenuVisible()) {
+                m_MenuPanel->closeMenu();
+            }
+            if (m_MenuButton) {
+                m_MenuButton->hideButton();
+            }
+            if (m_Toast) {
+                m_Toast->dismissImmediately();
+            }
+            SDL_HideWindow(m_Window);
+#ifdef Q_OS_WIN32
+            SDL_SysWMinfo wmInfo;
+            SDL_VERSION(&wmInfo.version);
+            if (SDL_GetWindowWMInfo(m_Window, &wmInfo) && wmInfo.subsystem == SDL_SYSWM_WINDOWS) {
+                ShowWindow(wmInfo.info.win.window, SW_HIDE);
+            }
+#elif defined(Q_OS_LINUX)
+            SDL_SysWMinfo wmInfo;
+            SDL_VERSION(&wmInfo.version);
+            if (SDL_GetWindowWMInfo(m_Window, &wmInfo) && wmInfo.subsystem == SDL_SYSWM_X11 && wmInfo.info.x11.display) {
+                XUnmapWindow(wmInfo.info.x11.display, wmInfo.info.x11.window);
+                XFlush(wmInfo.info.x11.display);
+            }
+#endif
+            restoreEmbeddedParentFocus();
+            break;
+        }
+        if (cmd->type == EmbedCommand::Focus) {
+            if (m_EmbedVisible) {
+                focusEmbeddedWindow();
+                syncQtOverlayWindowsWithSdlWindowState();
+            }
+            break;
+        }
+        if (cmd->type == EmbedCommand::SyncOverlay) {
+            syncQtOverlayWindowsWithSdlWindowState();
+            break;
+        }
+        if (cmd->type == EmbedCommand::ToggleMenu) {
+            if (m_EmbedVisible) {
+                toggleQtOverlayMenu();
+            }
+            break;
+        }
         break;
     }
     default:
@@ -5277,47 +5649,11 @@ void Session::exec()
 #endif
 
     if (embedMode) {
-        quintptr childWinId = 0;
-#ifdef Q_OS_WIN32
-        SDL_SysWMinfo wmInfo;
-        SDL_VERSION(&wmInfo.version);
-        if (SDL_GetWindowWMInfo(m_Window, &wmInfo) && wmInfo.subsystem == SDL_SYSWM_WINDOWS) {
-            HWND childHwnd = wmInfo.info.win.window;
-            HWND parentHwnd = reinterpret_cast<HWND>(s_EmbedParentWinId);
-            if (childHwnd && parentHwnd && IsWindow(parentHwnd)) {
-                LONG_PTR style = GetWindowLongPtrW(childHwnd, GWL_STYLE);
-                style &= ~(WS_POPUP | WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SYSMENU | WS_BORDER);
-                style |= WS_CHILD | WS_CLIPSIBLINGS | WS_CLIPCHILDREN;
-                SetWindowLongPtrW(childHwnd, GWL_STYLE, style);
-
-                LONG_PTR exStyle = GetWindowLongPtrW(childHwnd, GWL_EXSTYLE);
-                exStyle &= ~(WS_EX_APPWINDOW | WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE | WS_EX_CLIENTEDGE);
-                SetWindowLongPtrW(childHwnd, GWL_EXSTYLE, exStyle);
-
-                SetParent(childHwnd, parentHwnd);
-                SetWindowPos(childHwnd, HWND_TOP, x, y, qMax(160, width), qMax(120, height),
-                             SWP_FRAMECHANGED | SWP_NOACTIVATE);
-                childWinId = reinterpret_cast<quintptr>(childHwnd);
-            }
-        }
-#elif defined(Q_OS_LINUX)
-        SDL_SysWMinfo wmInfo;
-        SDL_VERSION(&wmInfo.version);
-        if (SDL_GetWindowWMInfo(m_Window, &wmInfo) && wmInfo.subsystem == SDL_SYSWM_X11 && wmInfo.info.x11.display) {
-            Display* dpy = wmInfo.info.x11.display;
-            Window childWin = wmInfo.info.x11.window;
-            XReparentWindow(dpy, childWin, static_cast<Window>(s_EmbedParentWinId), x, y);
-            XResizeWindow(dpy, childWin,
-                          static_cast<unsigned int>(qMax(160, width)),
-                          static_cast<unsigned int>(qMax(120, height)));
-            XSync(dpy, False);
-            childWinId = static_cast<quintptr>(childWin);
-        }
-#endif
-        if (childWinId != 0) {
-            emitEmbedLine(QByteArray("TAB_HWND ") + QByteArray::number(static_cast<qulonglong>(childWinId)));
-        }
+        m_EmbedCurrentRect = QRect(x, y, qMax(160, width), qMax(120, height));
+        ensureEmbeddedWindowAttached();
+        applyEmbeddedWindowRect(m_EmbedCurrentRect, false);
         startEmbedStdinWatcher();
+        emitEmbeddedRouteInfo();
         emitEmbedLine(QByteArrayLiteral("TAB_READY"));
     }
 
@@ -5527,7 +5863,8 @@ void Session::exec()
         showQtOverlayMenu(globalPosition, closeWhenPointerOutside);
     });
 
-    if (m_Preferences->overlayMenuPosition == StreamingPreferences::OMP_BUTTON) {
+    if (m_Preferences->overlayMenuPosition == StreamingPreferences::OMP_BUTTON &&
+        (!embedMode || m_EmbedVisible)) {
         // Show button at initial position
         const QRect parentRect = qtOverlayParentGeometry();
         if (parentRect.isValid()) {
@@ -6003,6 +6340,13 @@ void Session::exec()
                 // retaining the SDL_Window object. Refresh native input hooks
                 // after renderer creation so they follow the replacement window.
                 m_InputHandler->setWindow(m_Window);
+                if (embedMode) {
+                    ensureEmbeddedWindowAttached();
+                    if (m_EmbedVisible) {
+                        applyEmbeddedWindowRect(m_EmbedCurrentRect, false);
+                        focusEmbeddedWindow();
+                    }
+                }
 #ifdef Q_OS_DARWIN
                 if (m_MacQtEventPumpInputGuard) {
                     m_MacQtEventPumpInputGuard->setStreamingWindow(m_Window);
@@ -6115,6 +6459,10 @@ void Session::exec()
                 if (handled) {
                     break;
                 }
+            }
+
+            if (embedMode && event.type == SDL_MOUSEBUTTONDOWN) {
+                focusEmbeddedWindow();
             }
 
             m_InputHandler->handleMouseButtonEvent(&event.button);
@@ -6344,6 +6692,7 @@ void Session::exec()
     }
 
 DispatchDeferredCleanup:
+    detachEmbeddedWindowSubclass();
     // Switch back to synchronous logging mode
     StreamUtils::exitAsyncLoggingMode();
 

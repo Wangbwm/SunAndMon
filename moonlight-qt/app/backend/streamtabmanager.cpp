@@ -46,6 +46,8 @@ QVariantList StreamTabManager::tabs() const
             {QStringLiteral("state"), tab.state},
             {QStringLiteral("statusText"), tab.statusText},
             {QStringLiteral("errorText"), tab.errorText},
+            {QStringLiteral("routeType"), tab.routeType},
+            {QStringLiteral("routeLabel"), tab.routeLabel},
             {QStringLiteral("embedded"), tab.embedded},
         });
     }
@@ -66,6 +68,8 @@ QVariantMap StreamTabManager::activeTab() const
         {QStringLiteral("state"), tab.state},
         {QStringLiteral("statusText"), tab.statusText},
         {QStringLiteral("errorText"), tab.errorText},
+        {QStringLiteral("routeType"), tab.routeType},
+        {QStringLiteral("routeLabel"), tab.routeLabel},
         {QStringLiteral("embedded"), tab.embedded},
     };
 }
@@ -93,6 +97,21 @@ QRect StreamTabManager::nativeViewportRect() const
     const qreal dpr = m_HostWindow ? qMax<qreal>(1.0, m_HostWindow->devicePixelRatio()) : 1.0;
     const int x = qRound(qMax<qreal>(0.0, m_LogicalX) * dpr);
     const int y = qRound(qMax<qreal>(0.0, m_LogicalY) * dpr);
+#ifdef Q_OS_WIN32
+    if (m_HostWindow && m_HostWindow->winId() != 0) {
+        HWND parentHwnd = reinterpret_cast<HWND>(m_HostWindow->winId());
+        RECT rc {};
+        if (IsWindow(parentHwnd) && GetClientRect(parentHwnd, &rc)) {
+            const int clientW = static_cast<int>(rc.right - rc.left);
+            const int clientH = static_cast<int>(rc.bottom - rc.top);
+            if (clientW > 0 && clientH > 0) {
+                const int w = qMax(160, clientW - x);
+                const int h = qMax(120, clientH - y);
+                return QRect(x, y, w, h);
+            }
+        }
+    }
+#endif
     const int w = qMax(160, qRound(m_LogicalW * dpr));
     const int h = qMax(120, qRound(m_LogicalH * dpr));
     return QRect(x, y, w, h);
@@ -100,18 +119,17 @@ QRect StreamTabManager::nativeViewportRect() const
 
 void StreamTabManager::updateViewport(qreal logicalX, qreal logicalY, qreal logicalW, qreal logicalH)
 {
-    if (qFuzzyCompare(m_LogicalX, logicalX) &&
-        qFuzzyCompare(m_LogicalY, logicalY) &&
-        qFuzzyCompare(m_LogicalW, logicalW) &&
-        qFuzzyCompare(m_LogicalH, logicalH)) {
-        return;
-    }
     m_LogicalX = logicalX;
     m_LogicalY = logicalY;
     m_LogicalW = logicalW;
     m_LogicalH = logicalH;
 
     const QRect nr = nativeViewportRect();
+    if (nr == m_LastSentNativeRect) {
+        return;
+    }
+    m_LastSentNativeRect = nr;
+
     const QByteArray cmd = QByteArray("RESIZE ")
         + QByteArray::number(nr.x()) + " "
         + QByteArray::number(nr.y()) + " "
@@ -122,7 +140,6 @@ void StreamTabManager::updateViewport(qreal logicalX, qreal logicalY, qreal logi
     if (activeIdx >= 0) {
         auto& tab = m_Tabs[activeIdx];
         if (tab.embedded && tab.embeddedReady) {
-            applyNativeResize(tab.childWinId, nr);
             sendCommand(tab, cmd);
         }
     }
@@ -139,22 +156,6 @@ void StreamTabManager::applyNativeHide(quintptr childWinId)
     }
 #else
     Q_UNUSED(childWinId);
-#endif
-}
-
-void StreamTabManager::applyNativeResize(quintptr childWinId, const QRect& rect)
-{
-#ifdef Q_OS_WIN32
-    if (childWinId != 0) {
-        HWND hwnd = reinterpret_cast<HWND>(childWinId);
-        if (IsWindow(hwnd)) {
-            SetWindowPos(hwnd, HWND_TOP, rect.x(), rect.y(), rect.width(), rect.height(),
-                         SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS);
-        }
-    }
-#else
-    Q_UNUSED(childWinId);
-    Q_UNUSED(rect);
 #endif
 }
 
@@ -321,12 +322,26 @@ void StreamTabManager::handleChildLine(const QString& tabId, const QByteArray& l
         emit changed();
         return;
     }
+    if (line.startsWith("TAB_ROUTE ")) {
+        const QByteArray payload = line.mid(10).trimmed();
+        const int sp = payload.indexOf(' ');
+        if (sp > 0) {
+            tab.routeType = QString::fromUtf8(payload.left(sp)).trimmed();
+            tab.routeLabel = QString::fromUtf8(payload.mid(sp + 1)).trimmed();
+        } else {
+            tab.routeType = QString::fromUtf8(payload);
+            tab.routeLabel = tab.routeType;
+        }
+        emit changed();
+        return;
+    }
     if (line == "TAB_READY") {
         tab.state = QStringLiteral("streaming");
         tab.embeddedReady = true;
         tab.statusText.clear();
         tab.errorText.clear();
         const QRect nr = nativeViewportRect();
+        m_LastSentNativeRect = nr;
         const QByteArray resizeCmd = QByteArray("RESIZE ")
             + QByteArray::number(nr.x()) + " "
             + QByteArray::number(nr.y()) + " "
@@ -401,7 +416,7 @@ void StreamTabManager::activateTab(const QString& tabId)
 
     if (m_Tabs[nextIdx].embedded && m_Tabs[nextIdx].embeddedReady) {
         const QRect nr = nativeViewportRect();
-        applyNativeResize(m_Tabs[nextIdx].childWinId, nr);
+        m_LastSentNativeRect = nr;
         sendCommand(m_Tabs[nextIdx], QByteArray("RESIZE ")
             + QByteArray::number(nr.x()) + " " + QByteArray::number(nr.y()) + " "
             + QByteArray::number(nr.width()) + " " + QByteArray::number(nr.height()) + "\n");
@@ -498,6 +513,52 @@ void StreamTabManager::setFullscreenStream(bool enabled)
 {
     if (m_FullscreenStream != enabled) {
         m_FullscreenStream = enabled;
+        m_LastSentNativeRect = QRect();
         emit fullscreenStreamChanged();
+    }
+}
+
+void StreamTabManager::toggleActiveMenu()
+{
+    const int idx = indexOfTab(m_ActiveTabId);
+    if (idx >= 0 && m_Tabs[idx].embedded && m_Tabs[idx].embeddedReady) {
+        sendCommand(m_Tabs[idx], QByteArrayLiteral("TOGGLE_MENU\n"));
+    }
+}
+
+void StreamTabManager::notifyHostWindowMoved()
+{
+    const int idx = indexOfTab(m_ActiveTabId);
+    if (idx >= 0 && m_Tabs[idx].embedded && m_Tabs[idx].embeddedReady) {
+        sendCommand(m_Tabs[idx], QByteArrayLiteral("SYNC_OVERLAY\n"));
+    }
+}
+
+void StreamTabManager::notifyHostWindowFocusChanged(bool active)
+{
+    const QString tabId = m_ActiveTabId;
+    if (tabId.isEmpty()) {
+        return;
+    }
+    if (active) {
+        QTimer::singleShot(15, this, [this, tabId] {
+            if (m_ActiveTabId != tabId) {
+                return;
+            }
+            const int idx = indexOfTab(tabId);
+            if (idx >= 0 && m_Tabs[idx].embedded && m_Tabs[idx].embeddedReady) {
+                sendCommand(m_Tabs[idx], QByteArrayLiteral("FOCUS\n"));
+            }
+        });
+    } else {
+        QTimer::singleShot(60, this, [this, tabId] {
+            if (m_ActiveTabId != tabId) {
+                return;
+            }
+            const int idx = indexOfTab(tabId);
+            if (idx >= 0 && m_Tabs[idx].embedded && m_Tabs[idx].embeddedReady) {
+                sendCommand(m_Tabs[idx], QByteArrayLiteral("SYNC_OVERLAY\n"));
+            }
+        });
     }
 }

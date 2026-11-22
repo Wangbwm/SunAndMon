@@ -3461,6 +3461,18 @@
         <source>This USB device is in use by macOS and cannot be forwarded.</source>
         <translation>此 USB 设备正由 macOS 使用，无法转发。</translation>
     </message>
+    <message>
+        <source>LAN Direct</source>
+        <translation>局域网直连</translation>
+    </message>
+    <message>
+        <source>Direct</source>
+        <translation>公网直连</translation>
+    </message>
+    <message>
+        <source>Tunnel</source>
+        <translation>隧道</translation>
+    </message>
 </context>
 <context>
     <name>SettingsView</name>
@@ -4223,6 +4235,10 @@
     <message>
         <source>No keyboard? Press %1 to open the on-screen keyboard.</source>
         <translation>没有键盘？按 %1 打开屏幕键盘。</translation>
+    </message>
+    <message>
+        <source>Control Center</source>
+        <translation>控制中心</translation>
     </message>
 </context>
 <context>

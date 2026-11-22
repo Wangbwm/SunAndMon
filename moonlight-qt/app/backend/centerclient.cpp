@@ -1348,6 +1348,7 @@ void CenterClient::connectDevice(const QString& id)
         auto grant = QJsonDocument::fromJson(reply->readAll()).object();
         grant.remove(QStringLiteral("tunnelLocalAddress"));
         grant.remove(QStringLiteral("tunnelLocalAddresses"));
+        grant.remove(QStringLiteral("tunnelProviderByLocalHost"));
         grant.remove(QStringLiteral("preferTunnelFirst"));
         if (reply->error() != QNetworkReply::NoError ||
             reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() != 200 ||
@@ -1385,13 +1386,16 @@ void CenterClient::connectDevice(const QString& id)
         const quint16 grantHttpsPort = static_cast<quint16>(grant.value("httpsPort").toInt());
         if (m_Tunnel && !hostTunnels.isEmpty() && grantPort > 0 && grantHttpsPort > 0) {
             m_Tunnel->ensureForwardsAsync(hostTunnels, grantPort, grantHttpsPort,
-                                          [this, grant](const QStringList& localHosts) mutable {
-                                              if (!localHosts.isEmpty()) {
+                                          [this, grant](const QList<QPair<QString, QString>>& localForwards) mutable {
+                                              if (!localForwards.isEmpty()) {
                                                   QJsonArray arr;
-                                                  for (const auto& h : localHosts) {
-                                                      arr.append(h);
+                                                  QJsonObject providerMap;
+                                                  for (const auto& entry : localForwards) {
+                                                      arr.append(entry.first);
+                                                      providerMap.insert(entry.first, entry.second);
                                                   }
                                                   grant.insert(QStringLiteral("tunnelLocalAddresses"), arr);
+                                                  grant.insert(QStringLiteral("tunnelProviderByLocalHost"), providerMap);
                                                   grant.insert(QStringLiteral("preferTunnelFirst"), m_Tunnel->preferTunnelFirst());
                                               }
                                               m_Computers->connectFromCenter(grant);

@@ -885,7 +885,7 @@ void TunnelManager::sendExposeRequest()
 void TunnelManager::ensureForwardsAsync(const QList<QPair<QString, QString>>& endpoints,
                                         quint16 httpPort,
                                         quint16 httpsPort,
-                                        std::function<void(QStringList localHosts)> callback)
+                                        std::function<void(QList<QPair<QString, QString>> localForwards)> callback)
 {
     if (m_ProbingExistingDaemon && !m_DaemonReady) {
         QObject::connect(this, &TunnelManager::daemonAttachFinished, this,
@@ -911,18 +911,19 @@ void TunnelManager::ensureForwardsAsync(const QList<QPair<QString, QString>>& en
     }
 
     struct BatchState {
-        QStringList results;
+        QList<QPair<QString, QString>> results; // (localHost, provider)
         int remaining = 0;
-        std::function<void(QStringList)> done;
+        std::function<void(QList<QPair<QString, QString>>)> done;
     };
     auto state = std::make_shared<BatchState>();
-    state->results = QStringList(matched.size());
+    state->results = QList<QPair<QString, QString>>(matched.size());
     state->remaining = matched.size();
     state->done = std::move(callback);
 
     for (int i = 0; i < matched.size(); ++i) {
+        const QString provider = matched[i].first;
         const QJsonObject body{
-            {QStringLiteral("provider"), matched[i].first},
+            {QStringLiteral("provider"), provider},
             {QStringLiteral("remoteIp"), matched[i].second},
             {QStringLiteral("ports"), QJsonObject{
                 {QStringLiteral("httpPort"), httpPort},
@@ -930,18 +931,23 @@ void TunnelManager::ensureForwardsAsync(const QList<QPair<QString, QString>>& en
             }},
         };
         auto* reply = apiRequest("POST", QStringLiteral("/v1/forward"), QJsonDocument(body).toJson(QJsonDocument::Compact));
-        connect(reply, &QNetworkReply::finished, this, [reply, state, i] {
+        connect(reply, &QNetworkReply::finished, this, [reply, state, i, provider] {
             reply->deleteLater();
             const int code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
             if (reply->error() == QNetworkReply::NoError && code < 400) {
                 const auto obj = QJsonDocument::fromJson(reply->readAll()).object();
-                state->results[i] = obj.value(QStringLiteral("localHost")).toString();
+                const QString localHost = obj.value(QStringLiteral("localHost")).toString();
+                if (!localHost.isEmpty()) {
+                    state->results[i] = {localHost, provider};
+                }
             }
             if (--state->remaining == 0) {
-                QStringList compact;
-                for (const auto& host : state->results) {
-                    if (!host.isEmpty() && !compact.contains(host)) {
-                        compact.append(host);
+                QList<QPair<QString, QString>> compact;
+                QStringList seen;
+                for (const auto& entry : state->results) {
+                    if (!entry.first.isEmpty() && !seen.contains(entry.first)) {
+                        seen.append(entry.first);
+                        compact.append(entry);
                     }
                 }
                 state->done(compact);

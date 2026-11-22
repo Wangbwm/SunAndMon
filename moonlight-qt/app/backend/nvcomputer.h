@@ -106,6 +106,8 @@ public:
     ComputerState state;
     PairState pairState;
     NvAddress activeAddress;
+    // Active transport route hint ("lan", "direct", "easytier", "tailscale") for UI display.
+    QString connectionTransport;
     // 用户手动固定的连接地址。空表示自动选择。和 activeAddress 一样只活在
     // 会话内（不序列化）：activeAddress 本来就是重启后靠轮询重建的。
     // uniqueAddresses() 把它排在最前，所以轮询每次都先试它 —— 固定地址

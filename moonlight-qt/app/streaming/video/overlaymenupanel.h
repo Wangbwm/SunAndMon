@@ -56,6 +56,7 @@ public:
         PasteText,
         TogglePointerRegionLock,
         ShowHostFiles,
+        OpenDeviceList,
         SetStreamResolution,
         SetStreamFps,
         SetStreamDisplay,

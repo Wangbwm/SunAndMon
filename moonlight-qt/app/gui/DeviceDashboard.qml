@@ -74,6 +74,10 @@ Rectangle {
         }
         if (showingLan) {
             lanActionRequested(selectedDevice, action)
+        } else if (action === "desktop" && !dashboard.center.secondaryInstance) {
+            // Keep the main dashboard window open while streaming in an independent window
+            // so users can switch back anytime to launch additional concurrent streams.
+            dashboard.center.openInNewWindow(selectedDevice.id, "desktop")
         } else {
             connectionAction = action
             center.connectDevice(selectedDevice.id)

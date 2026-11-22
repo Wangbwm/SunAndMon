@@ -2206,6 +2206,10 @@
         <translation>手柄鼠标</translation>
     </message>
     <message>
+        <source>New stream / Devices</source>
+        <translation>新开串流 / 设备列表</translation>
+    </message>
+    <message>
         <source>Disconnect</source>
         <translation>断开连接</translation>
     </message>
@@ -3372,6 +3376,14 @@
     <message>
         <source>Opening host files...</source>
         <translation>正在打开主机文件…</translation>
+    </message>
+    <message>
+        <source>Opening device list window...</source>
+        <translation>正在打开设备列表窗口…</translation>
+    </message>
+    <message>
+        <source>Failed to open device list window.</source>
+        <translation>无法打开设备列表窗口。</translation>
     </message>
     <message>
         <source>Host file sharing is not available. Retrying...</source>
@@ -5087,6 +5099,10 @@
     <message>
         <source>Connect tunnel automatically when SunAndMon starts</source>
         <translation>启动 SunAndMon 时自动连接内置隧道</translation>
+    </message>
+    <message>
+        <source>New stream / Devices</source>
+        <translation>新开串流 / 设备列表</translation>
     </message>
     <message>
         <source>Disconnect</source>

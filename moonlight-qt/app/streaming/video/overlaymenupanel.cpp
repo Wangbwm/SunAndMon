@@ -132,9 +132,9 @@ OverlayMenuPanel::OverlayMenuPanel(QWindow* parent, OverlayWindowMode windowMode
     for (const QString &name : {QStringLiteral("tb-settings"), QStringLiteral("menu-position"),
              QStringLiteral("menu-bitrate"), QStringLiteral("menu-files"),
              QStringLiteral("cat-peripherals"), QStringLiteral("cat-display"),
-             QStringLiteral("menu-microphone"), QStringLiteral("cat-gamepad"),
-             QStringLiteral("menu-close"), QStringLiteral("menu-next"),
-             QStringLiteral("tb-back")}) {
+             QStringLiteral("cat-host"), QStringLiteral("menu-microphone"),
+             QStringLiteral("cat-gamepad"), QStringLiteral("menu-close"),
+             QStringLiteral("menu-next"), QStringLiteral("tb-back")}) {
         m_MenuIcons.insert(name, QIcon(QStringLiteral(":/res/fluent/%1.svg").arg(name)));
     }
 
@@ -268,6 +268,8 @@ void OverlayMenuPanel::buildMenuLevels()
         top.items.push_back({tr("Gamepad Mouse"), QString(),  MenuItemType::Toggle,
                              MenuAction::ToggleGamepadMouse, 0, true, false, true}); // separator
     }
+    top.items.push_back({tr("New stream / Devices"), QString(), MenuItemType::Action,
+                         MenuAction::OpenDeviceList, 0, true, false, false});
     top.items.push_back({ tr("Disconnect"), m_HasGamepads ? m_QuitComboGlyphs : QString(),
                           MenuItemType::Action, MenuAction::Quit, 0, true, false, false });
     m_MenuLevels.push_back(top);
@@ -1247,6 +1249,7 @@ void OverlayMenuPanel::paintOverlay(QPainter& p)
         switch (item.action) {
         case MenuAction::ToggleFullScreen: return QStringLiteral("cat-display");
         case MenuAction::ShowHostFiles: return QStringLiteral("menu-files");
+        case MenuAction::OpenDeviceList: return QStringLiteral("cat-host");
         case MenuAction::ToggleMicrophone: return QStringLiteral("menu-microphone");
         case MenuAction::ToggleGamepadMouse: return QStringLiteral("cat-gamepad");
         case MenuAction::Quit:

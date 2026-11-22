@@ -3002,6 +3002,24 @@ void Session::dispatchQtMenuAction(OverlayMenuPanel::MenuAction action)
         combo = SdlInputHandler::KeyComboTogglePointerRegionLock;
         break;
 
+    case OverlayMenuPanel::MenuAction::OpenDeviceList:
+        m_WasCapturedBeforeMenu = false;
+        if (m_InputHandler) {
+            m_InputHandler->setCaptureActive(false);
+        }
+        if (m_Window && (SDL_GetWindowFlags(m_Window) & SDL_WINDOW_FULLSCREEN) &&
+            !(SDL_GetWindowFlags(m_Window) & SDL_WINDOW_FULLSCREEN_DESKTOP)) {
+            if (m_InputHandler) {
+                m_InputHandler->performSpecialKeyCombo(SdlInputHandler::KeyComboToggleFullScreen);
+            }
+        }
+        if (QProcess::startDetached(QCoreApplication::applicationFilePath(), {})) {
+            showStreamingToast(tr("Opening device list window..."), 2000);
+        } else {
+            showStreamingToast(tr("Failed to open device list window."), 2500);
+        }
+        return;
+
     case OverlayMenuPanel::MenuAction::ShowHostFiles:
         appendFileMappingDiagnostic(
                 QStringLiteral("overlay.click_host_files"),

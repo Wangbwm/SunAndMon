@@ -1,9 +1,11 @@
 package com.limelight.computers
 
+import android.app.Activity
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.content.ContextWrapper
 import android.net.ConnectivityManager
 import android.net.Uri
 import android.os.Build
@@ -351,14 +353,21 @@ internal class AndroidTunnelManager private constructor(context: Context) {
         }
     }
 
-    fun openTailscaleAuthUrl(context: Context) {
-        val url = tsAuthUrl.trim()
-        if (url.isEmpty()) return
-        runCatching {
-            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-            context.startActivity(intent)
+    fun openTailscaleAuthUrl(context: Context): Boolean {
+        val uri = Uri.parse(tsAuthUrl)
+        if (uri.scheme !in setOf("https", "http") || uri.host.isNullOrEmpty() || uri.userInfo != null) return false
+        val activity = generateSequence(context) { (it as? ContextWrapper)?.baseContext }
+            .filterIsInstance<Activity>().firstOrNull() ?: return false
+        val intent = Intent(Intent.ACTION_VIEW, uri).addCategory(Intent.CATEGORY_BROWSABLE)
+        return runCatching { activity.startActivity(intent) }.isSuccess
+    }
+
+    fun openPendingTailscaleAuthUrl(context: Context) {
+        val url = tsAuthUrl
+        if (pendingAutoOpenAuthUrl && url.isNotEmpty() && url != lastAutoOpenedAuthUrl) {
+            lastAutoOpenedAuthUrl = url
+            pendingAutoOpenAuthUrl = false
+            openTailscaleAuthUrl(context)
         }
     }
 
@@ -437,20 +446,12 @@ internal class AndroidTunnelManager private constructor(context: Context) {
     ): List<Pair<String, String>> {
         val out = mutableListOf<Pair<String, String>>()
         for (preferred in orderedTunnelProviders()) {
-            val ep = endpoints.firstOrNull {
-                it.first.equals(preferred, ignoreCase = true) && it.second.isNotBlank()
-            } ?: continue
-            val remoteIp = ep.second.trim()
-            if (preferred == "easytier" && isProviderConnected("easytier")) {
-                val localHost = ensureEasyTierForward(remoteIp, httpPort, httpsPort)
-                if (!localHost.isNullOrEmpty()) {
-                    out.add(localHost to "easytier")
-                }
-            } else if (preferred == "tailscale" && isProviderConnected("tailscale")) {
-                val localHost = ensureTailscaleForward(remoteIp, httpPort, httpsPort)
-                if (!localHost.isNullOrEmpty()) {
-                    out.add(localHost to "tailscale")
-                }
+            if (!isProviderConnected(preferred)) continue
+            for ((provider, remoteIp) in endpoints.distinct()) {
+                if (provider != preferred) continue
+                val localHost = if (preferred == "tailscale") ensureTailscaleForward(remoteIp, httpPort, httpsPort)
+                    else ensureEasyTierForward(remoteIp, httpPort, httpsPort)
+                if (!localHost.isNullOrEmpty()) out.add(localHost to preferred)
             }
         }
         return out
@@ -769,8 +770,13 @@ internal class AndroidTunnelManager private constructor(context: Context) {
 
             val reader = BufferedReader(InputStreamReader(proc.inputStream, Charsets.UTF_8))
             var port = 0
-            val deadline = System.currentTimeMillis() + 5000L
-            while (System.currentTimeMillis() < deadline) {
+            val deadline = android.os.SystemClock.elapsedRealtime() + 5000L
+            while (android.os.SystemClock.elapsedRealtime() < deadline) {
+                if (!reader.ready()) {
+                    if (!proc.isAliveCompat()) break
+                    Thread.sleep(40)
+                    continue
+                }
                 val line = runCatching { reader.readLine() }.getOrNull() ?: break
                 if (line.startsWith("READY ")) {
                     port = line.removePrefix("READY ").trim().toIntOrNull() ?: 0
@@ -778,6 +784,9 @@ internal class AndroidTunnelManager private constructor(context: Context) {
                 }
             }
             if (port <= 0) {
+                tsError = runCatching { proc.exitValue() }.getOrNull()?.let {
+                    "内置 Tailscale 进程在启动时退出（退出码 $it）"
+                } ?: "内置 Tailscale 进程启动超时"
                 runCatching { proc.destroy() }
                 return false
             }
@@ -859,15 +868,11 @@ internal class AndroidTunnelManager private constructor(context: Context) {
             (newAuth != tsAuthUrl) || (newErr != tsError) || (newPeers != tsPeersOnline)
         tsState = newState
         tsVirtualIp = newVip
-        tsAuthUrl = newAuth
+        if (newAuth.isNotEmpty() || newState == "connected" || newState == "stopped") tsAuthUrl = newAuth
         tsError = newErr
         tsPeersOnline = newPeers
         if (newState == "connected") {
             pendingAutoOpenAuthUrl = false
-        } else if (newAuth.isNotEmpty() && pendingAutoOpenAuthUrl && newAuth != lastAutoOpenedAuthUrl) {
-            pendingAutoOpenAuthUrl = false
-            lastAutoOpenedAuthUrl = newAuth
-            mainHandler.post { openTailscaleAuthUrl(appContext) }
         }
         if (changed) notifyChanged()
     }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -79,6 +80,7 @@ func (t *TailscaleProvider) Start(ctx context.Context, cfg Config) error {
 		}
 	}
 
+	var srv *tsnet.Server
 	captureLog := func(format string, args ...any) {
 		msg := fmt.Sprintf(format, args...)
 		if idx := strings.Index(msg, "or go to: "); idx >= 0 {
@@ -86,18 +88,19 @@ func (t *TailscaleProvider) Start(ctx context.Context, cfg Config) error {
 			if fields := strings.Fields(u); len(fields) > 0 {
 				u = fields[0]
 			}
-			if strings.HasPrefix(u, "https://") || strings.HasPrefix(u, "http://") {
+			if validAuthURL(u) {
 				t.mu.Lock()
-				if t.state != "connected" {
+				if t.srv == srv && t.state != "connected" {
 					t.authURL = u
 					t.state = "needs_auth"
+					t.lastErr = ""
 				}
 				t.mu.Unlock()
 			}
 		}
 	}
 
-	srv := &tsnet.Server{
+	srv = &tsnet.Server{
 		Dir:        tsDir,
 		Hostname:   hostname,
 		ControlURL: strings.TrimSpace(cfg.ControlURL),
@@ -105,10 +108,6 @@ func (t *TailscaleProvider) Start(ctx context.Context, cfg Config) error {
 		Logf:       captureLog,
 		UserLogf:   captureLog,
 	}
-	if err := srv.Start(); err != nil {
-		return fmt.Errorf("start tsnet: %w", err)
-	}
-
 	runCtx, cancel := context.WithCancel(context.Background())
 
 	t.mu.Lock()
@@ -123,9 +122,18 @@ func (t *TailscaleProvider) Start(ctx context.Context, cfg Config) error {
 	t.lastErr = ""
 	t.peersOnline = 0
 	t.mu.Unlock()
+	if err := srv.Start(); err != nil {
+		_ = t.Stop()
+		return fmt.Errorf("start tsnet: %w", err)
+	}
 
 	go t.pollStatus(runCtx, srv)
 	return nil
+}
+
+func validAuthURL(value string) bool {
+	u, err := url.Parse(value)
+	return err == nil && u.Hostname() != "" && u.User == nil && (u.Scheme == "https" || u.Scheme == "http")
 }
 
 func (t *TailscaleProvider) pollStatus(ctx context.Context, srv *tsnet.Server) {
@@ -155,22 +163,25 @@ func (t *TailscaleProvider) pollStatus(ctx context.Context, srv *tsnet.Server) {
 			if nerr != nil {
 				return
 			}
-			if n.BrowseToURL != nil && *n.BrowseToURL != "" {
-				u := strings.TrimSpace(*n.BrowseToURL)
-				t.mu.Lock()
-				if t.state != "connected" {
+			t.mu.Lock()
+			if t.srv == srv && t.state != "connected" {
+				if n.BrowseToURL != nil && validAuthURL(strings.TrimSpace(*n.BrowseToURL)) {
+					u := strings.TrimSpace(*n.BrowseToURL)
 					t.authURL = u
 					t.state = "needs_auth"
 					t.lastErr = ""
+				} else if n.ErrMessage != nil && t.authURL == "" {
+					t.lastErr = "Tailscale could not contact or authenticate with the control server"
 				}
-				t.mu.Unlock()
 			}
+			t.mu.Unlock()
 		}
 	}()
 
 	ticker := time.NewTicker(800 * time.Millisecond)
 	defer ticker.Stop()
-	var lastLoginTrigger time.Time
+	interactivelyRetried := false
+	started := time.Now()
 
 	for {
 		st, err := lc.Status(ctx)
@@ -203,7 +214,11 @@ func (t *TailscaleProvider) pollStatus(ctx context.Context, srv *tsnet.Server) {
 
 			t.mu.Lock()
 			t.peersOnline = onlinePeers
-			if st.AuthURL != "" && st.BackendState != "Running" {
+			if t.srv != srv {
+				t.mu.Unlock()
+				return
+			}
+			if validAuthURL(st.AuthURL) && st.BackendState != "Running" {
 				t.authURL = st.AuthURL
 			}
 			hasAuthURL := t.authURL != ""
@@ -227,14 +242,24 @@ func (t *TailscaleProvider) pollStatus(ctx context.Context, srv *tsnet.Server) {
 					}
 				}
 			}
+			if needInteractive && !hasAuthURL && t.state != "connected" && t.lastErr == "" && time.Since(started) >= 30*time.Second {
+				t.lastErr = "Tailscale has not issued a sign-in link. Check access to the control server."
+			}
 			t.mu.Unlock()
 
-			if (st.BackendState == "NeedsLogin" || st.BackendState == "NoState") && !hasAuthURL && needInteractive {
-				if time.Since(lastLoginTrigger) >= 3200*time.Millisecond {
-					lastLoginTrigger = time.Now()
-					go func() {
-						_ = lc.StartLoginInteractive(ctx)
-					}()
+			// tsnet starts the first login. Re-requesting it cancels the control
+			// plane's in-flight login, so allow only one delayed recovery attempt.
+			if st.BackendState == "NeedsLogin" && !hasAuthURL && needInteractive && !interactivelyRetried && time.Since(started) >= 25*time.Second {
+				interactivelyRetried = true
+				loginCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+				loginErr := lc.StartLoginInteractive(loginCtx)
+				cancel()
+				if loginErr != nil && ctx.Err() == nil {
+					t.mu.Lock()
+					if t.srv == srv && t.authURL == "" && t.state != "connected" {
+						t.lastErr = "Tailscale could not request a browser sign-in link"
+					}
+					t.mu.Unlock()
 				}
 			}
 		}

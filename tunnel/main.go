@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -27,6 +28,10 @@ func configureAndroidCompatEnv() {
 				_ = os.Setenv("SSL_CERT_DIR", "/apex/com.android.conscrypt/cacerts:/system/etc/security/cacerts")
 			}
 		}
+	}
+	if runtime.GOOS == "android" {
+		// Native Android builds use bionic's resolver, including per-network DNS.
+		return
 	}
 
 	// Android does not have /etc/resolv.conf. Preserve androiddns's /dev/socket/dnsproxyd

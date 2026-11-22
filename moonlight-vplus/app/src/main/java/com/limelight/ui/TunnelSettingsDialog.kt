@@ -100,6 +100,7 @@ internal class TunnelSettingsDialog(
             } else {
                 refreshStatusViews()
             }
+            openPendingAuthUrl()
         }
     }
 
@@ -137,6 +138,13 @@ internal class TunnelSettingsDialog(
         )
         dlg.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
         dialog = dlg
+        dlg.window?.decorView?.post { openPendingAuthUrl() }
+    }
+
+    private fun openPendingAuthUrl() {
+        if (dialog?.isShowing == true && dialog?.window?.decorView?.hasWindowFocus() == true) {
+            tunnel.openPendingTailscaleAuthUrl(context)
+        }
     }
 
     private fun rebuildContent(syncFieldsFromManager: Boolean) {
@@ -325,14 +333,16 @@ internal class TunnelSettingsDialog(
             val btnRow = row()
             btnRow.addView(
                 pillButton(context.getString(R.string.center_ts_open_browser), primary = true) {
-                    tunnel.openTailscaleAuthUrl(context)
+                    if (!tunnel.openTailscaleAuthUrl(context)) {
+                        Toast.makeText(context, R.string.center_ts_browser_failed, Toast.LENGTH_LONG).show()
+                    }
                 },
                 LinearLayout.LayoutParams(0, -2, 1f).apply { marginEnd = dp(4) }
             )
             btnRow.addView(
-                pillButton("复制授权链接", primary = false) {
+                pillButton(context.getString(R.string.center_ts_copy_url), primary = false) {
                     if (tunnel.copyTailscaleAuthUrl(context)) {
-                        Toast.makeText(context, "已复制授权链接", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(context, R.string.center_ts_url_copied, Toast.LENGTH_SHORT).show()
                     }
                 },
                 LinearLayout.LayoutParams(0, -2, 1f).apply { marginStart = dp(4) }
@@ -341,11 +351,6 @@ internal class TunnelSettingsDialog(
             tsAuthUrlLabel = label("", 11, color = muted).apply {
                 setPadding(dp(8), dp(6), dp(8), dp(6))
                 setTextIsSelectable(true)
-                setOnClickListener {
-                    if (tunnel.copyTailscaleAuthUrl(context)) {
-                        Toast.makeText(context, "已复制授权链接", Toast.LENGTH_SHORT).show()
-                    }
-                }
             }
             addView(tsAuthUrlLabel)
         }

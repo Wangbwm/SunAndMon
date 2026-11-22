@@ -222,6 +222,40 @@ static LRESULT CALLBACK embedChildSubclassProc(HWND hwnd, UINT message,
             focusEmbeddedWin32Child(hwnd, parentHwnd);
         }
         break;
+    case WM_SETFOCUS:
+    {
+        SDL_Event ev = {};
+        ev.type = SDL_WINDOWEVENT;
+        ev.window.event = SDL_WINDOWEVENT_FOCUS_GAINED;
+        SDL_PushEvent(&ev);
+        break;
+    }
+    case WM_KILLFOCUS:
+    {
+        HWND newFocus = reinterpret_cast<HWND>(wParam);
+        DWORD newFocusPid = 0;
+        if (newFocus != nullptr) {
+            GetWindowThreadProcessId(newFocus, &newFocusPid);
+        }
+        // Only treat focus moving outside our own process (e.g. another app or
+        // the parent tab bar) as focus loss; clicking our own OverlayMenuPanel
+        // is already handled by showQtOverlayMenu().
+        if (newFocusPid != GetCurrentProcessId()) {
+            SDL_Event ev = {};
+            ev.type = SDL_WINDOWEVENT;
+            ev.window.event = SDL_WINDOWEVENT_FOCUS_LOST;
+            SDL_PushEvent(&ev);
+        }
+        break;
+    }
+    case WM_SYSCOMMAND:
+    {
+        const WPARAM cmd = wParam & 0xFFF0;
+        if (cmd == SC_KEYMENU || cmd == SC_CLOSE) {
+            return 0;
+        }
+        break;
+    }
     default:
         break;
     }
@@ -2916,6 +2950,23 @@ bool Session::isStreamingWindowFullscreen() const
     if (m_WaylandStreamWindow != nullptr) {
         return m_WaylandStreamWindow->windowStates().testFlag(Qt::WindowFullScreen);
     }
+    if (s_EmbedParentWinId != 0) {
+#ifdef Q_OS_WIN32
+        HWND parentHwnd = reinterpret_cast<HWND>(s_EmbedParentWinId);
+        if (parentHwnd && IsWindow(parentHwnd)) {
+            HMONITOR mon = MonitorFromWindow(parentHwnd, MONITOR_DEFAULTTONEAREST);
+            MONITORINFO mi {};
+            mi.cbSize = sizeof(mi);
+            RECT rc {};
+            if (mon && GetMonitorInfoW(mon, &mi) && GetWindowRect(parentHwnd, &rc)) {
+                return rc.left <= mi.rcMonitor.left &&
+                       rc.top <= mi.rcMonitor.top &&
+                       rc.right >= mi.rcMonitor.right &&
+                       rc.bottom >= mi.rcMonitor.bottom;
+            }
+        }
+#endif
+    }
     return m_Window != nullptr && (SDL_GetWindowFlags(m_Window) & SDL_WINDOW_FULLSCREEN) != 0;
 }
 
@@ -3338,6 +3389,10 @@ void Session::applyEmbeddedWindowRect(const QRect& rect, bool forceNotify)
         sizeEv.window.data1 = w;
         sizeEv.window.data2 = h;
         SDL_PushEvent(&sizeEv);
+    }
+    if (m_InputHandler != nullptr) {
+        m_InputHandler->updateKeyboardGrabState();
+        m_InputHandler->updatePointerRegionLock();
     }
     syncQtOverlayWindowsWithSdlWindowState();
 }
@@ -4501,11 +4556,17 @@ void Session::handleSdlUserEvent(const SDL_UserEvent& event)
         }
         if (cmd->type == EmbedCommand::SyncOverlay) {
             m_EmbedHostHidden = false;
+            if (m_InputHandler != nullptr) {
+                m_InputHandler->updateKeyboardGrabState();
+            }
             syncQtOverlayWindowsWithSdlWindowState();
             break;
         }
         if (cmd->type == EmbedCommand::HideOverlay) {
             m_EmbedHostHidden = true;
+            if (m_InputHandler != nullptr) {
+                m_InputHandler->notifyFocusLost();
+            }
             if (m_MenuPanel && m_MenuPanel->isMenuVisible()) {
                 m_MenuPanel->closeMenu();
             }

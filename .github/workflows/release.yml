@@ -437,7 +437,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           SUNSHINE_BUILD_COMMIT: ${{ github.sha }}
           SUNSHINE_BUILD_BRANCH: ${{ github.ref_name }}
-          SUNSHINE_BUILD_CHANNEL: release
+          SUNSHINE_BUILD_CHANNEL: stable
           SUNSHINE_BUILD_BUILDER: ci
         run: |
           set -euo pipefail

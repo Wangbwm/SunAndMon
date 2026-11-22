@@ -59,15 +59,97 @@ bool isStreamWindowInputFocused(SDL_Window* window)
         if (SDL_GetWindowWMInfo(window, &wmInfo) && wmInfo.subsystem == SDL_SYSWM_WINDOWS) {
             HWND childHwnd = wmInfo.info.win.window;
             HWND parentHwnd = reinterpret_cast<HWND>(Session::embedParentWindowId());
-            if (IsWindowVisible(childHwnd) &&
+            if (IsWindow(parentHwnd) && !IsIconic(parentHwnd) && IsWindowVisible(childHwnd) &&
                 (GetFocus() == childHwnd || GetForegroundWindow() == parentHwnd)) {
                 return true;
             }
         }
     }
+#elif defined(Q_OS_LINUX)
+    if (Session::embedParentWindowId() != 0) {
+        if (Session* session = Session::get()) {
+            return session->isStreamingWindowFocused();
+        }
+    }
 #endif
     return false;
 }
+
+#ifdef Q_OS_WIN32
+// Embedded child SDL windows (WS_CHILD via SetParent) never receive WM_ACTIVATE
+// and are never returned by GetForegroundWindow(), so SDL2's internal
+// SDL_SetWindowKeyboardGrab() WH_KEYBOARD_LL hook does not engage. Install a
+// dedicated low-level keyboard hook scoped to the embedded child/parent pair.
+struct EmbedKeyboardHookState {
+    HHOOK hook = nullptr;
+    HWND childHwnd = nullptr;
+    HWND parentHwnd = nullptr;
+    bool active = false;
+};
+
+static EmbedKeyboardHookState s_EmbedKeyboardHook;
+
+static LRESULT CALLBACK embedKeyboardHookProc(int nCode, WPARAM wParam, LPARAM lParam)
+{
+    if (nCode == HC_ACTION && s_EmbedKeyboardHook.active &&
+        s_EmbedKeyboardHook.childHwnd != nullptr &&
+        s_EmbedKeyboardHook.parentHwnd != nullptr) {
+        const auto* hookData = reinterpret_cast<const KBDLLHOOKSTRUCT*>(lParam);
+        const bool isKeyEvent = (wParam == WM_KEYDOWN || wParam == WM_KEYUP ||
+                                 wParam == WM_SYSKEYDOWN || wParam == WM_SYSKEYUP);
+        if (isKeyEvent && hookData != nullptr &&
+            IsWindow(s_EmbedKeyboardHook.childHwnd) &&
+            IsWindowVisible(s_EmbedKeyboardHook.childHwnd) &&
+            IsWindow(s_EmbedKeyboardHook.parentHwnd) &&
+            !IsIconic(s_EmbedKeyboardHook.parentHwnd) &&
+            GetForegroundWindow() == s_EmbedKeyboardHook.parentHwnd) {
+            const DWORD vk = hookData->vkCode;
+            const bool altDown = (hookData->flags & LLKHF_ALTDOWN) != 0;
+            const bool ctrlDown = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+
+            bool shouldIntercept = false;
+            switch (vk) {
+            case VK_LWIN:
+            case VK_RWIN:
+            case VK_APPS:
+            case VK_SNAPSHOT:
+                shouldIntercept = true;
+                break;
+            case VK_TAB:
+            case VK_SPACE:
+            case VK_F4:
+                shouldIntercept = altDown;
+                break;
+            case VK_ESCAPE:
+                shouldIntercept = altDown || ctrlDown;
+                break;
+            default:
+                break;
+            }
+
+            if (shouldIntercept) {
+                const bool isKeyUp = (wParam == WM_KEYUP || wParam == WM_SYSKEYUP);
+                LPARAM msgLParam = 1;
+                msgLParam |= static_cast<LPARAM>(hookData->scanCode & 0xFF) << 16;
+                if (hookData->flags & LLKHF_EXTENDED) {
+                    msgLParam |= (1L << 24);
+                }
+                if (altDown) {
+                    msgLParam |= (1L << 29);
+                }
+                if (isKeyUp) {
+                    msgLParam |= (1L << 30);
+                    msgLParam |= (1L << 31);
+                }
+                PostMessageW(s_EmbedKeyboardHook.childHwnd, static_cast<UINT>(wParam),
+                             static_cast<WPARAM>(vk), msgLParam);
+                return 1;
+            }
+        }
+    }
+    return CallNextHookEx(s_EmbedKeyboardHook.hook, nCode, wParam, lParam);
+}
+#endif
 
 bool toSdlSystemCursor(NativeCursorShape shape, SDL_SystemCursor& systemCursor)
 {
@@ -357,6 +439,7 @@ SdlInputHandler::~SdlInputHandler()
     shutdownWindowsPenInput();
 #endif
 #ifdef Q_OS_WIN32
+    updateEmbeddedWin32KeyboardHook(false);
     // Restore SDL's normal Alt+F4 handling outside the streaming session.
     SDL_SetHint(SDL_HINT_WINDOWS_NO_CLOSE_ON_ALT_F4, "0");
 #endif
@@ -879,6 +962,43 @@ bool SdlInputHandler::isCaptureActive()
     return m_FakeMouseCaptureActive;
 }
 
+#ifdef Q_OS_WIN32
+void SdlInputHandler::updateEmbeddedWin32KeyboardHook(bool enable)
+{
+    if (!enable || m_Window == nullptr || Session::embedParentWindowId() == 0) {
+        s_EmbedKeyboardHook.active = false;
+        s_EmbedKeyboardHook.childHwnd = nullptr;
+        s_EmbedKeyboardHook.parentHwnd = nullptr;
+        if (s_EmbedKeyboardHook.hook != nullptr) {
+            UnhookWindowsHookEx(s_EmbedKeyboardHook.hook);
+            s_EmbedKeyboardHook.hook = nullptr;
+        }
+        return;
+    }
+
+    SDL_SysWMinfo wmInfo;
+    SDL_VERSION(&wmInfo.version);
+    if (!SDL_GetWindowWMInfo(m_Window, &wmInfo) || wmInfo.subsystem != SDL_SYSWM_WINDOWS) {
+        return;
+    }
+
+    s_EmbedKeyboardHook.childHwnd = wmInfo.info.win.window;
+    s_EmbedKeyboardHook.parentHwnd = reinterpret_cast<HWND>(Session::embedParentWindowId());
+    s_EmbedKeyboardHook.active = true;
+
+    if (s_EmbedKeyboardHook.hook == nullptr) {
+        s_EmbedKeyboardHook.hook = SetWindowsHookExW(
+            WH_KEYBOARD_LL, embedKeyboardHookProc, GetModuleHandleW(nullptr), 0);
+        if (s_EmbedKeyboardHook.hook == nullptr) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "Failed to install embedded Win32 keyboard hook: %lu",
+                        GetLastError());
+            s_EmbedKeyboardHook.active = false;
+        }
+    }
+}
+#endif
+
 void SdlInputHandler::updateKeyboardGrabState()
 {
     const bool windowFocused = isStreamWindowInputFocused(m_Window);
@@ -898,6 +1018,12 @@ void SdlInputHandler::updateKeyboardGrabState()
     // On SDL 2.0.15+, we can get keyboard-only grab on Win32, X11, and Wayland.
     // SDL 2.0.18 adds keyboard grab on macOS (if built with non-AppStore APIs).
     SDL_SetWindowKeyboardGrab(m_Window, shouldGrab ? SDL_TRUE : SDL_FALSE);
+#endif
+
+#ifdef Q_OS_WIN32
+    if (Session::embedParentWindowId() != 0) {
+        updateEmbeddedWin32KeyboardHook(shouldGrab && windowFocused);
+    }
 #endif
 
     m_KeyboardCaptureActive = shouldGrab;

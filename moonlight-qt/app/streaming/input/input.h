@@ -335,6 +335,10 @@ private:
     void shutdownWindowsPenInput(bool suppressPointer = false);
 #endif
 
+#ifdef Q_OS_WIN32
+    void updateEmbeddedWin32KeyboardHook(bool enable);
+#endif
+
     void handleRelativeFingerEvent(SDL_TouchFingerEvent* event);
 
     void cancelRelativeTouchpadState();

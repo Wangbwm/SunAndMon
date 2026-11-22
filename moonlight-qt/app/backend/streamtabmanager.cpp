@@ -515,6 +515,19 @@ void StreamTabManager::setFullscreenStream(bool enabled)
         m_FullscreenStream = enabled;
         m_LastSentNativeRect = QRect();
         emit fullscreenStreamChanged();
+        const QString tabId = m_ActiveTabId;
+        if (!tabId.isEmpty()) {
+            QTimer::singleShot(30, this, [this, tabId] {
+                if (m_ActiveTabId != tabId) {
+                    return;
+                }
+                const int idx = indexOfTab(tabId);
+                if (idx >= 0 && m_Tabs[idx].embedded && m_Tabs[idx].embeddedReady &&
+                    (!m_HostWindow || m_HostWindow->isActive())) {
+                    sendCommand(m_Tabs[idx], QByteArrayLiteral("FOCUS\n"));
+                }
+            });
+        }
     }
 }
 

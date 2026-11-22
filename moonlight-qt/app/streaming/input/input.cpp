@@ -44,43 +44,6 @@ bool isStreamWindowFullscreen(SDL_Window* window)
     return window != nullptr && (SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN) != 0;
 }
 
-#ifdef Q_OS_WIN32
-// Embedded streaming windows are WS_CHILD windows of a QWidget owned by the host
-// process, so the parent id we receive is a child HWND and can never be the
-// foreground window. Resolve the top-level ancestor and read the focus window
-// from the host process' input queue instead.
-static bool embeddedWin32StreamFocused(HWND childHwnd, HWND parentHwnd)
-{
-    if (!childHwnd || !IsWindow(childHwnd) || !IsWindowVisible(childHwnd)) {
-        return false;
-    }
-    HWND root = (parentHwnd != nullptr && IsWindow(parentHwnd)) ? GetAncestor(parentHwnd, GA_ROOT)
-                                                                : GetAncestor(childHwnd, GA_ROOT);
-    if (root == nullptr || IsIconic(root)) {
-        return false;
-    }
-    HWND foreground = GetForegroundWindow();
-    if (foreground == nullptr || foreground != root) {
-        return false;
-    }
-    if (GetFocus() == childHwnd) {
-        return true;
-    }
-    GUITHREADINFO info {};
-    info.cbSize = sizeof(info);
-    const DWORD foregroundThread = GetWindowThreadProcessId(foreground, nullptr);
-    if (foregroundThread == 0 || !GetGUIThreadInfo(foregroundThread, &info)) {
-        return false;
-    }
-    for (HWND focus = info.hwndFocus; focus != nullptr; focus = GetParent(focus)) {
-        if (focus == childHwnd) {
-            return true;
-        }
-    }
-    return false;
-}
-#endif
-
 bool isStreamWindowInputFocused(SDL_Window* window)
 {
     if (window == nullptr) {
@@ -94,8 +57,12 @@ bool isStreamWindowInputFocused(SDL_Window* window)
         SDL_SysWMinfo wmInfo;
         SDL_VERSION(&wmInfo.version);
         if (SDL_GetWindowWMInfo(window, &wmInfo) && wmInfo.subsystem == SDL_SYSWM_WINDOWS) {
-            return embeddedWin32StreamFocused(wmInfo.info.win.window,
-                                              reinterpret_cast<HWND>(Session::embedParentWindowId()));
+            HWND childHwnd = wmInfo.info.win.window;
+            HWND parentHwnd = reinterpret_cast<HWND>(Session::embedParentWindowId());
+            if (IsWindow(parentHwnd) && !IsIconic(parentHwnd) && IsWindowVisible(childHwnd) &&
+                (GetFocus() == childHwnd || GetForegroundWindow() == parentHwnd)) {
+                return true;
+            }
         }
     }
 #elif defined(Q_OS_LINUX)
@@ -118,7 +85,6 @@ struct EmbedKeyboardHookState {
     HWND childHwnd = nullptr;
     HWND parentHwnd = nullptr;
     bool active = false;
-    bool winDown = false;
 };
 
 static EmbedKeyboardHookState s_EmbedKeyboardHook;
@@ -132,45 +98,37 @@ static LRESULT CALLBACK embedKeyboardHookProc(int nCode, WPARAM wParam, LPARAM l
         const bool isKeyEvent = (wParam == WM_KEYDOWN || wParam == WM_KEYUP ||
                                  wParam == WM_SYSKEYDOWN || wParam == WM_SYSKEYUP);
         if (isKeyEvent && hookData != nullptr &&
-            embeddedWin32StreamFocused(s_EmbedKeyboardHook.childHwnd,
-                                       s_EmbedKeyboardHook.parentHwnd)) {
+            IsWindow(s_EmbedKeyboardHook.childHwnd) &&
+            IsWindowVisible(s_EmbedKeyboardHook.childHwnd) &&
+            IsWindow(s_EmbedKeyboardHook.parentHwnd) &&
+            !IsIconic(s_EmbedKeyboardHook.parentHwnd) &&
+            GetForegroundWindow() == s_EmbedKeyboardHook.parentHwnd) {
             const DWORD vk = hookData->vkCode;
             const bool altDown = (hookData->flags & LLKHF_ALTDOWN) != 0;
             const bool ctrlDown = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
-            const bool isKeyUp = (wParam == WM_KEYUP || wParam == WM_SYSKEYUP);
-            const bool isWinKey = (vk == VK_LWIN || vk == VK_RWIN);
 
             bool shouldIntercept = false;
-            if (isWinKey) {
-                // Swallow the Win key itself so the local shell never opens the
-                // Start menu, then replay it into the stream window.
+            switch (vk) {
+            case VK_LWIN:
+            case VK_RWIN:
+            case VK_APPS:
+            case VK_SNAPSHOT:
                 shouldIntercept = true;
-                s_EmbedKeyboardHook.winDown = !isKeyUp;
-            } else if (s_EmbedKeyboardHook.winDown) {
-                // Every key typed with Win held belongs to the host (Win+D,
-                // Win+R, ...); letting it through locally would also trigger
-                // the shell shortcut on this machine.
-                shouldIntercept = true;
-            } else {
-                switch (vk) {
-                case VK_APPS:
-                case VK_SNAPSHOT:
-                    shouldIntercept = true;
-                    break;
-                case VK_TAB:
-                case VK_SPACE:
-                case VK_F4:
-                    shouldIntercept = altDown;
-                    break;
-                case VK_ESCAPE:
-                    shouldIntercept = altDown || ctrlDown;
-                    break;
-                default:
-                    break;
-                }
+                break;
+            case VK_TAB:
+            case VK_SPACE:
+            case VK_F4:
+                shouldIntercept = altDown;
+                break;
+            case VK_ESCAPE:
+                shouldIntercept = altDown || ctrlDown;
+                break;
+            default:
+                break;
             }
 
             if (shouldIntercept) {
+                const bool isKeyUp = (wParam == WM_KEYUP || wParam == WM_SYSKEYUP);
                 LPARAM msgLParam = 1;
                 msgLParam |= static_cast<LPARAM>(hookData->scanCode & 0xFF) << 16;
                 if (hookData->flags & LLKHF_EXTENDED) {
@@ -1009,7 +967,6 @@ void SdlInputHandler::updateEmbeddedWin32KeyboardHook(bool enable)
 {
     if (!enable || m_Window == nullptr || Session::embedParentWindowId() == 0) {
         s_EmbedKeyboardHook.active = false;
-        s_EmbedKeyboardHook.winDown = false;
         s_EmbedKeyboardHook.childHwnd = nullptr;
         s_EmbedKeyboardHook.parentHwnd = nullptr;
         if (s_EmbedKeyboardHook.hook != nullptr) {

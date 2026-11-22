@@ -327,7 +327,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          submodules: recursive
+          submodules: false
+
+      # SPIRV-Cross ships shader paths longer than MAX_PATH; submodules need long
+      # path support before they are checked out.
+      - name: Enable Git long paths
+        run: git config --global core.longpaths true
+
+      - name: Checkout submodules
+        run: git submodule update --init --recursive
 
       - name: Download Sunshine Web UI assets
         uses: actions/download-artifact@v4

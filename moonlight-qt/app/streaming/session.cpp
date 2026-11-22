@@ -3384,11 +3384,16 @@ void Session::emitEmbeddedRouteInfo()
         const QHostAddress addr(m_Computer->activeAddress.address());
         bool okV4 = false;
         const quint32 v4 = addr.toIPv4Address(&okV4);
+        const bool isRfc1918 = okV4 && (
+            (v4 & 0xFF000000u) == 0x0A000000u || // 10.0.0.0/8
+            (v4 & 0xFFF00000u) == 0xAC100000u || // 172.16.0.0/12
+            (v4 & 0xFFFF0000u) == 0xC0A80000u    // 192.168.0.0/16
+        );
         if (okV4 && (v4 >> 16) == ((127u << 8) | 18u)) {
             routeType = QStringLiteral("tunnel");
         } else if (okV4 && (v4 & 0xFFC00000u) == 0x64400000u) {
             routeType = QStringLiteral("tailscale");
-        } else if (addr.isPrivateUse() || addr.isSiteLocal() || addr.isLoopback()) {
+        } else if (isRfc1918 || addr.isSiteLocal() || addr.isUniqueLocalUnicast() || addr.isLoopback()) {
             routeType = QStringLiteral("lan");
         } else if (!addr.isNull()) {
             routeType = QStringLiteral("direct");

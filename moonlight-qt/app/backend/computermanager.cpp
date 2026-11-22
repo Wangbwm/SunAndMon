@@ -692,10 +692,15 @@ void ComputerManager::connectFromCenter(const QJsonObject& grant)
                 } else {
                     bool okV4 = false;
                     const quint32 v4 = ip.toIPv4Address(&okV4);
+                    const bool isRfc1918 = okV4 && (
+                        (v4 & 0xFF000000u) == 0x0A000000u || // 10.0.0.0/8
+                        (v4 & 0xFFF00000u) == 0xAC100000u || // 172.16.0.0/12
+                        (v4 & 0xFFFF0000u) == 0xC0A80000u    // 192.168.0.0/16
+                    );
                     if (okV4 && (v4 & 0xFFC00000u) == 0x64400000u) {
                         // 100.64.0.0/10 (system Tailscale / CGNAT mesh)
                         computer->connectionTransport = QStringLiteral("tailscale");
-                    } else if (ip.isPrivateUse() || ip.isSiteLocal() || ip.isLoopback()) {
+                    } else if (isRfc1918 || ip.isSiteLocal() || ip.isUniqueLocalUnicast() || ip.isLoopback()) {
                         computer->connectionTransport = QStringLiteral("lan");
                     } else {
                         computer->connectionTransport = QStringLiteral("direct");

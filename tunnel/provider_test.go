@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -156,5 +157,43 @@ func TestEasyTierIdentityPersistence(t *testing.T) {
 	}
 	if id1 != id2 {
 		t.Fatalf("identity did not persist: %+v vs %+v", id1, id2)
+	}
+}
+
+func TestSelectForwardPortOffsetAvoidsConflict(t *testing.T) {
+	a := NewLoopbackAllocator()
+	localHost, err := a.Allocate("test:conflict")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Pick a base port block whose native TCP and UDP ports are currently free.
+	var basePort uint16
+	for candidate := uint16(45100); candidate < 47000; candidate += 100 {
+		if canBindForwardPorts(localHost, HostPorts{HTTPPort: candidate}.Normalized(), 0) {
+			basePort = candidate
+			break
+		}
+	}
+	if basePort == 0 {
+		t.Fatal("could not find a free test base port block")
+	}
+
+	// Occupy the HTTP TCP port to simulate local Sunshine holding 0.0.0.0:47989.
+	blocker, err := net.Listen("tcp4", net.JoinHostPort(localHost, fmt.Sprintf("%d", basePort)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer blocker.Close()
+
+	ports := HostPorts{HTTPPort: basePort}.Normalized()
+	offset, err := selectForwardPortOffset(localHost, ports)
+	if err != nil {
+		t.Fatalf("selectForwardPortOffset failed: %v", err)
+	}
+	if offset == 0 {
+		t.Fatalf("expected non-zero port offset when %s:%d is occupied", localHost, basePort)
+	}
+	if !canBindForwardPorts(localHost, ports, offset) {
+		t.Fatalf("returned offset %d is not bindable on %s", offset, localHost)
 	}
 }

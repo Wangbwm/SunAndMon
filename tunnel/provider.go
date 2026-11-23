@@ -112,10 +112,11 @@ func uniquePorts(vals ...uint16) []uint16 {
 }
 
 type ForwardMapping struct {
-	Provider  ProviderType `json:"provider,omitempty"`
-	RemoteIP  string       `json:"remoteIp"`
-	LocalHost string       `json:"localHost"`
-	Ports     HostPorts    `json:"ports"`
+	Provider   ProviderType `json:"provider,omitempty"`
+	RemoteIP   string       `json:"remoteIp"`
+	LocalHost  string       `json:"localHost"`
+	PortOffset int          `json:"portOffset,omitempty"`
+	Ports      HostPorts    `json:"ports"`
 }
 
 type Status struct {
@@ -190,6 +191,76 @@ func (a *LoopbackAllocator) Release(remoteIP string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	delete(a.byPeer, remoteIP)
+}
+
+func candidateForwardOffsets(ports HostPorts) []int {
+	norm := ports.Normalized()
+	tcpPorts := norm.TCPPorts()
+	if len(tcpPorts) == 0 {
+		return []int{0}
+	}
+	minPort := int(tcpPorts[0])
+	maxPort := int(tcpPorts[0])
+	for _, p := range tcpPorts[1:] {
+		if int(p) < minPort {
+			minPort = int(p)
+		}
+		if int(p) > maxPort {
+			maxPort = int(p)
+		}
+	}
+	offsets := []int{0}
+	for step := 100; step <= 17000; step += 100 {
+		if maxPort+step <= 65535 {
+			offsets = append(offsets, step)
+		}
+	}
+	for step := 100; step <= 17000; step += 100 {
+		if minPort-step >= 1024 {
+			offsets = append(offsets, -step)
+		}
+	}
+	return offsets
+}
+
+func canBindForwardPorts(localHost string, ports HostPorts, tcpOffset int) bool {
+	norm := ports.Normalized()
+	lc := exclusiveListenConfig()
+	ctx := context.Background()
+	var closers []func()
+	defer func() {
+		for _, c := range closers {
+			c()
+		}
+	}()
+	for _, port := range norm.TCPPorts() {
+		lp := int(port) + tcpOffset
+		if lp < 1 || lp > 65535 {
+			return false
+		}
+		ln, err := lc.Listen(ctx, "tcp4", fmt.Sprintf("%s:%d", localHost, lp))
+		if err != nil {
+			return false
+		}
+		closers = append(closers, func() { _ = ln.Close() })
+	}
+	for _, port := range norm.UDPPorts() {
+		pc, err := lc.ListenPacket(ctx, "udp4", fmt.Sprintf("%s:%d", localHost, port))
+		if err != nil {
+			return false
+		}
+		closers = append(closers, func() { _ = pc.Close() })
+	}
+	return true
+}
+
+func selectForwardPortOffset(localHost string, ports HostPorts) (int, error) {
+	for _, off := range candidateForwardOffsets(ports) {
+		if canBindForwardPorts(localHost, ports, off) {
+			return off, nil
+		}
+	}
+	return 0, fmt.Errorf("no free local port block available on %s", localHost)
 }
 
 func pipeTCP(a, b net.Conn) {

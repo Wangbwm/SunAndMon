@@ -531,10 +531,14 @@ bool FileMappingClient::buildSessionUrl(const Capability& capability, QUrl& outU
             endpoint.prepend('/');
         }
 
+        int targetPort = static_cast<int>(capability.port) + m_Computer->activePortOffset();
+        if (targetPort < 1 || targetPort > 65535) {
+            targetPort = capability.port;
+        }
         outUrl = QUrl();
         outUrl.setScheme(QStringLiteral("wss"));
         outUrl.setHost(m_Computer->activeAddress.address());
-        outUrl.setPort(capability.port);
+        outUrl.setPort(targetPort);
         outUrl.setPath(endpoint);
     }
 

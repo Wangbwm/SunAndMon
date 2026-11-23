@@ -201,8 +201,16 @@ NvComputer::NvComputer(NvHTTP& http, QString serverInfo)
                 (uint64_t)mode2.width * mode2.height * mode2.refreshRate;
     });
 
+    const int httpPortOffset = http.portOffset();
+    const uint16_t remoteHttpPort =
+            (httpPortOffset != 0 &&
+             static_cast<int>(http.httpPort()) - httpPortOffset >= 1 &&
+             static_cast<int>(http.httpPort()) - httpPortOffset <= 65535)
+            ? static_cast<uint16_t>(static_cast<int>(http.httpPort()) - httpPortOffset)
+            : http.httpPort();
+
     // We can get an IPv4 loopback address if we're using the GS IPv6 Forwarder
-    this->localAddress = NvAddress(NvHTTP::getXmlString(serverInfo, "LocalIP"), http.httpPort());
+    this->localAddress = NvAddress(NvHTTP::getXmlString(serverInfo, "LocalIP"), remoteHttpPort);
     if (this->localAddress.address().startsWith("127.")) {
         this->localAddress = NvAddress();
     }
@@ -211,12 +219,20 @@ NvComputer::NvComputer(NvHTTP& http, QString serverInfo)
     if (httpsPort.isEmpty() || (this->activeHttpsPort = httpsPort.toUShort()) == 0) {
         this->activeHttpsPort = DEFAULT_HTTPS_PORT;
     }
+    if (httpPortOffset != 0) {
+        const int shiftedHttps = static_cast<int>(this->activeHttpsPort) + httpPortOffset;
+        if (shiftedHttps >= 1 && shiftedHttps <= 65535) {
+            this->activeHttpsPort = static_cast<uint16_t>(shiftedHttps);
+        }
+        this->tunnelAddress = http.address();
+        this->tunnelPortOffset = httpPortOffset;
+    }
 
     // This is an extension which is not present in GFE. It is present for Sunshine to be able
     // to support dynamic HTTP WAN ports without requiring the user to manually enter the port.
     QString remotePortStr = NvHTTP::getXmlString(serverInfo, "ExternalPort");
     if (remotePortStr.isEmpty() || (this->externalPort = remotePortStr.toUShort()) == 0) {
-        this->externalPort = http.httpPort();
+        this->externalPort = remoteHttpPort;
     }
 
     QString remoteAddress = NvHTTP::getXmlString(serverInfo, "ExternalIP");
@@ -696,6 +712,13 @@ bool NvComputer::update(const NvComputer& that)
     }
     ASSIGN_IF_CHANGED(state);
     ASSIGN_IF_CHANGED_AND_NONEMPTY(connectionTransport);
+    if (!that.tunnelAddress.isNull() && that.tunnelPortOffset != 0) {
+        if (this->tunnelAddress != that.tunnelAddress || this->tunnelPortOffset != that.tunnelPortOffset) {
+            this->tunnelAddress = that.tunnelAddress;
+            this->tunnelPortOffset = that.tunnelPortOffset;
+            changed = true;
+        }
+    }
     ASSIGN_IF_CHANGED(gfeVersion);
     ASSIGN_IF_CHANGED(appVersion);
     ASSIGN_IF_CHANGED(isSupportedServerVersion);

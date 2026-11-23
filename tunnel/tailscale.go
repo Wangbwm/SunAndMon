@@ -438,22 +438,74 @@ func (t *TailscaleProvider) EnsureForward(remoteIP string, ports HostPorts) (For
 		return ForwardMapping{}, err
 	}
 	fwdCtx, cancel := context.WithCancel(parentCtx)
-	var closers []func()
-	cleanup := func() {
-		cancel()
-		for _, c := range closers {
-			c()
+	var (
+		closers      []func()
+		chosenOffset int
+		lastErr      error
+	)
+	type boundTCP struct {
+		ln   net.Listener
+		port uint16
+	}
+	type boundUDP struct {
+		pc   net.PacketConn
+		port uint16
+	}
+	var tcpListeners []boundTCP
+	var udpListeners []boundUDP
+
+	lc := exclusiveListenConfig()
+	for _, offset := range candidateForwardOffsets(norm) {
+		tcpListeners = nil
+		udpListeners = nil
+		var attemptClosers []func()
+		closeAttempt := func() {
+			for _, c := range attemptClosers {
+				c()
+			}
 		}
+		var bindErr error
+		for _, port := range norm.TCPPorts() {
+			lp := int(port) + offset
+			ln, err := lc.Listen(fwdCtx, "tcp4", fmt.Sprintf("%s:%d", localHost, lp))
+			if err != nil {
+				bindErr = fmt.Errorf("listen %s:%d tcp: %w", localHost, lp, err)
+				break
+			}
+			attemptClosers = append(attemptClosers, func() { _ = ln.Close() })
+			tcpListeners = append(tcpListeners, boundTCP{ln: ln, port: port})
+		}
+		if bindErr == nil {
+			for _, port := range norm.UDPPorts() {
+				pc, err := lc.ListenPacket(fwdCtx, "udp4", fmt.Sprintf("%s:%d", localHost, port))
+				if err != nil {
+					bindErr = fmt.Errorf("listen %s:%d udp: %w", localHost, port, err)
+					break
+				}
+				attemptClosers = append(attemptClosers, func() { _ = pc.Close() })
+				udpListeners = append(udpListeners, boundUDP{pc: pc, port: port})
+			}
+		}
+		if bindErr != nil {
+			closeAttempt()
+			lastErr = bindErr
+			continue
+		}
+		closers = attemptClosers
+		chosenOffset = offset
+		lastErr = nil
+		break
+	}
+	if lastErr != nil || len(closers) == 0 {
+		cancel()
+		if lastErr == nil {
+			lastErr = fmt.Errorf("no free local port block available on %s", localHost)
+		}
+		return ForwardMapping{}, lastErr
 	}
 
-	for _, port := range norm.TCPPorts() {
-		ln, err := net.Listen("tcp4", fmt.Sprintf("%s:%d", localHost, port))
-		if err != nil {
-			cleanup()
-			return ForwardMapping{}, fmt.Errorf("listen %s:%d tcp: %w", localHost, port, err)
-		}
-		closers = append(closers, func() { _ = ln.Close() })
-		dst := net.JoinHostPort(remoteIP, fmt.Sprintf("%d", port))
+	for _, item := range tcpListeners {
+		dst := net.JoinHostPort(remoteIP, fmt.Sprintf("%d", item.port))
 		go func(l net.Listener, remote string) {
 			for {
 				conn, err := l.Accept()
@@ -471,27 +523,22 @@ func (t *TailscaleProvider) EnsureForward(remoteIP string, ports HostPorts) (For
 					pipeTCP(in, out)
 				}(conn)
 			}
-		}(ln, dst)
+		}(item.ln, dst)
 	}
 
-	for _, port := range norm.UDPPorts() {
-		pc, err := net.ListenPacket("udp4", fmt.Sprintf("%s:%d", localHost, port))
-		if err != nil {
-			cleanup()
-			return ForwardMapping{}, fmt.Errorf("listen %s:%d udp: %w", localHost, port, err)
-		}
-		closers = append(closers, func() { _ = pc.Close() })
-		dst := net.JoinHostPort(remoteIP, fmt.Sprintf("%d", port))
-		go serveUDPForward(fwdCtx, pc, func(ctx context.Context) (net.Conn, error) {
+	for _, item := range udpListeners {
+		dst := net.JoinHostPort(remoteIP, fmt.Sprintf("%d", item.port))
+		go serveUDPForward(fwdCtx, item.pc, func(ctx context.Context) (net.Conn, error) {
 			return srv.Dial(ctx, "udp", dst)
 		})
 	}
 
 	mapping := ForwardMapping{
-		Provider:  ProviderTailscale,
-		RemoteIP:  remoteIP,
-		LocalHost: localHost,
-		Ports:     norm,
+		Provider:   ProviderTailscale,
+		RemoteIP:   remoteIP,
+		LocalHost:  localHost,
+		PortOffset: chosenOffset,
+		Ports:      norm,
 	}
 	t.mu.Lock()
 	t.forwards[remoteIP] = &tsForwardEntry{

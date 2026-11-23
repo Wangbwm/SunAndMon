@@ -423,6 +423,114 @@ bool usableAddress(const QHostAddress& ip)
            ip != QHostAddress(QHostAddress::AnyIPv4) && ip != QHostAddress(QHostAddress::AnyIPv6) &&
            ip != QHostAddress(QHostAddress::Broadcast) && ip.scopeId().isEmpty();
 }
+
+bool isVirtualBridgeInterface(const QNetworkInterface& iface)
+{
+    const auto flags = iface.flags();
+    if (!flags.testFlag(QNetworkInterface::IsUp) ||
+        !flags.testFlag(QNetworkInterface::IsRunning) ||
+        flags.testFlag(QNetworkInterface::IsLoopBack)) {
+        return true;
+    }
+
+    const QString name = iface.name().trimmed().toLower();
+    const QString human = iface.humanReadableName().trimmed().toLower();
+
+    static const QStringList kIgnoredNamePrefixes = {
+        QStringLiteral("docker"),
+        QStringLiteral("br-"),
+        QStringLiteral("veth"),
+        QStringLiteral("virbr"),
+        QStringLiteral("podman"),
+        QStringLiteral("cni"),
+        QStringLiteral("flannel"),
+        QStringLiteral("kube"),
+        QStringLiteral("lxcbr"),
+        QStringLiteral("lxdbr"),
+        QStringLiteral("incusbr"),
+        QStringLiteral("mpqemubr"),
+        QStringLiteral("vmnet"),
+        QStringLiteral("vboxnet"),
+        QStringLiteral("anbox"),
+        QStringLiteral("waydroid"),
+    };
+    for (const auto& prefix : kIgnoredNamePrefixes) {
+        if (name.startsWith(prefix)) {
+            return true;
+        }
+    }
+
+    static const QStringList kIgnoredHumanMarkers = {
+        QStringLiteral("vethernet"),
+        QStringLiteral("vmware"),
+        QStringLiteral("vmnet"),
+        QStringLiteral("virtualbox"),
+        QStringLiteral("dockernat"),
+        QStringLiteral("docker"),
+    };
+    for (const auto& marker : kIgnoredHumanMarkers) {
+        if (human.contains(marker)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+void collectHostPublishAddresses(QJsonArray& addresses)
+{
+    QStringList ipv4Addrs;
+    QStringList ipv6Addrs;
+
+    auto appendUnique = [&](const QHostAddress& ip) {
+        if (!usableAddress(ip)) {
+            return;
+        }
+        const QString text = ip.toString();
+        if (addresses.contains(text)) {
+            return;
+        }
+        if (ip.protocol() == QAbstractSocket::IPv4Protocol) {
+            if (!ipv4Addrs.contains(text)) {
+                ipv4Addrs.append(text);
+            }
+        } else if (ip.protocol() == QAbstractSocket::IPv6Protocol) {
+            if (!ipv6Addrs.contains(text)) {
+                ipv6Addrs.append(text);
+            }
+        }
+    };
+
+    for (const auto& iface : QNetworkInterface::allInterfaces()) {
+        if (isVirtualBridgeInterface(iface)) {
+            continue;
+        }
+        for (const auto& entry : iface.addressEntries()) {
+            appendUnique(entry.ip());
+        }
+    }
+
+    // Fallback: if every interface was filtered (unusual container/VM setup),
+    // include all usable addresses so the host remains publishable.
+    if (ipv4Addrs.isEmpty() && ipv6Addrs.isEmpty() && addresses.isEmpty()) {
+        for (const auto& ip : QNetworkInterface::allAddresses()) {
+            appendUnique(ip);
+        }
+    }
+
+    for (const auto& text : ipv4Addrs) {
+        if (addresses.size() >= 16) {
+            break;
+        }
+        addresses.append(text);
+    }
+    for (const auto& text : ipv6Addrs) {
+        if (addresses.size() >= 16) {
+            break;
+        }
+        addresses.append(text);
+    }
+}
 }
 
 CenterClient::CenterClient(ComputerManager* computers)
@@ -1349,6 +1457,7 @@ void CenterClient::connectDevice(const QString& id)
         grant.remove(QStringLiteral("tunnelLocalAddress"));
         grant.remove(QStringLiteral("tunnelLocalAddresses"));
         grant.remove(QStringLiteral("tunnelProviderByLocalHost"));
+        grant.remove(QStringLiteral("tunnelPortOffsetByLocalHost"));
         grant.remove(QStringLiteral("preferTunnelFirst"));
         if (reply->error() != QNetworkReply::NoError ||
             reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() != 200 ||
@@ -1386,16 +1495,21 @@ void CenterClient::connectDevice(const QString& id)
         const quint16 grantHttpsPort = static_cast<quint16>(grant.value("httpsPort").toInt());
         if (m_Tunnel && !hostTunnels.isEmpty() && grantPort > 0 && grantHttpsPort > 0) {
             m_Tunnel->ensureForwardsAsync(hostTunnels, grantPort, grantHttpsPort,
-                                          [this, grant](const QList<QPair<QString, QString>>& localForwards) mutable {
+                                          [this, grant](const QList<TunnelManager::ForwardEndpoint>& localForwards) mutable {
                                               if (!localForwards.isEmpty()) {
                                                   QJsonArray arr;
                                                   QJsonObject providerMap;
+                                                  QJsonObject portOffsetMap;
                                                   for (const auto& entry : localForwards) {
-                                                      arr.append(entry.first);
-                                                      providerMap.insert(entry.first, entry.second);
+                                                      arr.append(entry.localHost);
+                                                      providerMap.insert(entry.localHost, entry.provider);
+                                                      if (entry.portOffset != 0) {
+                                                          portOffsetMap.insert(entry.localHost, entry.portOffset);
+                                                      }
                                                   }
                                                   grant.insert(QStringLiteral("tunnelLocalAddresses"), arr);
                                                   grant.insert(QStringLiteral("tunnelProviderByLocalHost"), providerMap);
+                                                  grant.insert(QStringLiteral("tunnelPortOffsetByLocalHost"), portOffsetMap);
                                                   grant.insert(QStringLiteral("preferTunnelFirst"), m_Tunnel->preferTunnelFirst());
                                               }
                                               m_Computers->connectFromCenter(grant);
@@ -1769,11 +1883,7 @@ void CenterClient::publishHost()
     if (!m_AdvertisedAddress.isEmpty()) {
         addresses.append(QHostAddress(m_AdvertisedAddress).toString());
     }
-    for (const auto& ip : QNetworkInterface::allAddresses()) {
-        if (usableAddress(ip) && !addresses.contains(ip.toString()) && addresses.size() < 16) {
-            addresses.append(ip.toString());
-        }
-    }
+    collectHostPublishAddresses(addresses);
     QJsonArray tunnelsArr;
     QString primaryTunnelProvider;
     QString primaryTunnelAddress;

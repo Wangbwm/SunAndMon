@@ -36,7 +36,16 @@ public:
 private:
     bool tryPollComputer(QNetworkAccessManager* nam, NvAddress address, bool& changed)
     {
+        int portOffset = 0;
+        {
+            QReadLocker lock(&m_Computer->lock);
+            if (m_Computer->tunnelPortOffset != 0 && !m_Computer->tunnelAddress.isNull() &&
+                address == m_Computer->tunnelAddress) {
+                portOffset = m_Computer->tunnelPortOffset;
+            }
+        }
         NvHTTP http(address, 0, m_Computer->serverCert, !m_Computer->isNvidiaServerSoftware, nam, m_Computer->uuid);
+        http.setPortOffset(portOffset);
 
         QString serverInfo;
         try {
@@ -622,6 +631,7 @@ void ComputerManager::connectFromCenter(const QJsonObject& grant)
     const auto addresses = grant.value("addresses").toArray();
     const auto tunnelLocalAddresses = grant.value("tunnelLocalAddresses").toArray();
     const auto tunnelProviderByLocalHost = grant.value("tunnelProviderByLocalHost").toObject();
+    const auto tunnelPortOffsetByLocalHost = grant.value("tunnelPortOffsetByLocalHost").toObject();
     const bool preferTunnelFirst = grant.value("preferTunnelFirst").toBool(false);
     const int port = grant.value("port").toInt();
     const int httpsPort = grant.value("httpsPort").toInt();
@@ -632,7 +642,7 @@ void ComputerManager::connectFromCenter(const QJsonObject& grant)
         return;
     }
 
-    m_CenterPool.start([this, cert, ticket, addresses, tunnelLocalAddresses, tunnelProviderByLocalHost, preferTunnelFirst, port, httpsPort] {
+    m_CenterPool.start([this, cert, ticket, addresses, tunnelLocalAddresses, tunnelProviderByLocalHost, tunnelPortOffsetByLocalHost, preferTunnelFirst, port, httpsPort] {
         QList<QHostAddress> directCandidates;
         for (const auto addressValue : addresses) {
             const QHostAddress ip(addressValue.toString());
@@ -663,8 +673,19 @@ void ComputerManager::connectFromCenter(const QJsonObject& grant)
                 return;
             }
             try {
-                const NvAddress address(ip, static_cast<quint16>(port));
-                NvHTTP http(address, static_cast<quint16>(httpsPort), cert, true);
+                const QString provider = tunnelProviderByLocalHost.value(ip.toString()).toString().trimmed().toLower();
+                const int portOffset = !provider.isEmpty()
+                        ? tunnelPortOffsetByLocalHost.value(ip.toString()).toInt(0)
+                        : 0;
+                const int localHttpPort = port + portOffset;
+                const int localHttpsPort = httpsPort + portOffset;
+                if (localHttpPort < 1 || localHttpPort > 65535 ||
+                    localHttpsPort < 1 || localHttpsPort > 65535) {
+                    continue;
+                }
+                const NvAddress address(ip, static_cast<quint16>(localHttpPort));
+                NvHTTP http(address, static_cast<quint16>(localHttpsPort), cert, true);
+                http.setPortOffset(portOffset);
                 auto authenticatedInfo = [&] {
                     const auto xml = http.openConnectionToString(http.m_BaseUrlHttps, "serverinfo",
                                                                   QString(), 2000, NvHTTP::NVLL_NONE);
@@ -683,10 +704,9 @@ void ComputerManager::connectFromCenter(const QJsonObject& grant)
                 }
                 auto computer = std::make_shared<NvComputer>(http, info);
                 if (computer->uuid.isEmpty() || computer->pairState != NvComputer::PS_PAIRED ||
-                    computer->activeHttpsPort != httpsPort) {
+                    computer->activeHttpsPort != static_cast<quint16>(localHttpsPort)) {
                     continue;
                 }
-                const QString provider = tunnelProviderByLocalHost.value(ip.toString()).toString().trimmed().toLower();
                 if (!provider.isEmpty()) {
                     computer->connectionTransport = provider;
                 } else {

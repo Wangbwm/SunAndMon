@@ -88,6 +88,11 @@ public:
     // Caller holds the computer lock.
     bool isLocalHost() const;
 
+    // Active local tunnel port offset when activeAddress matches tunnelAddress.
+    int activePortOffset() const {
+        return (!tunnelAddress.isNull() && activeAddress == tunnelAddress) ? tunnelPortOffset : 0;
+    }
+
     enum PairState
     {
         PS_UNKNOWN,
@@ -108,6 +113,9 @@ public:
     NvAddress activeAddress;
     // Active transport route hint ("lan", "direct", "easytier", "tailscale") for UI display.
     QString connectionTransport;
+    // Local userspace tunnel forward endpoint and optional port offset when local ports were shifted.
+    NvAddress tunnelAddress;
+    int tunnelPortOffset = 0;
     // 用户手动固定的连接地址。空表示自动选择。和 activeAddress 一样只活在
     // 会话内（不序列化）：activeAddress 本来就是重启后靠轮询重建的。
     // uniqueAddresses() 把它排在最前，所以轮询每次都先试它 —— 固定地址

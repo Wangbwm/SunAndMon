@@ -475,47 +475,78 @@ func (e *EasyTierProvider) EnsureForward(remoteIP string, ports HostPorts) (Forw
 		return ForwardMapping{}, err
 	}
 
-	var rules []etForwardRule
-	for _, port := range norm.TCPPorts() {
-		rules = append(rules, etForwardRule{
-			Proto: "tcp",
-			Bind:  fmt.Sprintf("%s:%d", localHost, port),
-			Dst:   net.JoinHostPort(remoteIP, fmt.Sprintf("%d", port)),
-		})
-	}
-	for _, port := range norm.UDPPorts() {
-		rules = append(rules, etForwardRule{
-			Proto: "udp",
-			Bind:  fmt.Sprintf("%s:%d", localHost, port),
-			Dst:   net.JoinHostPort(remoteIP, fmt.Sprintf("%d", port)),
-		})
-	}
-
-	added := make([]etForwardRule, 0, len(rules))
-	for _, r := range rules {
-		cctx, ccancel := context.WithTimeout(parentCtx, 5*time.Second)
-		cmd := exec.CommandContext(cctx, cliPath, "-p", rpcAddr, "port-forward", "add", r.Proto, r.Bind, r.Dst)
-		hideWindow(cmd)
-		out, err := cmd.CombinedOutput()
-		ccancel()
-		if err != nil {
-			for _, a := range added {
-				rctx, rcancel := context.WithTimeout(context.Background(), 3*time.Second)
-				rcmd := exec.CommandContext(rctx, cliPath, "-p", rpcAddr, "port-forward", "remove", a.Proto, a.Bind)
-				hideWindow(rcmd)
-				_ = rcmd.Run()
-				rcancel()
-			}
-			return ForwardMapping{}, fmt.Errorf("easytier port-forward %s %s->%s: %v (%s)", r.Proto, r.Bind, r.Dst, err, strings.TrimSpace(string(out)))
+	var (
+		added        []etForwardRule
+		chosenOffset int
+		lastErr      error
+		attempts     int
+	)
+	for _, offset := range candidateForwardOffsets(norm) {
+		if !canBindForwardPorts(localHost, norm, offset) {
+			continue
 		}
-		added = append(added, r)
+		attempts++
+		var rules []etForwardRule
+		for _, port := range norm.TCPPorts() {
+			rules = append(rules, etForwardRule{
+				Proto: "tcp",
+				Bind:  fmt.Sprintf("%s:%d", localHost, int(port)+offset),
+				Dst:   net.JoinHostPort(remoteIP, fmt.Sprintf("%d", port)),
+			})
+		}
+		for _, port := range norm.UDPPorts() {
+			rules = append(rules, etForwardRule{
+				Proto: "udp",
+				Bind:  fmt.Sprintf("%s:%d", localHost, port),
+				Dst:   net.JoinHostPort(remoteIP, fmt.Sprintf("%d", port)),
+			})
+		}
+
+		added = make([]etForwardRule, 0, len(rules))
+		failed := false
+		for _, r := range rules {
+			cctx, ccancel := context.WithTimeout(parentCtx, 5*time.Second)
+			cmd := exec.CommandContext(cctx, cliPath, "-p", rpcAddr, "port-forward", "add", r.Proto, r.Bind, r.Dst)
+			hideWindow(cmd)
+			out, err := cmd.CombinedOutput()
+			ccancel()
+			if err != nil {
+				for _, a := range added {
+					rctx, rcancel := context.WithTimeout(context.Background(), 3*time.Second)
+					rcmd := exec.CommandContext(rctx, cliPath, "-p", rpcAddr, "port-forward", "remove", a.Proto, a.Bind)
+					hideWindow(rcmd)
+					_ = rcmd.Run()
+					rcancel()
+				}
+				added = nil
+				lastErr = fmt.Errorf("easytier port-forward %s %s->%s: %v (%s)", r.Proto, r.Bind, r.Dst, err, strings.TrimSpace(string(out)))
+				failed = true
+				break
+			}
+			added = append(added, r)
+		}
+		if !failed {
+			chosenOffset = offset
+			lastErr = nil
+			break
+		}
+		if attempts >= 8 {
+			break
+		}
+	}
+	if lastErr != nil {
+		return ForwardMapping{}, lastErr
+	}
+	if len(added) == 0 {
+		return ForwardMapping{}, fmt.Errorf("no free local port block available on %s", localHost)
 	}
 
 	mapping := ForwardMapping{
-		Provider:  ProviderEasyTier,
-		RemoteIP:  remoteIP,
-		LocalHost: localHost,
-		Ports:     norm,
+		Provider:   ProviderEasyTier,
+		RemoteIP:   remoteIP,
+		LocalHost:  localHost,
+		PortOffset: chosenOffset,
+		Ports:      norm,
 	}
 	e.mu.Lock()
 	e.forwards[remoteIP] = &etForwardEntry{

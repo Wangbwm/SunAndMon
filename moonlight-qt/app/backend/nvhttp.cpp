@@ -50,6 +50,7 @@ NvHTTP::NvHTTP(NvAddress address, uint16_t httpsPort, QSslCertificate serverCert
 NvHTTP::NvHTTP(NvComputer* computer, QNetworkAccessManager* nam) :
     NvHTTP(computer->activeAddress, computer->activeHttpsPort, computer->serverCert, !computer->isNvidiaServerSoftware, nam, computer->uuid)
 {
+    m_PortOffset = computer->activePortOffset();
 }
 
 void NvHTTP::setServerCert(QSslCertificate serverCert)
@@ -72,6 +73,16 @@ void NvHTTP::setAddress(NvAddress address)
 void NvHTTP::setHttpsPort(uint16_t port)
 {
     m_BaseUrlHttps.setPort(port);
+}
+
+void NvHTTP::setPortOffset(int offset)
+{
+    m_PortOffset = offset;
+}
+
+int NvHTTP::portOffset() const
+{
+    return m_PortOffset;
 }
 
 void NvHTTP::setTrueUid(bool useTrueUid)
@@ -196,6 +207,12 @@ NvHTTP::getServerInfo(NvLogLevel logLevel, bool fastFail)
         uint16_t httpsPort = getXmlString(serverInfo, "HttpsPort").toUShort();
         if (httpsPort == 0) {
             httpsPort = DEFAULT_HTTPS_PORT;
+        }
+        if (m_PortOffset != 0) {
+            const int shifted = static_cast<int>(httpsPort) + m_PortOffset;
+            if (shifted >= 1 && shifted <= 65535) {
+                httpsPort = static_cast<uint16_t>(shifted);
+            }
         }
         setHttpsPort(httpsPort);
 

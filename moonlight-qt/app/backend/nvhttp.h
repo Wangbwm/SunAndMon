@@ -172,6 +172,7 @@ public:
     void setServerCert(QSslCertificate serverCert);
     void setAddress(NvAddress address);
     void setHttpsPort(uint16_t port);
+    void setPortOffset(int offset);
     void setTrueUid(bool useTrueUid);
     void setHostUuid(QString uuid);
 
@@ -184,6 +185,8 @@ public:
     uint16_t httpPort();
 
     uint16_t httpsPort();
+
+    int portOffset() const;
 
     static
     QVector<int>
@@ -256,4 +259,5 @@ private:
     QSslCertificate m_ServerCert;
     bool m_UseTrueUid;
     QString m_Uuid;
+    int m_PortOffset = 0;
 };

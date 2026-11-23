@@ -107,11 +107,17 @@ public:
     Q_INVOKABLE void applyCenterDefaults(const QVariantMap& defaults);
     Q_INVOKABLE void refreshCapabilities();
 
+    struct ForwardEndpoint {
+        QString localHost;
+        QString provider;
+        int portOffset = 0;
+    };
+
     void syncHostExposure(bool hostReady, quint16 httpPort, quint16 httpsPort);
     void ensureForwardsAsync(const QList<QPair<QString, QString>>& endpoints,
                              quint16 httpPort,
                              quint16 httpsPort,
-                             std::function<void(QList<QPair<QString, QString>> localForwards)> callback);
+                             std::function<void(QList<ForwardEndpoint> localForwards)> callback);
 
 signals:
     void changed();

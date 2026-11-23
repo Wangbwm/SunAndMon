@@ -4949,6 +4949,7 @@ struct HostConnectionInfoSnapshot
     QString gfeVersion;
     int currentGameId = 0;
     int serverCodecModeSupport = 0;
+    int localPortOffset = 0;
 };
 
 struct PreparedServerInformation
@@ -4970,6 +4971,7 @@ HostConnectionInfoSnapshot captureHostConnectionInfoSnapshot(NvComputer* compute
     snapshot.gfeVersion = computer->gfeVersion;
     snapshot.currentGameId = computer->currentGameId;
     snapshot.serverCodecModeSupport = computer->serverCodecModeSupport;
+    snapshot.localPortOffset = computer->activePortOffset();
 
     return snapshot;
 }
@@ -5037,8 +5039,26 @@ void prepareServerInformation(const HostConnectionInfoSnapshot& snapshot,
         prepared->info.serverInfoGfeVersion = prepared->gfeVersion.constData();
     }
 
-    if (!rtspSessionUrl.isEmpty()) {
-        prepared->rtspSessionUrl = rtspSessionUrl.toUtf8();
+    QString effectiveRtspUrl = rtspSessionUrl;
+    if (snapshot.localPortOffset != 0) {
+        if (effectiveRtspUrl.isEmpty()) {
+            const int shifted = 48010 + snapshot.localPortOffset;
+            if (shifted >= 1 && shifted <= 65535) {
+                effectiveRtspUrl = QStringLiteral("rtsp://%1:%2").arg(snapshot.address).arg(shifted);
+            }
+        } else {
+            QUrl parsed(effectiveRtspUrl);
+            const int basePort = parsed.port(48010);
+            const int shifted = basePort + snapshot.localPortOffset;
+            if (parsed.isValid() && !parsed.host().isEmpty() && shifted >= 1 && shifted <= 65535) {
+                parsed.setPort(shifted);
+                effectiveRtspUrl = parsed.toString();
+            }
+        }
+    }
+
+    if (!effectiveRtspUrl.isEmpty()) {
+        prepared->rtspSessionUrl = effectiveRtspUrl.toUtf8();
         prepared->info.rtspSessionUrl = prepared->rtspSessionUrl.constData();
     }
 }

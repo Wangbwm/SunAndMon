@@ -885,7 +885,7 @@ void TunnelManager::sendExposeRequest()
 void TunnelManager::ensureForwardsAsync(const QList<QPair<QString, QString>>& endpoints,
                                         quint16 httpPort,
                                         quint16 httpsPort,
-                                        std::function<void(QList<QPair<QString, QString>> localForwards)> callback)
+                                        std::function<void(QList<TunnelManager::ForwardEndpoint> localForwards)> callback)
 {
     if (m_ProbingExistingDaemon && !m_DaemonReady) {
         QObject::connect(this, &TunnelManager::daemonAttachFinished, this,
@@ -911,12 +911,12 @@ void TunnelManager::ensureForwardsAsync(const QList<QPair<QString, QString>>& en
     }
 
     struct BatchState {
-        QList<QPair<QString, QString>> results; // (localHost, provider)
+        QList<TunnelManager::ForwardEndpoint> results;
         int remaining = 0;
-        std::function<void(QList<QPair<QString, QString>>)> done;
+        std::function<void(QList<TunnelManager::ForwardEndpoint>)> done;
     };
     auto state = std::make_shared<BatchState>();
-    state->results = QList<QPair<QString, QString>>(matched.size());
+    state->results = QList<TunnelManager::ForwardEndpoint>(matched.size());
     state->remaining = matched.size();
     state->done = std::move(callback);
 
@@ -937,16 +937,17 @@ void TunnelManager::ensureForwardsAsync(const QList<QPair<QString, QString>>& en
             if (reply->error() == QNetworkReply::NoError && code < 400) {
                 const auto obj = QJsonDocument::fromJson(reply->readAll()).object();
                 const QString localHost = obj.value(QStringLiteral("localHost")).toString();
+                const int portOffset = obj.value(QStringLiteral("portOffset")).toInt(0);
                 if (!localHost.isEmpty()) {
-                    state->results[i] = {localHost, provider};
+                    state->results[i] = {localHost, provider, portOffset};
                 }
             }
             if (--state->remaining == 0) {
-                QList<QPair<QString, QString>> compact;
+                QList<TunnelManager::ForwardEndpoint> compact;
                 QStringList seen;
                 for (const auto& entry : state->results) {
-                    if (!entry.first.isEmpty() && !seen.contains(entry.first)) {
-                        seen.append(entry.first);
+                    if (!entry.localHost.isEmpty() && !seen.contains(entry.localHost)) {
+                        seen.append(entry.localHost);
                         compact.append(entry);
                     }
                 }

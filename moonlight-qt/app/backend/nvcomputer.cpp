@@ -443,6 +443,19 @@ NvComputer::ReachabilityType NvComputer::getActiveAddressReachability() const
         return result;
     };
 
+    // Local isolated userspace tunnel forwards (EasyTier / tsnet on 127.18.0.0/16)
+    // encapsulate traffic over an overlay with ~1280-1360 B MTU. Treat them as VPN
+    // links so Moonlight caps packetSize to 1024 B (avoiding 2x fragmentation) and
+    // enables remote FEC/buffering instead of misclassifying loopback as RI_LAN.
+    {
+        const QHostAddress targetIp(copyOfActiveAddress.address());
+        bool okV4 = false;
+        const quint32 v4 = targetIp.toIPv4Address(&okV4);
+        if (okV4 && (v4 >> 16) == ((127u << 8) | 18u)) {
+            return cacheResult(ReachabilityType::RI_VPN);
+        }
+    }
+
     QTcpSocket s;
     s.setProxy(QNetworkProxy::NoProxy);
     s.connectToHost(copyOfActiveAddress.address(), copyOfActiveAddress.port());

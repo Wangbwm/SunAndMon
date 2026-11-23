@@ -74,6 +74,7 @@ go run . -listen 127.0.0.1:8787 -state state/devices.json
 
 - **Windows**：下载并解压 `SunAndMon-Windows-x64.zip` 到任意目录（保留内部 `host` 目录），运行 `SunAndMon.exe`。用户配置（中心网址、直连 IP、加密保存的密钥、已配对主机与串流设置）默认保存在 `%APPDATA%\SunAndMon\SunAndMon.ini`，内置被控配置保存在 `%APPDATA%\SunAndMon\host\`，删掉程序目录更新版本不会丢失数据（如需随身便携模式，可将程序目录内的 `portable.dat.inactive` 改名为 `portable.dat`）。左下角打开「中心服务器」填写 HTTPS URL 与密钥后，本机被控会自动登记；在设备页选中在线主机点「连接桌面」即可由中心自动授权，无需输入 PIN。
   - 在「本机被控」中可开关「登录 Windows 时自动启动」、指定「发布 IP」或打开 Sunshine 原有控制面板（「主机设置」）。
+  - **Windows 登录前被控**：使用安装版，先登录 HTTPS 中心并启用「允许远程操作 UAC 弹窗（系统服务）」。关闭当前被控后，在「本机被控」打开「允许在 Windows 登录前远控」并确认管理员提示。系统服务使用独立的 Sunshine 配置和设备身份。请在另一台设备的中心列表确认该主机在线，使用局域网或系统 VPN 线路，从中心连接并在 Windows 登录界面输入密码。此模式暂不接管内置隧道和剪贴板；关闭该选项可恢复应用管理的模式。
   - 在「设置 → 软件 → 关闭按钮行为」中可选择确认退出或最小化到托盘。
   - 串流期间可在「控制中心 → 视频和显示」切换**隐私屏**（被控端需新版 SunAndMon、ZakoVDD 虚拟显示器与虚拟音频设备如 Steam Streaming Speakers 或 VB-CABLE）。
 - **Linux（Ubuntu 24.04）**：下载 `sunandmon_<ver>_amd64.deb` 后执行 `sudo apt install ./sunandmon_<ver>_amd64.deb` 安装，即可从应用菜单或命令行 `sunandmon` 启动。

@@ -1,5 +1,8 @@
 /.build-*/
 /dist/
+/PROJECT_HANDOFF.md
+/CURRENT_TASK_STATE.md
+/NEXT_AGENT_PROMPT.md
 /center/.deployment/
 /center/state/
 **/.env

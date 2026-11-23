@@ -31,6 +31,8 @@ class CenterClient : public QObject
     Q_PROPERTY(bool hostAvailable READ hostAvailable CONSTANT)
     Q_PROPERTY(bool hostServiceAvailable READ hostServiceAvailable CONSTANT)
     Q_PROPERTY(bool elevatedHostService READ elevatedHostService NOTIFY changed)
+    Q_PROPERTY(bool windowsConsoleHost READ windowsConsoleHost NOTIFY changed)
+    Q_PROPERTY(bool windowsCenterBootHost READ windowsCenterBootHost NOTIFY changed)
     Q_PROPERTY(bool startHostOnLaunch READ startHostOnLaunch WRITE setStartHostOnLaunch NOTIFY startHostOnLaunchChanged)
     Q_PROPERTY(bool hostActive READ hostActive NOTIFY changed)
     Q_PROPERTY(bool hostReady READ hostReady NOTIFY changed)
@@ -65,6 +67,12 @@ public:
     bool hostAvailable() const;
     bool hostServiceAvailable() const;
     bool elevatedHostService() const;
+    bool windowsConsoleHost() const;
+    bool windowsCenterBootHost() const;
+#ifdef Q_OS_WIN
+    static int runWindowsBootHost();
+    static int configureWindowsBootHost(bool enabled);
+#endif
     bool startHostOnLaunch() const;
     void setStartHostOnLaunch(bool enabled);
     bool hostActive() const { return m_Engine.state() != QProcess::NotRunning || m_UsingService; }
@@ -104,6 +112,7 @@ public:
     Q_INVOKABLE bool openFirewallSettings() const;
     Q_INVOKABLE bool setStartAtLogin(bool enabled);
     Q_INVOKABLE bool setElevatedHostService(bool enabled);
+    Q_INVOKABLE bool setWindowsConsoleHost(bool enabled);
     Q_INVOKABLE void startHost(const QString& advertisedAddress);
     Q_INVOKABLE void stopHost();
     Q_INVOKABLE void startHostOnAlternatePorts();
@@ -117,6 +126,8 @@ signals:
     void hostConnected(QString uuid);
 
 private:
+    static QString localBootDeviceId();
+    bool hostServiceConfigured(const QString& mode) const;
     struct CenterEndpoint {
         QUrl url;
         QString directIp;
@@ -186,6 +197,7 @@ private:
     bool m_ServerDeduplicatesDevices = false;
     bool m_Stopping = false;
     bool m_UsingService = false;
+    bool m_WindowsBootWorker = false;
     int m_ServiceConnectAttempts = 0;
     bool m_ServiceHasExitCode = false;
     int m_ServiceExitCode = 0;

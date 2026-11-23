@@ -4456,6 +4456,26 @@
         <translation>无法更改高权限被控服务设置。</translation>
     </message>
     <message>
+        <source>Windows boot service</source>
+        <translation>登录前被控模式</translation>
+    </message>
+    <message>
+        <source>Allow remote control before Windows sign-in</source>
+        <translation>允许在 Windows 登录前远控</translation>
+    </message>
+    <message>
+        <source>Could not change Windows boot hosting.</source>
+        <translation>无法切换 Windows 登录前被控模式。</translation>
+    </message>
+    <message>
+        <source>The system service registers this host with the center before Windows sign-in. Use the device shown in the center list.</source>
+        <translation>系统服务会在 Windows 登录前将主机登记到中心。请从中心设备列表连接。</translation>
+    </message>
+    <message>
+        <source>Sign in to the center, enable the system service and stop local hosting to switch modes.</source>
+        <translation>先登录中心并启用系统服务，关闭当前被控后再切换模式。</translation>
+    </message>
+    <message>
         <source>Center devices</source>
         <translation>中心设备</translation>
     </message>

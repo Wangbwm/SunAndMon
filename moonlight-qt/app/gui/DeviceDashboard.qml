@@ -20,6 +20,7 @@ Rectangle {
     property bool showingLocal: false
     property bool startupChangeFailed: false
     property bool elevatedServiceChangeFailed: false
+    property bool windowsConsoleHostChangeFailed: false
     property url coverSource: "qrc:/res/device-cover.png"
     readonly property string selectedId: showingLan ? lanSelectionId : centerSelectionId
     readonly property var selectedDevice: deviceSource.find(device => device.id === selectedId)
@@ -34,7 +35,8 @@ Rectangle {
     readonly property bool hostStopping: center.hostStopping === true
     readonly property bool hostStartupTimedOut: center.hostStartupTimedOut === true
     readonly property bool hostHasPortConflict: center.hostPortConflict > 0
-    readonly property string hostState: hostStopping ? qsTr("Stopping") : hostReady ? qsTr("Hosting")
+    readonly property string hostState: center.windowsConsoleHost ? qsTr("Windows boot service")
+        : hostStopping ? qsTr("Stopping") : hostReady ? qsTr("Hosting")
         : hostHasPortConflict ? qsTr("Port in use") : hostStartupTimedOut ? qsTr("Startup timed out")
         : center.hostActive ? qsTr("Starting") : qsTr("Off")
     color: Theme.modern ? "transparent" : paper
@@ -584,6 +586,7 @@ Rectangle {
                         }
                         Action {
                             visible: dashboard.center.hostAvailable && !dashboard.hostHasPortConflict
+                                     && !dashboard.center.windowsConsoleHost
                             enabled: !dashboard.center.busy && !dashboard.hostStopping
                             primary: !dashboard.center.hostActive
                             text: dashboard.center.hostActive ? qsTr("Disable hosting") : qsTr("Enable hosting")
@@ -592,7 +595,8 @@ Rectangle {
                         Copy {
                             Layout.columnSpan: localHostCard.columns
                             Layout.fillWidth: true
-                            visible: !dashboard.center.hostActive || dashboard.hostReady || dashboard.hostStartupTimedOut
+                            visible: !dashboard.center.windowsConsoleHost
+                                     && (!dashboard.center.hostActive || dashboard.hostReady || dashboard.hostStartupTimedOut)
                             text: dashboard.center.hostStatus || (dashboard.center.hostAvailable
                                 ? qsTr("Host disabled") : qsTr("Hosting is available in the Windows bundle."))
                             wrapMode: Text.WordWrap
@@ -628,6 +632,7 @@ Rectangle {
                             Layout.fillWidth: true
                             Layout.maximumWidth: 360
                             visible: dashboard.center.hostAvailable && dashboard.center.connected
+                                     && !dashboard.center.windowsConsoleHost
                             readOnly: dashboard.center.hostActive || (Qt.platform.os === "windows" && !activeFocus)
                             text: dashboard.center.advertisedAddress
                             placeholderText: qsTr("Advertised IP (automatic)")
@@ -656,7 +661,8 @@ Rectangle {
                         QuickAction {
                             Layout.fillWidth: true
                             visible: dashboard.center.hostAvailable
-                            enabled: dashboard.hostReady && dashboard.center.hostSettingsUrl.toString().length > 0
+                            enabled: (dashboard.hostReady || dashboard.center.windowsConsoleHost)
+                                     && dashboard.center.hostSettingsUrl.toString().length > 0
                             text: qsTr("Host settings")
                             icon.source: "qrc:/res/fluent/cat-host.svg"
                             onClicked: Qt.openUrlExternally(dashboard.center.hostSettingsUrl)
@@ -732,10 +738,11 @@ Rectangle {
                             HardSwitch {
                                 id: elevatedServiceSwitch
                                 Accessible.name: qsTr("Allow remote UAC control (system service)")
-                                checked: dashboard.center.elevatedHostService
+                                enabled: !dashboard.center.windowsConsoleHost
+                                checked: dashboard.center.elevatedHostService || dashboard.center.windowsConsoleHost
                                 onToggled: {
                                     dashboard.elevatedServiceChangeFailed = !dashboard.center.setElevatedHostService(checked)
-                                    checked = Qt.binding(() => dashboard.center.elevatedHostService)
+                                    checked = Qt.binding(() => dashboard.center.elevatedHostService || dashboard.center.windowsConsoleHost)
                                 }
                             }
                         }
@@ -748,6 +755,41 @@ Rectangle {
                             text: qsTr("Could not change the elevated host service.")
                             wrapMode: Text.WordWrap
                             color: Theme.danger
+                        }
+                        RowLayout {
+                            visible: dashboard.center.hostServiceAvailable && !dashboard.center.secondaryInstance
+                            Layout.fillWidth: true
+                            Layout.margins: 12
+                            Copy {
+                                Layout.fillWidth: true
+                                text: qsTr("Allow remote control before Windows sign-in")
+                                wrapMode: Text.WordWrap
+                            }
+                            HardSwitch {
+                                Accessible.name: qsTr("Allow remote control before Windows sign-in")
+                                checked: dashboard.center.windowsCenterBootHost
+                                enabled: dashboard.center.windowsCenterBootHost ||
+                                         (dashboard.center.connected && !dashboard.center.hostActive && !dashboard.hostStopping &&
+                                          (dashboard.center.elevatedHostService || dashboard.center.windowsConsoleHost))
+                                onToggled: {
+                                    dashboard.windowsConsoleHostChangeFailed = !dashboard.center.setWindowsConsoleHost(checked)
+                                    checked = Qt.binding(() => dashboard.center.windowsCenterBootHost)
+                                }
+                            }
+                        }
+                        Copy {
+                            visible: dashboard.center.hostServiceAvailable && !dashboard.center.secondaryInstance
+                            Layout.fillWidth: true
+                            Layout.leftMargin: 12
+                            Layout.rightMargin: 12
+                            Layout.bottomMargin: 7
+                            wrapMode: Text.WordWrap
+                            text: dashboard.windowsConsoleHostChangeFailed
+                                ? qsTr("Could not change Windows boot hosting.")
+                                : dashboard.center.windowsCenterBootHost
+                                  ? qsTr("The system service registers this host with the center before Windows sign-in. Use the device shown in the center list.")
+                                  : qsTr("Sign in to the center, enable the system service and stop local hosting to switch modes.")
+                            color: dashboard.windowsConsoleHostChangeFailed ? Theme.danger : dashboard.muted
                         }
                     }
                 }

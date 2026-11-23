@@ -86,6 +86,7 @@ static QString getStartupApplicationDir(const char* argv0)
 #include "gui/computermodel.h"
 #include "gui/appmodel.h"
 #include "backend/autoupdatechecker.h"
+#include "backend/centerclient.h"
 #include "backend/computermanager.h"
 #include "backend/streamtabmanager.h"
 #include "backend/systemproperties.h"
@@ -843,6 +844,20 @@ int main(int argc, char *argv[])
         // Initialize paths for standard installation
         Path::initialize(false);
     }
+
+#if defined(SUNANDMON_APP) && defined(Q_OS_WIN)
+    if (argc == 2) {
+        const QByteArray mode(argv[1]);
+        if (mode == "--sunandmon-center-boot-worker" ||
+            mode == "--sunandmon-configure-center-boot-host" ||
+            mode == "--sunandmon-disable-center-boot-host") {
+            QCoreApplication app(argc, argv);
+            return mode == "--sunandmon-center-boot-worker"
+                ? CenterClient::runWindowsBootHost()
+                : CenterClient::configureWindowsBootHost(mode == "--sunandmon-configure-center-boot-host");
+        }
+    }
+#endif
 
     // Override the default QML cache directory with the one we chose
     if (qEnvironmentVariableIsEmpty("QML_DISK_CACHE_PATH")) {

@@ -30,6 +30,7 @@
 #include <windows.h>
 #include <dpapi.h>
 #include <iphlpapi.h>
+#include <sddl.h>
 #include <shellapi.h>
 #include <tlhelp32.h>
 #endif
@@ -56,9 +57,9 @@ constexpr wchar_t SunshineServiceName[] = L"SunshineService";
 constexpr wchar_t SunAndMonServiceName[] = L"SunAndMonHostService";
 const QString SunAndMonServicePipeName = QStringLiteral("SunAndMonHostService");
 
-QString serviceBinaryCommand(const QString& serviceExecutable)
+QString serviceBinaryCommand(const QString& serviceExecutable, const QString& mode)
 {
-    return QStringLiteral("\"%1\" --sunandmon-service").arg(QDir::toNativeSeparators(serviceExecutable));
+    return QStringLiteral("\"%1\" %2").arg(QDir::toNativeSeparators(serviceExecutable), mode);
 }
 
 bool runElevatedServiceHelper(const QString& serviceExecutable, const wchar_t* argument)
@@ -216,7 +217,7 @@ QString startupCommand(const QString& path = QCoreApplication::applicationFilePa
     return QStringLiteral("\"%1\"").arg(QDir::toNativeSeparators(path));
 }
 
-QByteArray protectCenterKey(const QByteArray& key, const QByteArray& centerUrl, bool encrypt)
+QByteArray protectCenterKey(const QByteArray& key, const QByteArray& centerUrl, bool encrypt, bool machineScope = false)
 {
     if (key.isEmpty()) {
         return {};
@@ -224,8 +225,9 @@ QByteArray protectCenterKey(const QByteArray& key, const QByteArray& centerUrl, 
     DATA_BLOB input{static_cast<DWORD>(key.size()), reinterpret_cast<BYTE*>(const_cast<char*>(key.constData()))};
     DATA_BLOB entropy{static_cast<DWORD>(centerUrl.size()), reinterpret_cast<BYTE*>(const_cast<char*>(centerUrl.constData()))};
     DATA_BLOB output{};
+    const DWORD flags = CRYPTPROTECT_UI_FORBIDDEN | (machineScope ? CRYPTPROTECT_LOCAL_MACHINE : 0);
     const BOOL ok = encrypt
-        ? CryptProtectData(&input, nullptr, &entropy, nullptr, nullptr, CRYPTPROTECT_UI_FORBIDDEN, &output)
+        ? CryptProtectData(&input, nullptr, &entropy, nullptr, nullptr, flags, &output)
         : CryptUnprotectData(&input, nullptr, &entropy, nullptr, nullptr, CRYPTPROTECT_UI_FORBIDDEN, &output);
     if (!ok) {
         return {};
@@ -234,6 +236,96 @@ QByteArray protectCenterKey(const QByteArray& key, const QByteArray& centerUrl, 
     SecureZeroMemory(output.pbData, output.cbData);
     LocalFree(output.pbData);
     return result;
+}
+
+constexpr wchar_t bootHostRegistryPath[] =
+    L"SYSTEM\\CurrentControlSet\\Services\\SunAndMonHostService\\Parameters\\BootHost";
+constexpr wchar_t bootHostRegistryValue[] = L"Center";
+constexpr wchar_t bootDeviceIdentityPath[] =
+    L"SYSTEM\\CurrentControlSet\\Services\\SunAndMonHostService\\Parameters\\DeviceIdentity";
+constexpr wchar_t bootDeviceIdentityValue[] = L"Id";
+const QByteArray bootHostEntropy = QByteArrayLiteral("SunAndMon.WindowsBootHost.v1");
+
+bool runningAsSystem()
+{
+    HANDLE token = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) {
+        return false;
+    }
+    const auto closeToken = qScopeGuard([&] { CloseHandle(token); });
+    DWORD size = 0;
+    GetTokenInformation(token, TokenUser, nullptr, 0, &size);
+    if (size == 0) {
+        return false;
+    }
+    QByteArray storage(size, Qt::Uninitialized);
+    return GetTokenInformation(token, TokenUser, storage.data(), size, &size) &&
+           IsWellKnownSid(reinterpret_cast<const TOKEN_USER*>(storage.constData())->User.Sid, WinLocalSystemSid);
+}
+
+bool saveBootRegistryValue(const wchar_t* path, const wchar_t* name, const wchar_t* acl,
+                           DWORD type, const BYTE* value, DWORD size)
+{
+    PSECURITY_DESCRIPTOR descriptor = nullptr;
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(acl, SDDL_REVISION_1, &descriptor, nullptr)) {
+        return false;
+    }
+    const auto release = qScopeGuard([&] { LocalFree(descriptor); });
+    SECURITY_ATTRIBUTES attributes{sizeof(SECURITY_ATTRIBUTES), descriptor, FALSE};
+    HKEY key = nullptr;
+    if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, path, 0, nullptr, REG_OPTION_NON_VOLATILE,
+                        KEY_SET_VALUE | WRITE_DAC, &attributes, &key, nullptr) != ERROR_SUCCESS) {
+        return false;
+    }
+    const auto closeKey = qScopeGuard([&] { RegCloseKey(key); });
+    return RegSetKeySecurity(key, DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, descriptor) == ERROR_SUCCESS &&
+           RegSetValueExW(key, name, 0, type, value, size) == ERROR_SUCCESS;
+}
+
+bool saveBootHostSettings(const QJsonObject& profile)
+{
+    const auto protectedData = protectCenterKey(QJsonDocument(profile).toJson(QJsonDocument::Compact),
+                                                bootHostEntropy, true, true);
+    return !protectedData.isEmpty() &&
+           saveBootRegistryValue(bootHostRegistryPath, bootHostRegistryValue, L"D:P(A;;KA;;;SY)(A;;KA;;;BA)",
+                                 REG_BINARY, reinterpret_cast<const BYTE*>(protectedData.constData()),
+                                 static_cast<DWORD>(protectedData.size()));
+}
+
+void publishBootDeviceIdentity(const QString& id)
+{
+    if (!NodeIdFormat.match(id).hasMatch()) {
+        return;
+    }
+    const auto value = id.toStdWString();
+    // Only the public device identifier is readable by local users.
+    saveBootRegistryValue(bootDeviceIdentityPath, bootDeviceIdentityValue, L"D:P(A;;KA;;;SY)(A;;KA;;;BA)(A;;KR;;;BU)",
+                          REG_SZ, reinterpret_cast<const BYTE*>(value.c_str()),
+                          static_cast<DWORD>((value.size() + 1) * sizeof(wchar_t)));
+}
+
+QJsonObject loadBootHostSettings()
+{
+    DWORD size = 0;
+    if (RegGetValueW(HKEY_LOCAL_MACHINE, bootHostRegistryPath, bootHostRegistryValue,
+                     RRF_RT_REG_BINARY, nullptr, nullptr, &size) != ERROR_SUCCESS || size == 0 || size > 32768) {
+        return {};
+    }
+    QByteArray data(size, Qt::Uninitialized);
+    if (RegGetValueW(HKEY_LOCAL_MACHINE, bootHostRegistryPath, bootHostRegistryValue,
+                     RRF_RT_REG_BINARY, nullptr, data.data(), &size) != ERROR_SUCCESS) {
+        return {};
+    }
+    data.resize(size);
+    return QJsonDocument::fromJson(protectCenterKey(data, bootHostEntropy, false)).object();
+}
+
+bool validBootHostCenter(const QUrl& url, const QByteArray& key, const QString& ip)
+{
+    return url.isValid() && url.scheme() == QStringLiteral("https") && !url.host().isEmpty() &&
+           url.userInfo().isEmpty() && !url.hasQuery() && !url.hasFragment() &&
+           CenterKeyFormat.match(QString::fromLatin1(key)).hasMatch() &&
+           (ip.isEmpty() || !QHostAddress(ip).isNull());
 }
 #elif defined(Q_OS_LINUX)
 QString linuxConfigDir()
@@ -309,10 +401,10 @@ void clearSavedCenterKeyLinux()
 }
 #endif
 
-QString resolveHostConfigDir()
+QString resolveHostConfigDir(bool bootWorker = false)
 {
     const QDir appDir(QCoreApplication::applicationDirPath());
-    if (appDir.exists(QStringLiteral("portable.dat"))) {
+    if (!bootWorker && appDir.exists(QStringLiteral("portable.dat"))) {
         const QString portableConfig = appDir.filePath(QStringLiteral("host/config"));
         QDir().mkpath(portableConfig);
         return portableConfig;
@@ -601,7 +693,7 @@ CenterClient::CenterClient(ComputerManager* computers)
         }
         const QByteArray keyField = m_HostKey.isEmpty() ? QByteArrayLiteral("-") : m_HostKey;
         const QByteArray allowAlt = m_AllowAlternatePorts ? QByteArrayLiteral("1") : QByteArrayLiteral("0");
-        const QByteArray configDirHex = resolveHostConfigDir().toUtf8().toHex();
+        const QByteArray configDirHex = resolveHostConfigDir(m_WindowsBootWorker).toUtf8().toHex();
         QByteArray command = "START " + m_ManagedToken + " " + keyField + " " + allowAlt;
         if (!configDirHex.isEmpty()) {
             command += " " + configDirHex;
@@ -635,7 +727,11 @@ CenterClient::CenterClient(ComputerManager* computers)
             }
             m_UsingService = false;
             m_ServiceConnectRetry.stop();
-            launchLocalHostProcess();
+            if (m_WindowsBootWorker) {
+                handleHostFinished(1, false);
+            } else {
+                launchLocalHostProcess();
+            }
         }
     });
     connect(computers, &ComputerManager::centerConnectFinished, this, [this](const QString& uuid, const QString& error) {
@@ -735,6 +831,21 @@ bool CenterClient::hostServiceAvailable() const
 
 bool CenterClient::elevatedHostService() const
 {
+    return hostServiceConfigured(QStringLiteral("--sunandmon-service"));
+}
+
+bool CenterClient::windowsConsoleHost() const
+{
+    return windowsCenterBootHost() || hostServiceConfigured(QStringLiteral("--sunandmon-console-service"));
+}
+
+bool CenterClient::windowsCenterBootHost() const
+{
+    return hostServiceConfigured(QStringLiteral("--sunandmon-center-console-service"));
+}
+
+bool CenterClient::hostServiceConfigured(const QString& mode) const
+{
 #ifdef Q_OS_WIN
     if (!hostServiceAvailable()) {
         return false;
@@ -756,7 +867,7 @@ bool CenterClient::elevatedHostService() const
         auto* config = reinterpret_cast<QUERY_SERVICE_CONFIGW*>(buffer.data());
         if (QueryServiceConfigW(service, config, bytesNeeded, &bytesNeeded) &&
             config->dwStartType != SERVICE_DISABLED && config->lpBinaryPathName) {
-            const auto expected = serviceBinaryCommand(hostServiceExecutable());
+            const auto expected = serviceBinaryCommand(hostServiceExecutable(), mode);
             configured = QString::fromWCharArray(config->lpBinaryPathName)
                 .compare(expected, Qt::CaseInsensitive) == 0;
         }
@@ -765,6 +876,7 @@ bool CenterClient::elevatedHostService() const
     CloseServiceHandle(manager);
     return configured;
 #else
+    Q_UNUSED(mode);
     return false;
 #endif
 }
@@ -999,7 +1111,7 @@ bool CenterClient::setStartAtLogin(bool enabled)
 bool CenterClient::setElevatedHostService(bool enabled)
 {
 #ifdef Q_OS_WIN
-    if (!hostServiceAvailable()) {
+    if (!hostServiceAvailable() || windowsConsoleHost()) {
         return false;
     }
     const bool wasActive = hostActive();
@@ -1028,8 +1140,96 @@ bool CenterClient::setElevatedHostService(bool enabled)
 #endif
 }
 
+bool CenterClient::setWindowsConsoleHost(bool enabled)
+{
+#ifdef Q_OS_WIN
+    if (enabled ? windowsCenterBootHost() : !windowsConsoleHost()) {
+        return true;
+    }
+    if (m_SecondaryInstance || hostActive() || m_Stopping ||
+        (enabled && (!connected() || (!elevatedHostService() && !windowsConsoleHost())))) {
+        return false;
+    }
+    const bool ok = runElevatedServiceHelper(QCoreApplication::applicationFilePath(),
+        enabled ? L"--sunandmon-configure-center-boot-host" : L"--sunandmon-disable-center-boot-host");
+    emit changed();
+    return ok && windowsConsoleHost() == enabled;
+#else
+    Q_UNUSED(enabled);
+    return false;
+#endif
+}
+
+#ifdef Q_OS_WIN
+int CenterClient::configureWindowsBootHost(bool enabled)
+{
+    const QDir appDir(QCoreApplication::applicationDirPath());
+    if (enabled) {
+        QSettings settings;
+        const auto address = settings.value(QStringLiteral("center/url")).toString();
+        const auto ip = settings.value(QStringLiteral("center/directIp")).toString();
+        const auto key = protectCenterKey(settings.value(SavedCenterKey).toByteArray(), address.toUtf8(), false);
+        if (!validBootHostCenter(QUrl(address, QUrl::StrictMode), key, ip) ||
+            !saveBootHostSettings({{"url", address}, {"ip", ip}, {"key", QString::fromLatin1(key)}})) {
+            return 1;
+        }
+    }
+    const int result = QProcess::execute(appDir.filePath(QStringLiteral("host/tools/sunshinesvc.exe")),
+        {enabled ? QStringLiteral("--install-sunandmon-center-console-service")
+                 : QStringLiteral("--install-sunandmon-managed-service")});
+    if (result == 0 && !enabled) {
+        RegDeleteTreeW(HKEY_LOCAL_MACHINE, bootHostRegistryPath);
+    }
+    return result;
+}
+
+int CenterClient::runWindowsBootHost()
+{
+    if (!runningAsSystem()) {
+        return 1;
+    }
+    const auto profile = loadBootHostSettings();
+    const auto url = QUrl(profile.value("url").toString(), QUrl::StrictMode);
+    const auto ip = profile.value("ip").toString();
+    const auto key = profile.value("key").toString().toLatin1();
+    if (!validBootHostCenter(url, key, ip)) {
+        return 2;
+    }
+    CenterClient host(nullptr);
+    host.m_WindowsBootWorker = true;
+    host.m_Endpoint = {url, ip};
+    host.m_Key = key;
+    host.computeLocalHostId();
+    publishBootDeviceIdentity(host.m_HostId);
+    QTimer consoleWatch;
+    consoleWatch.setInterval(3000);
+    DWORD captureSession = 0;
+    const auto checkConsole = [&] {
+        const DWORD current = WTSGetActiveConsoleSessionId();
+        if (current == 0 || current == 0xffffffff) {
+            return;
+        }
+        if (host.hostActive()) {
+            if (captureSession != current || host.hostStartupTimedOut()) {
+                host.stopHost();
+            }
+        } else if (!host.hostStopping()) {
+            captureSession = current;
+            host.startHost({});
+        }
+    };
+    connect(&consoleWatch, &QTimer::timeout, &host, checkConsole);
+    consoleWatch.start();
+    checkConsole();
+    return QCoreApplication::exec();
+}
+#endif
+
 QUrl CenterClient::hostSettingsUrl() const
 {
+    if (!m_WindowsBootWorker && windowsConsoleHost()) {
+        return QUrl(QStringLiteral("https://localhost:47990/"));
+    }
     if (!hostActive() || m_WebPort == 0) {
         return {};
     }
@@ -1202,12 +1402,13 @@ QString CenterClient::hiddenDevicesKey() const
 
 QVariantList CenterClient::devices() const
 {
+    const auto bootHostId = localBootDeviceId();
     QSet<QString> onlineNames;
     if (!m_ServerDeduplicatesDevices) {
         for (const auto& entry : m_Devices) {
             const auto device = entry.toMap();
             const auto id = device.value("id").toString();
-            if (device.value("online").toBool() && id != m_HostId && !m_HiddenDevices.contains(id)) {
+            if (device.value("online").toBool() && id != m_HostId && id != bootHostId && !m_HiddenDevices.contains(id)) {
                 onlineNames.insert(device.value("name").toString().toCaseFolded());
             }
         }
@@ -1216,12 +1417,28 @@ QVariantList CenterClient::devices() const
     for (const auto& entry : m_Devices) {
         const auto device = entry.toMap();
         const auto id = device.value("id").toString();
-        if (id != m_HostId && !m_HiddenDevices.contains(id) &&
+        if (id != m_HostId && id != bootHostId && !m_HiddenDevices.contains(id) &&
             (device.value("online").toBool() || !onlineNames.contains(device.value("name").toString().toCaseFolded()))) {
             visible.append(entry);
         }
     }
     return visible;
+}
+
+QString CenterClient::localBootDeviceId()
+{
+#ifdef Q_OS_WIN
+    wchar_t id[33] = {};
+    DWORD size = sizeof(id);
+    if (RegGetValueW(HKEY_LOCAL_MACHINE, bootDeviceIdentityPath, bootDeviceIdentityValue,
+                     RRF_RT_REG_SZ, nullptr, id, &size) == ERROR_SUCCESS && size == sizeof(id)) {
+        const auto value = QString::fromWCharArray(id, 32);
+        if (NodeIdFormat.match(value).hasMatch()) {
+            return value;
+        }
+    }
+#endif
+    return {};
 }
 
 void CenterClient::hideDevice(const QString& id)
@@ -1433,7 +1650,7 @@ void CenterClient::loadCenterTunnelDefaults()
 void CenterClient::connectDevice(const QString& id)
 {
     static const QRegularExpression idFormat("^[a-f0-9]{32}$");
-    if (!connected() || m_Busy || id == m_HostId || !idFormat.match(id).hasMatch()) {
+    if (!connected() || m_Busy || id == m_HostId || !idFormat.match(id).hasMatch() || id == localBootDeviceId()) {
         return;
     }
     if (auto refreshReply = std::exchange(m_DirectoryRequest, nullptr)) {
@@ -1522,6 +1739,9 @@ void CenterClient::connectDevice(const QString& id)
 
 void CenterClient::startHost(const QString& address)
 {
+    if (!m_WindowsBootWorker && windowsConsoleHost()) {
+        return;
+    }
     if (m_SecondaryInstance) {
         setHostStatus(tr("Managed by the main SunAndMon window"));
         return;
@@ -1574,7 +1794,7 @@ void CenterClient::launchHost()
         return;
     }
     setHostStatus(tr("Starting the local host…"));
-    if (elevatedHostService()) {
+    if (m_WindowsBootWorker || elevatedHostService()) {
         m_UsingService = true;
         m_ServiceConnectAttempts = 0;
         emit changed();
@@ -1844,6 +2064,9 @@ void CenterClient::probeHost()
 void CenterClient::startClipboardAgent()
 {
 #if defined(Q_OS_WIN) || defined(Q_OS_LINUX)
+    if (m_WindowsBootWorker) {
+        return;
+    }
     if (m_ClipboardAgent.state() != QProcess::NotRunning || m_WebPort == 0) {
         return;
     }

@@ -14,6 +14,7 @@
 #include <sddl.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <filesystem>
 #include <fstream>
@@ -48,6 +49,9 @@ HANDLE stop_event;
 HANDLE session_change_event;
 
 #define SERVICE_NAME "SunshineService"
+constexpr char sunandmon_host_service_name[] = "SunAndMonHostService";
+bool sunandmon_console_mode = false;
+bool sunandmon_center_console_mode = false;
 
 DWORD WINAPI
 HandlerEx(DWORD dwControl, DWORD dwEventType, LPVOID lpEventData, LPVOID lpContext) {
@@ -789,7 +793,8 @@ ProcessLifeMs(HANDLE process) {
 
 VOID WINAPI
 ServiceMain(DWORD dwArgc, LPTSTR *lpszArgv) {
-  service_status_handle = RegisterServiceCtrlHandlerEx(SERVICE_NAME, HandlerEx, NULL);
+  service_status_handle = RegisterServiceCtrlHandlerEx(
+    sunandmon_console_mode ? sunandmon_host_service_name : SERVICE_NAME, HandlerEx, NULL);
   if (service_status_handle == NULL) {
     // Nothing we can really do here but terminate ourselves
     ExitProcess(GetLastError());
@@ -1062,8 +1067,8 @@ ServiceMain(DWORD dwArgc, LPTSTR *lpszArgv) {
   // not before this tick (GetTickCount64): only the start of the core waits; the pass interval, the GUI agent's supervision and the stop event go on as before
   ULONGLONG core_restart_not_before_tick = 0;
   while (WaitForSingleObject(stop_event, std::exchange(loop_wait_ms, 3000)) != WAIT_OBJECT_0) {
-    const auto binding_mode = session_binding_mode();
-    const auto selection = FindActiveUserSessionId();
+    const auto binding_mode = sunandmon_console_mode ? config_session_binding::mode_e::console : session_binding_mode();
+    const auto selection = sunandmon_console_mode ? user_session_selection_t { invalid_session_id, false } : FindActiveUserSessionId();
     auto interactive_session_id = selection.session_id;
     if (selection.query_failed) {
       interactive_session_id = gui_agent_session_id;
@@ -1153,7 +1158,7 @@ ServiceMain(DWORD dwArgc, LPTSTR *lpszArgv) {
         NULL);
 
       if (!CreateProcessAsUserW(console_token,
-            L"Sunshine.exe",
+            core_path.c_str(),
             NULL,
             NULL,
             NULL,
@@ -1230,7 +1235,7 @@ ServiceMain(DWORD dwArgc, LPTSTR *lpszArgv) {
             still_running = true;
             break;
           }
-          if (gui_agent_session_id == invalid_session_id) {
+          if (!sunandmon_console_mode && gui_agent_session_id == invalid_session_id) {
             const auto gui_selection = FindActiveUserSessionId();
             if (!gui_selection.query_failed && gui_selection.session_id != invalid_session_id) {
               // Re-evaluate both targets: automatic capture may also need to
@@ -1250,7 +1255,7 @@ ServiceMain(DWORD dwArgc, LPTSTR *lpszArgv) {
           break;
 
         case WAIT_OBJECT_0 + 2: {
-          const auto next_user = FindActiveUserSessionId();
+          const auto next_user = sunandmon_console_mode ? user_session_selection_t { invalid_session_id, false } : FindActiveUserSessionId();
           const auto update = config_session_binding::update_sessions(
             binding_mode, session_id, gui_agent_session_id, WTSGetActiveConsoleSessionId(),
             next_user.session_id, next_user.query_failed);
@@ -1388,6 +1393,7 @@ namespace sunandmon_svc {
     L"Runs the SunAndMon Sunshine host as SYSTEM so remote sessions can view and control Windows UAC prompts.";
   constexpr wchar_t kPipeNameW[] = L"\\\\.\\pipe\\SunAndMonHostService";
   constexpr wchar_t kPipeSddlW[] = L"D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)";
+  std::atomic<DWORD> boot_worker_pid { 0 };
 
   bool
   is_lower_hex(std::string_view value, size_t expected_length) {
@@ -1423,11 +1429,49 @@ namespace sunandmon_svc {
     return host_dir.substr(0, sep) + L"\\SunAndMon.exe";
   }
 
+  void
+  supervise_boot_worker(HANDLE stop, HANDLE log) {
+    const auto executable = expected_controller_path();
+    const auto working_dir = std::filesystem::path(executable).parent_path().wstring();
+    const auto job = CreateJobObjectForChildProcess();
+    if (executable.empty() || job == NULL) {
+      if (job != NULL) CloseHandle(job);
+      return;
+    }
+    do {
+      auto command = L"\"" + executable + L"\" --sunandmon-center-boot-worker";
+      STARTUPINFOW startup {};
+      startup.cb = sizeof(startup);
+      PROCESS_INFORMATION worker {};
+      if (CreateProcessW(executable.c_str(), command.data(), nullptr, nullptr, FALSE,
+            CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr, working_dir.c_str(), &startup, &worker)) {
+        if (AssignProcessToJobObject(job, worker.hProcess)) {
+          boot_worker_pid.store(worker.dwProcessId);
+          if (ResumeThread(worker.hThread) != static_cast<DWORD>(-1)) {
+            const HANDLE wait_for[] = { stop, worker.hProcess };
+            WaitForMultipleObjects(2, wait_for, FALSE, INFINITE);
+          }
+          boot_worker_pid.store(0);
+        }
+        TerminateProcess(worker.hProcess, 0);
+        WaitForSingleObject(worker.hProcess, 5000);
+        CloseHandle(worker.hThread);
+        CloseHandle(worker.hProcess);
+      } else {
+        WriteServiceLog(log, "Could not start center boot worker: " + std::to_string(GetLastError()));
+      }
+    } while (WaitForSingleObject(stop, 5000) == WAIT_TIMEOUT);
+    CloseHandle(job);
+  }
+
   bool
   verify_pipe_client(HANDLE pipe, DWORD &client_pid, DWORD &client_session_id) {
     client_pid = 0;
     client_session_id = invalid_session_id;
     if (!GetNamedPipeClientProcessId(pipe, &client_pid) || client_pid == 0) {
+      return false;
+    }
+    if (sunandmon_center_console_mode && client_pid != boot_worker_pid.load()) {
       return false;
     }
     if (!ProcessIdToSessionId(client_pid, &client_session_id)) {
@@ -1655,7 +1699,12 @@ namespace sunandmon_svc {
 
     const auto host_dir = InstallDirectory();
     const auto core_path = host_dir + L"\\sunshine.exe";
-    const auto console_token = DuplicateTokenForSession(client_session_id);
+    const auto capture_session_id = sunandmon_center_console_mode ? WTSGetActiveConsoleSessionId() : client_session_id;
+    if (capture_session_id == invalid_session_id || capture_session_id == 0) {
+      write_pipe_bytes(pipe, write_mutex, "ERROR console_unavailable\n");
+      return;
+    }
+    const auto console_token = DuplicateTokenForSession(capture_session_id);
     if (console_token == NULL) {
       WriteServiceLog(log_file_handle, "DuplicateTokenForSession failed: " + std::to_string(GetLastError()));
       write_pipe_bytes(pipe, write_mutex, "ERROR token\n");
@@ -1711,6 +1760,9 @@ namespace sunandmon_svc {
 
     STARTUPINFOEXW startup_info = {};
     startup_info.StartupInfo.cb = sizeof(startup_info);
+    if (sunandmon_center_console_mode) {
+      startup_info.StartupInfo.lpDesktop = (LPWSTR) L"winsta0\\default";
+    }
     startup_info.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
     startup_info.StartupInfo.hStdInput = child_stdin_r;
     startup_info.StartupInfo.hStdOutput = child_stdout_w;
@@ -1765,7 +1817,7 @@ namespace sunandmon_svc {
 
     WriteServiceLog(log_file_handle,
       "SunAndMonHostService launched sunshine.exe PID " + std::to_string(process_info.dwProcessId) +
-        " in session " + std::to_string(client_session_id) + " for client PID " + std::to_string(client_pid));
+        " in session " + std::to_string(capture_session_id) + " for client PID " + std::to_string(client_pid));
 
     std::thread stdout_thread([child_stdout_r, pipe, &write_mutex]() {
       std::string pending;
@@ -1894,7 +1946,8 @@ namespace sunandmon_svc {
       log_file_handle = sunshinesvc::open_fallback_log_handle();
     }
     PSECURITY_DESCRIPTOR pipe_sd = nullptr;
-    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(kPipeSddlW, SDDL_REVISION_1, &pipe_sd, nullptr)) {
+    const auto pipe_acl = sunandmon_center_console_mode ? L"D:P(A;;GA;;;SY)" : kPipeSddlW;
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(pipe_acl, SDDL_REVISION_1, &pipe_sd, nullptr)) {
       WriteServiceLog(log_file_handle, "ConvertStringSecurityDescriptorToSecurityDescriptorW failed: " + std::to_string(GetLastError()));
       service_status.dwCurrentState = SERVICE_STOPPED;
       service_status.dwWin32ExitCode = GetLastError();
@@ -1911,6 +1964,10 @@ namespace sunandmon_svc {
     service_status.dwCurrentState = SERVICE_RUNNING;
     SetServiceStatus(service_status_handle, &service_status);
     WriteServiceLog(log_file_handle, "SunAndMonHostService started");
+    std::thread boot_worker;
+    if (sunandmon_center_console_mode) {
+      boot_worker = std::thread(supervise_boot_worker, stop_event, log_file_handle);
+    }
 
     while (WaitForSingleObject(stop_event, 0) != WAIT_OBJECT_0) {
       const auto pipe = CreateNamedPipeW(
@@ -1963,6 +2020,9 @@ namespace sunandmon_svc {
       CloseHandle(pipe);
     }
 
+    if (boot_worker.joinable()) {
+      boot_worker.join();
+    }
     LocalFree(pipe_sd);
     if (log_file_handle != INVALID_HANDLE_VALUE) {
       WriteServiceLog(log_file_handle, "SunAndMonHostService stopped");
@@ -1992,12 +2052,15 @@ namespace sunandmon_svc {
   }
 
   int
-  InstallService() {
+  InstallService(bool console_mode = false, bool preserve_console_mode = true, bool center_console = false) {
     const auto self = self_module_path();
     if (self.empty()) {
       return 1;
     }
-    const std::wstring bin_path = L"\"" + self + L"\" --sunandmon-service";
+    const std::wstring managed_command = L"\"" + self + L"\" --sunandmon-service";
+    const std::wstring console_command = L"\"" + self + L"\" --sunandmon-console-service";
+    const std::wstring center_console_command = L"\"" + self + L"\" --sunandmon-center-console-service";
+    std::wstring bin_path = center_console ? center_console_command : (console_mode ? console_command : managed_command);
     const auto manager = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_ALL_ACCESS);
     if (manager == NULL) {
       return static_cast<int>(GetLastError());
@@ -2012,6 +2075,11 @@ namespace sunandmon_svc {
         std::vector<BYTE> buf(bytes_needed);
         auto *cfg = reinterpret_cast<QUERY_SERVICE_CONFIGW *>(buf.data());
         if (QueryServiceConfigW(service, cfg, bytes_needed, &bytes_needed) && cfg->lpBinaryPathName) {
+          if (preserve_console_mode &&
+              (_wcsicmp(cfg->lpBinaryPathName, console_command.c_str()) == 0 ||
+               _wcsicmp(cfg->lpBinaryPathName, center_console_command.c_str()) == 0)) {
+            bin_path = cfg->lpBinaryPathName;
+          }
           needs_restart = _wcsicmp(cfg->lpBinaryPathName, bin_path.c_str()) != 0;
         }
       }
@@ -2111,13 +2179,24 @@ main(int argc, char *argv[]) {
     { (LPSTR) SERVICE_NAME, ServiceMain },
     { NULL, NULL }
   };
-  static const SERVICE_TABLE_ENTRY sunandmon_service_table[] = {
-    { (LPSTR) sunandmon_svc::kServiceNameA, sunandmon_svc::ServiceMain },
+  sunandmon_console_mode = argc == 2 && strcmp(argv[1], "--sunandmon-console-service") == 0;
+  sunandmon_center_console_mode = argc == 2 && strcmp(argv[1], "--sunandmon-center-console-service") == 0;
+  const SERVICE_TABLE_ENTRY sunandmon_service_table[] = {
+    { (LPSTR) sunandmon_host_service_name, sunandmon_console_mode ? ServiceMain : sunandmon_svc::ServiceMain },
     { NULL, NULL }
   };
 
   if (argc == 2 && strcmp(argv[1], "--install-sunandmon-service") == 0) {
     return sunandmon_svc::InstallService();
+  }
+  if (argc == 2 && strcmp(argv[1], "--install-sunandmon-console-service") == 0) {
+    return sunandmon_svc::InstallService(true);
+  }
+  if (argc == 2 && strcmp(argv[1], "--install-sunandmon-center-console-service") == 0) {
+    return sunandmon_svc::InstallService(false, false, true);
+  }
+  if (argc == 2 && strcmp(argv[1], "--install-sunandmon-managed-service") == 0) {
+    return sunandmon_svc::InstallService(false, false);
   }
   if (argc == 2 && strcmp(argv[1], "--uninstall-sunandmon-service") == 0) {
     return sunandmon_svc::UninstallService();
@@ -2128,7 +2207,8 @@ main(int argc, char *argv[]) {
     return DoGracefulTermination(atol(argv[2]));
   }
 
-  const bool sunandmon_mode = argc == 2 && strcmp(argv[1], "--sunandmon-service") == 0;
+  const bool sunandmon_mode = sunandmon_console_mode || sunandmon_center_console_mode ||
+                             (argc == 2 && strcmp(argv[1], "--sunandmon-service") == 0);
 
   // By default, services have their current directory set to %SYSTEMROOT%\System32.
   // We want to use the directory where Sunshine.exe is located instead of system32.

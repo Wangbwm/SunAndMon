@@ -121,6 +121,7 @@ namespace {
 
 quintptr s_EmbedParentWinId = 0;
 QRect s_EmbedInitialRect;
+std::atomic<bool> s_EmbedQuitRequested{false};
 
 struct EmbedCommand {
     enum Type { Resize, Show, Hide, Focus, SyncOverlay, HideOverlay, ToggleMenu, Quit };
@@ -289,6 +290,27 @@ static LRESULT CALLBACK embedChildSubclassProc(HWND hwnd, UINT message,
 }
 #endif
 
+static void dispatchEmbedQuitSignal()
+{
+    s_EmbedQuitRequested.store(true, std::memory_order_release);
+    auto* quitCmd = new EmbedCommand();
+    quitCmd->type = EmbedCommand::Quit;
+    SDL_Event ev = {};
+    ev.type = SDL_USEREVENT;
+    ev.user.code = SDL_CODE_EMBED_COMMAND;
+    ev.user.data1 = quitCmd;
+    if (SDL_PushEvent(&ev) < 0) {
+        delete quitCmd;
+    }
+    if (QCoreApplication* app = QCoreApplication::instance()) {
+        QMetaObject::invokeMethod(app, [app]() {
+            if (Session::get() == nullptr) {
+                app->quit();
+            }
+        }, Qt::QueuedConnection);
+    }
+}
+
 static void startEmbedStdinWatcher()
 {
     static std::atomic<bool> started{false};
@@ -301,6 +323,10 @@ static void startEmbedStdinWatcher()
             QByteArray line = QByteArray(buf).trimmed();
             if (line.isEmpty()) {
                 continue;
+            }
+            if (line == "QUIT") {
+                dispatchEmbedQuitSignal();
+                return;
             }
             auto* cmd = new EmbedCommand();
             if (line.startsWith("RESIZE ")) {
@@ -327,8 +353,6 @@ static void startEmbedStdinWatcher()
                 cmd->type = EmbedCommand::HideOverlay;
             } else if (line == "TOGGLE_MENU") {
                 cmd->type = EmbedCommand::ToggleMenu;
-            } else if (line == "QUIT") {
-                cmd->type = EmbedCommand::Quit;
             } else {
                 delete cmd;
                 continue;
@@ -340,20 +364,9 @@ static void startEmbedStdinWatcher()
             if (SDL_PushEvent(&ev) < 0) {
                 delete cmd;
             }
-            if (cmd->type == EmbedCommand::Quit) {
-                return;
-            }
         }
         // Parent closed stdin or crashed -> exit cleanly without leaving orphan stream process
-        auto* quitCmd = new EmbedCommand();
-        quitCmd->type = EmbedCommand::Quit;
-        SDL_Event ev = {};
-        ev.type = SDL_USEREVENT;
-        ev.user.code = SDL_CODE_EMBED_COMMAND;
-        ev.user.data1 = quitCmd;
-        if (SDL_PushEvent(&ev) < 0) {
-            delete quitCmd;
-        }
+        dispatchEmbedQuitSignal();
     }).detach();
 }
 
@@ -2623,12 +2636,16 @@ private:
         bool shouldQuit =
                 !m_Session->m_UnexpectedTermination &&
                 m_Session->m_Preferences->quitAppAfter;
+        const bool deferSessionFinished =
+                shouldQuit || m_Session->m_ShouldExit || Session::embedParentWindowId() != 0;
 
-        // Notify the UI
+        // Notify the UI early only for interactive GUI returns. Embedded child
+        // tabs and quit-on-exit flows exit Qt's event loop upon sessionFinished,
+        // which would deadlock BlockingQueuedConnection or exit before LiStopConnection().
         if (shouldQuit) {
             emit m_Session->quitStarting();
         }
-        else {
+        else if (!deferSessionFinished) {
             emit m_Session->sessionFinished(m_Session->m_PortTestResults);
         }
 
@@ -2638,7 +2655,9 @@ private:
         SDL_assert(m_Session->m_VideoDecoder == nullptr);
 
         // Finish cleanup of the connection state
-        QMetaObject::invokeMethod(m_Session, &Session::stopMicrophone, Qt::BlockingQueuedConnection);
+        if (m_Session->m_MicStream != nullptr && QCoreApplication::instance() != nullptr) {
+            QMetaObject::invokeMethod(m_Session, &Session::stopMicrophone, Qt::BlockingQueuedConnection);
+        }
         if (m_Session->m_DualSenseHapticsRenderer != nullptr) {
             m_Session->m_DualSenseHapticsRenderer->setControllerTarget(-1);
         }
@@ -2657,12 +2676,13 @@ private:
             } catch (const GfeHttpResponseException&) {
             } catch (const QtNetworkReplyException&) {
             }
+        }
 
-            // Session is finished now
+        if (deferSessionFinished) {
             emit m_Session->sessionFinished(m_Session->m_PortTestResults);
         }
 
-        // Exit the entire program if requested
+        // Exit the entire program if requested (only after LiStopConnection() completed)
         if (m_Session->m_ShouldExit) {
             QCoreApplication::instance()->quit();
         }
@@ -2891,6 +2911,10 @@ void Session::setEmbedConfig(quintptr parentWinId, const QRect& initialRect)
 {
     s_EmbedParentWinId = parentWinId;
     s_EmbedInitialRect = initialRect;
+    s_EmbedQuitRequested.store(false, std::memory_order_release);
+    if (parentWinId != 0) {
+        startEmbedStdinWatcher();
+    }
 }
 
 quintptr Session::embedParentWindowId()
@@ -4552,13 +4576,18 @@ void Session::handleSdlUserEvent(const SDL_UserEvent& event)
 #endif
     case SDL_CODE_EMBED_COMMAND: {
         std::unique_ptr<EmbedCommand> cmd(static_cast<EmbedCommand*>(event.data1));
-        if (!cmd || !m_Window) {
+        if (!cmd) {
             break;
         }
         if (cmd->type == EmbedCommand::Quit) {
+            m_ShouldExit = true;
+            m_ConnectionInterrupted = false;
             SDL_Event quitEv = {};
             quitEv.type = SDL_QUIT;
             SDL_PushEvent(&quitEv);
+            break;
+        }
+        if (!m_Window) {
             break;
         }
         if (cmd->type == EmbedCommand::Resize) {
@@ -5676,8 +5705,13 @@ static const Uint32 k_FullScreenEntryTimeoutMs = 1200;
 void Session::exec()
 {
 
-    // If the connection failed, clean up and abort the connection.
-    if (!m_AsyncConnectionSuccess) {
+    // If the connection failed or the parent closed the tab while connecting, clean up and abort.
+    const bool embedQuitBeforeExec = (s_EmbedParentWinId != 0 && s_EmbedQuitRequested.load(std::memory_order_acquire));
+    if (!m_AsyncConnectionSuccess || embedQuitBeforeExec) {
+        if (embedQuitBeforeExec) {
+            m_ShouldExit = true;
+        }
+        stopMicrophone();
         if (m_ClipboardHelper != nullptr) {
             stopClipboardHelper();
         }
@@ -5851,6 +5885,12 @@ void Session::exec()
         ensureEmbeddedWindowAttached();
         applyEmbeddedWindowRect(m_EmbedCurrentRect, false);
         startEmbedStdinWatcher();
+        if (s_EmbedQuitRequested.load(std::memory_order_acquire)) {
+            m_ShouldExit = true;
+            SDL_Event quitEv = {};
+            quitEv.type = SDL_QUIT;
+            SDL_PushEvent(&quitEv);
+        }
         emitEmbeddedRouteInfo();
         emitEmbedLine(QByteArrayLiteral("TAB_READY"));
     }
@@ -6927,6 +6967,7 @@ DispatchDeferredCleanup:
     detachEmbeddedWindowSubclass();
     // Switch back to synchronous logging mode
     StreamUtils::exitAsyncLoggingMode();
+    stopMicrophone();
 
     if (m_ClipboardHelper != nullptr) {
         m_ClipboardHelper->processPendingMessages();

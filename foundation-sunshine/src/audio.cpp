@@ -585,6 +585,7 @@ namespace audio {
     // Select and open the capture endpoint each time the host-playback switch changes.
     // The platform audio control owns the sink names; rebuilding the microphone is the
     // supported live operation and avoids changing a different session's default sink.
+    bool privacy_virtual_sink_active = false;
     auto open_microphone = [&](bool play_on_host, int &capture_channels, const std::uint8_t *&capture_mapping) {
       std::string *sink = &ref->sink.host;
       if (!config::audio.sink.empty()) sink = &config::audio.sink;
@@ -599,38 +600,49 @@ namespace audio {
       }
       const auto frame_size = config.packetDuration * stream.sampleRate / 1000;
       const bool continuous_audio = config.flags[config_t::CONTINUOUS_AUDIO];
-      const bool has_privacy_virtual_sink = config.privacy_screen && ref->sink.null_is_virtual_output && muted_route;
-      const std::string capture_sink = has_privacy_virtual_sink || !config::audio.sink.empty() ? *sink : std::string {};
+      const std::string capture_sink = privacy_virtual_sink_active || !config::audio.sink.empty() ? *sink : std::string {};
       return control->microphone(capture_mapping, capture_channels, stream.sampleRate, frame_size, continuous_audio, capture_sink);
     };
 
+    const bool first_sink_assignment = !ref->sink_flag->exchange(true, std::memory_order_acquire);
+    const bool privacy_needs_virtual_sink = config.privacy_screen && ref->sink.null_is_virtual_output && muted_route_for_stream();
+    if (first_sink_assignment || privacy_needs_virtual_sink) {
+      const bool play_on_host = host_audio();
+      std::string *sink = &ref->sink.host;
+      if ((!play_on_host || ref->sink.null_is_selected_device) && ref->sink.null) {
+        if (const auto &route = muted_route_for_stream()) sink = route->sink;
+      }
+      if (first_sink_assignment) {
+        ref->restore_sink = ref->sink.host != *sink;
+      }
+      else if (privacy_needs_virtual_sink && ref->sink.host != *sink) {
+        ref->restore_sink = true;
+      }
+      int sink_status = 0;
+      if (ref->restore_sink || (config::audio.keep_sink_default && !sink->empty()) || privacy_needs_virtual_sink) {
+        sink_status = control->set_sink(*sink);
+        if (sink_status && config.privacy_screen) {
+          BOOST_LOG(warning) << "Privacy screen could not set the virtual audio output; falling back to default audio capture";
+        }
+        else if (sink_status && ref->restore_sink) {
+          return;
+        }
+      }
+      if (privacy_needs_virtual_sink && sink_status == 0) {
+        privacy_virtual_sink_active = true;
+      }
+    }
+
     std::unique_ptr<platf::deinit_t> muted_outputs;
     if (config.privacy_screen) {
-      if (ref->sink.null_is_virtual_output && muted_route_for_stream()) {
+      if (privacy_virtual_sink_active && muted_route) {
         muted_outputs = control->mute_playback_except(*muted_route->sink);
         if (!muted_outputs) {
           BOOST_LOG(warning) << "Privacy screen could not mute other audio outputs; continuing stream";
         }
       }
       else {
-        BOOST_LOG(warning) << "Privacy screen has no virtual audio output available; continuing with default audio capture";
-      }
-    }
-    if (!ref->sink_flag->exchange(true, std::memory_order_acquire)) {
-      const bool play_on_host = host_audio();
-      std::string *sink = &ref->sink.host;
-      if ((!play_on_host || ref->sink.null_is_selected_device) && ref->sink.null) {
-        if (const auto &route = muted_route_for_stream()) sink = route->sink;
-      }
-      ref->restore_sink = ref->sink.host != *sink;
-      if (ref->restore_sink || (config::audio.keep_sink_default && !sink->empty())) {
-        const auto sink_status = control->set_sink(*sink);
-        if (sink_status && config.privacy_screen) {
-          BOOST_LOG(warning) << "Privacy screen could not set the virtual audio output; continuing stream";
-        }
-        else if (sink_status && ref->restore_sink) {
-          return;
-        }
+        BOOST_LOG(warning) << "Privacy screen has no active virtual audio output; continuing with default audio capture";
       }
     }
 
@@ -649,6 +661,7 @@ namespace audio {
     audio_default_wait::once_per_session_t said_once;
     auto reopen_microphone = [&](bool &applied) -> std::unique_ptr<platf::mic_t> {
       auto waiting_fg = util::fail_guard([&]() { ref->capture_waiting_for_device.store(false); });
+      int fast_retries = config.privacy_screen ? 8 : 0;
       while (!shutdown_event->peek()) {
         if (control->default_output_missing()) {
           if (said_once.first(audio_default_wait::reason::no_default)) {
@@ -663,13 +676,23 @@ namespace audio {
         if (reopened) {
           return reopened;
         }
+        if (privacy_virtual_sink_active && fast_retries == 1) {
+          BOOST_LOG(warning) << "Privacy screen virtual audio endpoint remained unavailable; falling back to default audio capture"sv;
+          privacy_virtual_sink_active = false;
+        }
         BOOST_LOG(warning) << "Couldn't re-initialize audio input"sv;
-        shutdown_event->view(5s);
+        if (fast_retries > 0) {
+          --fast_retries;
+          shutdown_event->view(250ms);
+        }
+        else {
+          shutdown_event->view(5s);
+        }
       }
       return nullptr;
     };
-    if (!mic && control->default_output_missing()) {
-      // the device went away between the wait and the first open: wait for it again
+    if (!mic && (control->default_output_missing() || config.privacy_screen)) {
+      // the device went away or is still settling after privacy/VDD switch: wait and retry
       mic = reopen_microphone(applied_host_audio);
       if (!mic) {
         return;  // the stream ended while waiting

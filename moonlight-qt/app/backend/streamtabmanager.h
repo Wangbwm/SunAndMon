@@ -78,6 +78,7 @@ private:
 
     QPointer<QWindow> m_HostWindow;
     QList<TabEntry> m_Tabs;
+    QList<QPointer<QProcess>> m_ClosingProcs;
     QString m_ActiveTabId;
     qreal m_LogicalX = 0;
     qreal m_LogicalY = 40;
@@ -90,4 +91,8 @@ private:
     bool m_HostSizeMoveActive = false;
     bool m_FullscreenStream = false;
     int m_NextTabSeq = 1;
+#ifdef Q_OS_WIN32
+    void* m_ChildJobHandle = nullptr;
+    void assignChildToJob(qint64 pid);
+#endif
 };

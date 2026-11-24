@@ -34,12 +34,44 @@ StreamTabManager::StreamTabManager(QObject* parent)
     });
     connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit,
             this, &StreamTabManager::closeAllTabs);
+#ifdef Q_OS_WIN32
+    HANDLE job = CreateJobObjectW(nullptr, nullptr);
+    if (job != nullptr) {
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION info {};
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if (SetInformationJobObject(job, JobObjectExtendedLimitInformation, &info, sizeof(info))) {
+            m_ChildJobHandle = job;
+        } else {
+            CloseHandle(job);
+        }
+    }
+#endif
 }
 
 StreamTabManager::~StreamTabManager()
 {
     closeAllTabs();
+#ifdef Q_OS_WIN32
+    if (m_ChildJobHandle != nullptr) {
+        CloseHandle(static_cast<HANDLE>(m_ChildJobHandle));
+        m_ChildJobHandle = nullptr;
+    }
+#endif
 }
+
+#ifdef Q_OS_WIN32
+void StreamTabManager::assignChildToJob(qint64 pid)
+{
+    if (m_ChildJobHandle == nullptr || pid <= 0) {
+        return;
+    }
+    HANDLE hProc = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, FALSE, static_cast<DWORD>(pid));
+    if (hProc != nullptr) {
+        AssignProcessToJobObject(static_cast<HANDLE>(m_ChildJobHandle), hProc);
+        CloseHandle(hProc);
+    }
+}
+#endif
 
 bool StreamTabManager::embedSupported() const
 {
@@ -313,6 +345,7 @@ void StreamTabManager::openCenterTab(const QString& deviceId, const QString& dev
 
     connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
             [this, tabId, proc](int exitCode, QProcess::ExitStatus exitStatus) {
+        m_ClosingProcs.removeAll(proc);
         proc->deleteLater();
         const int idx = indexOfTab(tabId);
         if (idx < 0) {
@@ -364,6 +397,15 @@ void StreamTabManager::openCenterTab(const QString& deviceId, const QString& dev
     });
 
     proc->start(QCoreApplication::applicationFilePath(), args);
+#ifdef Q_OS_WIN32
+    if (proc->waitForStarted(0) || proc->processId() > 0) {
+        assignChildToJob(proc->processId());
+    } else {
+        connect(proc, &QProcess::started, this, [this, proc] {
+            assignChildToJob(proc->processId());
+        });
+    }
+#endif
 }
 
 void StreamTabManager::handleChildLine(const QString& tabId, const QByteArray& line)
@@ -504,13 +546,16 @@ void StreamTabManager::closeTab(const QString& tabId)
 
     applyNativeHide(childHwnd);
     if (proc && proc->state() != QProcess::NotRunning) {
-        proc->write("QUIT\n");
-        proc->closeWriteChannel();
         QPointer<QProcess> guard(proc);
-        QTimer::singleShot(3000, this, [guard] {
+        m_ClosingProcs.append(guard);
+        proc->write("QUIT\n");
+        proc->waitForBytesWritten(50);
+        proc->closeWriteChannel();
+        QTimer::singleShot(4000, this, [this, guard] {
             if (guard && guard->state() != QProcess::NotRunning) {
                 guard->kill();
             }
+            m_ClosingProcs.removeAll(guard);
         });
     } else if (proc) {
         proc->deleteLater();
@@ -547,7 +592,8 @@ void StreamTabManager::retryTab(const QString& tabId)
 
 void StreamTabManager::closeAllTabs()
 {
-    if (m_Tabs.isEmpty()) {
+    const bool hadTabs = !m_Tabs.isEmpty();
+    if (!hadTabs && m_ClosingProcs.isEmpty()) {
         return;
     }
     auto tabsCopy = m_Tabs;
@@ -555,23 +601,41 @@ void StreamTabManager::closeAllTabs()
     m_ActiveTabId.clear();
     m_FullscreenStream = false;
 
+    QList<QPointer<QProcess>> procsToStop;
     for (auto& tab : tabsCopy) {
         applyNativeHide(tab.childWinId);
         if (tab.proc && tab.proc->state() != QProcess::NotRunning) {
             tab.proc->disconnect(this);
             tab.proc->write("QUIT\n");
+            tab.proc->waitForBytesWritten(50);
             tab.proc->closeWriteChannel();
-            if (!tab.proc->waitForFinished(1500)) {
-                tab.proc->kill();
-                tab.proc->waitForFinished(500);
-            }
-            tab.proc->deleteLater();
+            procsToStop.append(tab.proc);
         } else if (tab.proc) {
             tab.proc->deleteLater();
         }
     }
-    emit changed();
-    emit fullscreenStreamChanged();
+    for (const auto& closing : m_ClosingProcs) {
+        if (closing && closing->state() != QProcess::NotRunning && !procsToStop.contains(closing)) {
+            closing->disconnect(this);
+            procsToStop.append(closing);
+        }
+    }
+    m_ClosingProcs.clear();
+
+    for (const auto& proc : procsToStop) {
+        if (!proc) {
+            continue;
+        }
+        if (proc->state() != QProcess::NotRunning && !proc->waitForFinished(2500)) {
+            proc->kill();
+            proc->waitForFinished(500);
+        }
+        proc->deleteLater();
+    }
+    if (hadTabs) {
+        emit changed();
+        emit fullscreenStreamChanged();
+    }
 }
 
 void StreamTabManager::setFullscreenStream(bool enabled)

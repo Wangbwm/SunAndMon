@@ -25,6 +25,7 @@ Item {
                                            qsTr("Starting %1...").arg(appName)
     property bool isResume : false
     property bool quitAfter : false
+    property bool pendingQuitAfterDeletion : false
 
     // 退出组合键提示随设置走：玩家改了组合键，提示不能还教默认那套。
     // 按键名按当前手柄风格显示（PS 显示 Options/Share/✕，Switch 显示 +/−），
@@ -119,7 +120,7 @@ Item {
     function sessionFinished(portTestResult)
     {
         if ((typeof isEmbeddedChild === "boolean") && isEmbeddedChild) {
-            Qt.quit()
+            pendingQuitAfterDeletion = true
             return
         }
         if (portTestResult !== 0 && portTestResult !== -1 && streamSegueErrorDialog.text) {
@@ -135,8 +136,8 @@ Item {
         }
 
         if (quitAfter && !streamSegueErrorDialog.text) {
-            // If this was a CLI launch without errors, exit now
-            Qt.quit()
+            // If this was a CLI launch without errors, exit once DeferredSessionCleanupTask completes
+            pendingQuitAfterDeletion = true
         }
         else {
             // Show the Qt window again after streaming
@@ -159,6 +160,9 @@ Item {
         // and keeps other libraries (like SDL_TTF) around until it is deleted.
         session = null
         gc()
+        if (pendingQuitAfterDeletion || ((typeof isEmbeddedChild === "boolean") && isEmbeddedChild)) {
+            Qt.quit()
+        }
     }
 
     StackView.onDeactivating: {

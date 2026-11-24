@@ -899,21 +899,26 @@ namespace platf::audio {
         device_t device;
         wstring_t id;
         if (FAILED(collection->Item(index, &device)) || FAILED(device->GetId(&id))) {
-          return nullptr;
-        }
-        if (*capture_id == id.get()) {
           continue;
         }
         endpoint_volume_t volume;
         BOOL muted = FALSE;
         if (FAILED(device->Activate(__uuidof(IAudioEndpointVolume), CLSCTX_ALL, nullptr, reinterpret_cast<void **>(&volume))) ||
             FAILED(volume->GetMute(&muted))) {
-          return nullptr;
+          continue;
+        }
+        if (*capture_id == id.get()) {
+          // Ensure the virtual capture endpoint itself is unmuted so WASAPI loopback receives audio.
+          if (muted) {
+            if (FAILED(volume->SetMute(FALSE, nullptr))) {
+              BOOST_LOG(warning) << "Could not unmute virtual audio capture endpoint for privacy screen";
+            }
+          }
+          continue;
         }
         if (!muted) {
-          guard->changed.push_back(std::move(volume));
-          if (FAILED(guard->changed.back()->SetMute(TRUE, nullptr))) {
-            return nullptr;
+          if (SUCCEEDED(volume->SetMute(TRUE, nullptr))) {
+            guard->changed.push_back(std::move(volume));
           }
         }
       }
@@ -1440,6 +1445,12 @@ namespace platf::audio {
   private:
     int
     set_sink_locked(const std::string &sink) {
+      if (!assigned_sink.empty() && assigned_sink == sink && assigned_sink_device_id &&
+          all_default_roles_match(*assigned_sink_device_id)) {
+        return 0;
+      }
+
+      const auto preserved_original_roles = original_default_device_roles;
       assigned_sink.clear();
       assigned_sink_device_id.reset();
       original_default_device_roles.clear();
@@ -1460,7 +1471,7 @@ namespace platf::audio {
 
       assigned_sink = sink;
       assigned_sink_device_id = *device_id;
-      original_default_device_roles = std::move(*original_device_roles);
+      original_default_device_roles = preserved_original_roles.empty() ? std::move(*original_device_roles) : preserved_original_roles;
       return 0;
     }
 

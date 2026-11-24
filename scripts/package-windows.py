@@ -43,11 +43,27 @@ def add_portable(output, written, archive_path, target, executable, marker):
                 shutil.copyfileobj(reader, writer)
 
 
+def add_directory(output, written, source_dir: Path, target: PurePosixPath):
+    if not source_dir.is_dir():
+        raise ValueError(f"Directory not found: {source_dir}")
+    for file_path in sorted(source_dir.rglob("*")):
+        if not file_path.is_file():
+            continue
+        rel = PurePosixPath(*file_path.relative_to(source_dir).parts)
+        path = (target / rel).as_posix()
+        if path.casefold() in written:
+            raise ValueError(f"Duplicate ZIP path: {path}")
+        written.add(path.casefold())
+        with file_path.open("rb") as reader, output.open(path, "w", force_zip64=True) as writer:
+            shutil.copyfileobj(reader, writer)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("controller", type=Path, help="modified Moonlight Qt x64 portable ZIP")
     parser.add_argument("host", type=Path, help="modified Foundation Sunshine x64 portable ZIP")
     parser.add_argument("output", type=Path, help="output ZIP path")
+    parser.add_argument("--tunnel-dir", type=Path, default=None, help="optional directory bundled into SunAndMon/tunnel/")
     args = parser.parse_args()
 
     root = PurePosixPath("SunAndMon")
@@ -58,6 +74,11 @@ def main():
                     written = set()
                     add_portable(output, written, args.controller, root, "SunAndMon.exe", b"sunandmon-pair")
                     add_portable(output, written, args.host, root / "host", "sunshine.exe", b"sunandmon-status")
+                    if args.tunnel_dir is not None:
+                        add_directory(output, written, args.tunnel_dir, root / "tunnel")
+                        for req in ("sunandmon/tunnel/sunandmon-tunnel.exe", "sunandmon/tunnel/easytier-core.exe"):
+                            if req not in written:
+                                raise ValueError(f"Missing required tunnel binary in --tunnel-dir: {req}")
             except (OSError, ValueError, zipfile.BadZipFile):
                 destination.close()
                 args.output.unlink()

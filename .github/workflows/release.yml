@@ -17,7 +17,7 @@ on:
         default: false
         type: boolean
       build_windows:
-        description: "Build Windows x64 portable bundle"
+        description: "Build Windows x64 installer (.exe) and portable ZIP"
         type: boolean
         default: true
       build_linux:
@@ -318,7 +318,7 @@ jobs:
           if-no-files-found: error
 
   build-windows:
-    name: Windows x64 (Portable ZIP)
+    name: Windows x64 (Installer EXE & Portable ZIP)
     needs: [prepare, build-web-ui]
     if: needs.prepare.outputs.run_windows == 'true'
     runs-on: windows-latest
@@ -458,21 +458,94 @@ jobs:
           cpack -G ZIP --config build/CPackConfig.cmake -D CPACK_STRIP_FILES=ON --verbose
           cp build/cpack_artifacts/Sunshine.zip "$(cygpath -u "$GITHUB_WORKSPACE")/Sunshine-Portable-x64.zip"
 
+      - name: Set up Go for Windows tunnel binary
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: tunnel/go.mod
+          cache-dependency-path: tunnel/go.sum
+
+      - name: Build Windows tunnel bundle (sunandmon-tunnel + EasyTier)
+        shell: pwsh
+        env:
+          EASYTIER_VERSION: v2.6.4
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bundleDir = Join-Path $env:GITHUB_WORKSPACE 'tunnel-bundle'
+          New-Item -ItemType Directory -Force -Path $bundleDir | Out-Null
+
+          Push-Location (Join-Path $env:GITHUB_WORKSPACE 'tunnel')
+          try {
+            $env:CGO_ENABLED = '0'
+            $env:GOOS = 'windows'
+            $env:GOARCH = 'amd64'
+            go build -trimpath -ldflags="-s -w" -o (Join-Path $bundleDir 'sunandmon-tunnel.exe') .
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } finally {
+            Pop-Location
+          }
+
+          $etZip = Join-Path $env:RUNNER_TEMP "easytier-windows-x86_64-$($env:EASYTIER_VERSION).zip"
+          $etExtract = Join-Path $env:RUNNER_TEMP 'easytier-extract'
+          $etUrl = "https://github.com/EasyTier/EasyTier/releases/download/$($env:EASYTIER_VERSION)/easytier-windows-x86_64-$($env:EASYTIER_VERSION).zip"
+          Invoke-WebRequest -Uri $etUrl -OutFile $etZip -UseBasicParsing
+          Expand-Archive -Path $etZip -DestinationPath $etExtract -Force
+
+          foreach ($name in @('easytier-core.exe', 'easytier-cli.exe', 'wintun.dll', 'Packet.dll')) {
+            $found = Get-ChildItem -Path $etExtract -Recurse -File -Filter $name | Select-Object -First 1
+            if (-not $found) {
+              throw "Missing $name in $etUrl"
+            }
+            Copy-Item -Force $found.FullName (Join-Path $bundleDir $name)
+          }
+          Get-ChildItem $bundleDir
+
       - name: Package unified SunAndMon Windows x64 ZIP
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           New-Item -ItemType Directory -Force -Path dist-release | Out-Null
           python scripts/package-windows.py `
             Moonlight-SunAndMon-Portable-x64.zip `
             Sunshine-Portable-x64.zip `
-            dist-release/SunAndMon-Windows-x64.zip
+            dist-release/SunAndMon-Windows-x64.zip `
+            --tunnel-dir tunnel-bundle
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Get-Item dist-release/SunAndMon-Windows-x64.zip
 
-      - name: Upload Windows ZIP artifact
+      - name: Build Windows x64 Installer (.exe)
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $isccCandidates = @(
+            'C:\Program Files (x86)\Inno Setup 6\ISCC.exe',
+            'C:\Program Files\Inno Setup 6\ISCC.exe'
+          )
+          $iscc = $isccCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $iscc) {
+            choco install innosetup -y --no-progress
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $iscc = $isccCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          }
+          if (-not $iscc) {
+            throw 'ISCC.exe not found after installing Inno Setup'
+          }
+          python scripts/build-windows-installer.py `
+            --zip dist-release/SunAndMon-Windows-x64.zip `
+            --version $env:RELEASE_VERSION `
+            --output-dir dist-release `
+            --iscc $iscc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Get-Item "dist-release/SunAndMon-Setup-$($env:RELEASE_VERSION)-x64.exe"
+
+      - name: Upload Windows installer and ZIP artifacts
         uses: actions/upload-artifact@v4
         with:
           name: release-windows
-          path: dist-release/SunAndMon-Windows-x64.zip
+          path: |
+            dist-release/SunAndMon-Windows-x64.zip
+            dist-release/SunAndMon-Setup-*-x64.exe
           if-no-files-found: error
 
   publish-release:
@@ -502,10 +575,12 @@ jobs:
           cat SHA256SUMS.txt
           APK_NAME=$(ls -1 SunAndMon-Android-*.apk 2>/dev/null | head -n 1 || true)
           DEB_NAME=$(ls -1 sunandmon_*_amd64.deb 2>/dev/null | head -n 1 || true)
+          EXE_NAME=$(ls -1 SunAndMon-Setup-*-x64.exe 2>/dev/null | head -n 1 || true)
           cat > ../release-notes.md <<EOF
           ## 下载（SunAndMon 日月同辉 ${TAG}）
 
-          - **Windows x64** · 下载 \`SunAndMon-Windows-x64.zip\`，解压后运行 \`SunAndMon.exe\`（含控制端与 Sunshine 被控端）。
+          - **Windows x64 安装包（推荐）** · 下载 \`${EXE_NAME:-SunAndMon-Setup-${VERSION}-x64.exe}\`，自动停旧服务、配置防火墙并可选安装系统服务与 ZakoVDD 虚拟屏（含控制端、Sunshine 被控端与内置双隧道）。
+          - **Windows x64 便携包** · 下载 \`SunAndMon-Windows-x64.zip\`，解压后运行 \`SunAndMon.exe\`（含控制端、Sunshine 被控端与内置双隧道）。
           - **Linux amd64** · 下载 \`${DEB_NAME:-sunandmon_${VERSION}_amd64.deb}\`（含控制端与 Sunshine 被控端）。
           - **Android** · 下载 \`${APK_NAME:-SunAndMon-Android-${VERSION}.apk}\`（支持 \`arm64-v8a\` / \`armeabi-v7a\`，含中心设备页与直连 IP）。
           - **中心服务** · 下载对应平台的 \`sunandmon-center-windows-amd64.exe\` 或 \`sunandmon-center-linux-amd64\`。

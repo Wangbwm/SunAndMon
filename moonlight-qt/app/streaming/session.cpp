@@ -262,6 +262,18 @@ static LRESULT CALLBACK embedChildSubclassProc(HWND hwnd, UINT message,
         }
         break;
     }
+    case WM_GETMINMAXINFO:
+    {
+        auto* mmi = reinterpret_cast<MINMAXINFO*>(lParam);
+        if (mmi != nullptr) {
+            mmi->ptMinTrackSize.x = 160;
+            mmi->ptMinTrackSize.y = 120;
+            mmi->ptMaxTrackSize.x = 16384;
+            mmi->ptMaxTrackSize.y = 16384;
+            return 0;
+        }
+        break;
+    }
     case WM_SYSCOMMAND:
     {
         const WPARAM cmd = wParam & 0xFFF0;
@@ -3260,11 +3272,17 @@ bool Session::isStreamingWindowFocused() const
         }
 #ifdef Q_OS_WIN32
         HWND parentHwnd = reinterpret_cast<HWND>(s_EmbedParentWinId);
-        HWND fgHwnd = GetForegroundWindow();
-        if (fgHwnd == parentHwnd) {
-            return true;
+        HWND parentRoot = GetAncestor(parentHwnd, GA_ROOT);
+        if (parentRoot == nullptr) {
+            parentRoot = parentHwnd;
         }
+        HWND fgHwnd = GetForegroundWindow();
         if (fgHwnd != nullptr) {
+            HWND fgRoot = GetAncestor(fgHwnd, GA_ROOT);
+            if (fgHwnd == parentHwnd || fgHwnd == parentRoot ||
+                (fgRoot != nullptr && fgRoot == parentRoot)) {
+                return true;
+            }
             DWORD fgPid = 0;
             GetWindowThreadProcessId(fgHwnd, &fgPid);
             if (fgPid == GetCurrentProcessId()) {
@@ -3373,13 +3391,28 @@ void Session::applyEmbeddedWindowRect(const QRect& rect, bool forceNotify)
     const int h = qMax(120, rect.height());
     m_EmbedCurrentRect = QRect(x, y, w, h);
 
+    int actualW = w;
+    int actualH = h;
 #ifdef Q_OS_WIN32
     SDL_SysWMinfo wmInfo;
     SDL_VERSION(&wmInfo.version);
     if (SDL_GetWindowWMInfo(m_Window, &wmInfo) && wmInfo.subsystem == SDL_SYSWM_WINDOWS) {
         HWND hwnd = wmInfo.info.win.window;
-        SetWindowPos(hwnd, HWND_TOP, x, y, w, h, SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        // Update SDL's cached logical size first (permitted because embedMode sets
+        // SDL_WINDOW_RESIZABLE), then authoritatively position & size the WS_CHILD
+        // HWND in parent client pixels so SDL's top-level framing/DPI logic cannot
+        // clamp or shift the embedded viewport on maximize/fullscreen.
         SDL_SetWindowSize(m_Window, w, h);
+        SetWindowPos(hwnd, HWND_TOP, x, y, w, h, SWP_NOACTIVATE | SWP_NOZORDER | SWP_FRAMECHANGED);
+        RECT clientRc {};
+        if (GetClientRect(hwnd, &clientRc)) {
+            const int cw = static_cast<int>(clientRc.right - clientRc.left);
+            const int ch = static_cast<int>(clientRc.bottom - clientRc.top);
+            if (cw > 0 && ch > 0) {
+                actualW = cw;
+                actualH = ch;
+            }
+        }
     }
 #elif defined(Q_OS_LINUX)
     SDL_SysWMinfo wmInfo;
@@ -3393,15 +3426,29 @@ void Session::applyEmbeddedWindowRect(const QRect& rect, bool forceNotify)
     }
 #endif
 
-    const QSize targetSize(w, h);
+    const QSize targetSize(actualW, actualH);
     if (m_EmbedVisible && (forceNotify || m_LastNotifiedEmbedSize != targetSize)) {
         m_LastNotifiedEmbedSize = targetSize;
+        // Deduplicate any SIZE_CHANGED / RESIZED events already queued by SetWindowPos
+        // or SDL_SetWindowSize so the renderer only calls ResizeBuffers() once for the
+        // final settled dimensions.
+        const Uint32 myWinId = SDL_GetWindowID(m_Window);
+        SDL_Event pendingEvents[32];
+        const int drained = SDL_PeepEvents(pendingEvents, 32, SDL_GETEVENT, SDL_WINDOWEVENT, SDL_WINDOWEVENT);
+        for (int i = 0; i < drained; ++i) {
+            if (pendingEvents[i].window.windowID == myWinId &&
+                (pendingEvents[i].window.event == SDL_WINDOWEVENT_SIZE_CHANGED ||
+                 pendingEvents[i].window.event == SDL_WINDOWEVENT_RESIZED)) {
+                continue;
+            }
+            SDL_PushEvent(&pendingEvents[i]);
+        }
         SDL_Event sizeEv = {};
         sizeEv.type = SDL_WINDOWEVENT;
-        sizeEv.window.windowID = SDL_GetWindowID(m_Window);
+        sizeEv.window.windowID = myWinId;
         sizeEv.window.event = SDL_WINDOWEVENT_SIZE_CHANGED;
-        sizeEv.window.data1 = w;
-        sizeEv.window.data2 = h;
+        sizeEv.window.data1 = actualW;
+        sizeEv.window.data2 = actualH;
         SDL_PushEvent(&sizeEv);
     }
     if (m_InputHandler != nullptr) {
@@ -3527,7 +3574,13 @@ void Session::syncQtOverlayWindowsWithSdlWindowState()
         return;
     }
 
-    if (m_Preferences->overlayMenuPosition != StreamingPreferences::OMP_BUTTON ||
+    // In embedded tab mode when the main window's top tab bar is visible
+    // (windowed or maximized), the top bar already provides the integrated
+    // Control Center & Fullscreen buttons; hide the floating notch so it only
+    // appears when the top bar is hidden (fullscreen) or in standalone streams.
+    const bool embeddedHasTopBar = (s_EmbedParentWinId != 0 && m_EmbedCurrentRect.y() > 0);
+    if (embeddedHasTopBar ||
+        m_Preferences->overlayMenuPosition != StreamingPreferences::OMP_BUTTON ||
         (m_MenuPanel && (m_MenuPanel->isMenuVisible() || m_MenuPanel->isClosing()))) {
         m_MenuButton->hideButton();
         return;
@@ -4509,7 +4562,25 @@ void Session::handleSdlUserEvent(const SDL_UserEvent& event)
             break;
         }
         if (cmd->type == EmbedCommand::Resize) {
-            applyEmbeddedWindowRect(QRect(cmd->x, cmd->y, cmd->w, cmd->h), false);
+            // Coalesce any consecutive queued Resize commands so rapid window dragging
+            // only resizes the HWND and DXGI swapchain once for the latest geometry.
+            QRect latestRect(cmd->x, cmd->y, cmd->w, cmd->h);
+            SDL_Event pendingUser[32];
+            const int drained = SDL_PeepEvents(pendingUser, 32, SDL_GETEVENT, SDL_USEREVENT, SDL_USEREVENT);
+            bool stoppedCoalescing = false;
+            for (int i = 0; i < drained; ++i) {
+                if (!stoppedCoalescing && pendingUser[i].user.code == SDL_CODE_EMBED_COMMAND) {
+                    auto* nextCmd = static_cast<EmbedCommand*>(pendingUser[i].user.data1);
+                    if (nextCmd && nextCmd->type == EmbedCommand::Resize) {
+                        latestRect = QRect(nextCmd->x, nextCmd->y, nextCmd->w, nextCmd->h);
+                        delete nextCmd;
+                        continue;
+                    }
+                    stoppedCoalescing = true;
+                }
+                SDL_PushEvent(&pendingUser[i]);
+            }
+            applyEmbeddedWindowRect(latestRect, false);
             break;
         }
         if (cmd->type == EmbedCommand::Show) {
@@ -5178,7 +5249,8 @@ bool Session::startConnectionAsync()
                       m_LaunchDisplayName,
                       remoteStreamConfig,
                       m_ReconfigureHostDisplay,
-                      m_PrivacyScreen);
+                      m_PrivacyScreen,
+                      m_Preferences->hidHideAutoCloak);
 
         if (!m_Computer->isNvidiaServerSoftware) {
             m_StreamDisplays = http.getDisplays(1200);
@@ -5688,7 +5760,7 @@ void Session::exec()
 
     // We always want a resizable window with High DPI enabled
     Uint32 defaultWindowFlags = embedMode
-        ? (SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_BORDERLESS | SDL_WINDOW_HIDDEN)
+        ? (SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_BORDERLESS | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIDDEN)
         : (SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_RESIZABLE);
 
     // If we're starting in windowed mode and the Moonlight GUI is maximized or
@@ -5990,7 +6062,7 @@ void Session::exec()
     });
 
     if (m_Preferences->overlayMenuPosition == StreamingPreferences::OMP_BUTTON &&
-        (!embedMode || m_EmbedVisible)) {
+        (!embedMode || (m_EmbedVisible && m_EmbedCurrentRect.y() == 0))) {
         // Show button at initial position
         const QRect parentRect = qtOverlayParentGeometry();
         if (parentRect.isValid()) {
@@ -6708,6 +6780,9 @@ void Session::exec()
             m_InputHandler->handleMouseWheelEvent(&event.wheel);
             break;
         case SDL_CONTROLLERAXISMOTION:
+            if (embedMode && !m_Preferences->backgroundGamepad && !isStreamingWindowFocused()) {
+                break;
+            }
             // When menu is visible, consume axis events to prevent game input
             if (m_MenuPanel && m_MenuPanel->isMenuVisible()) {
                 break;
@@ -6716,6 +6791,10 @@ void Session::exec()
             break;
         case SDL_CONTROLLERBUTTONDOWN:
         case SDL_CONTROLLERBUTTONUP:
+            if (event.type == SDL_CONTROLLERBUTTONDOWN &&
+                embedMode && !m_Preferences->backgroundGamepad && !isStreamingWindowFocused()) {
+                break;
+            }
             presence.runCallbacks();
             // When Qt overlay menu is visible, handle gamepad navigation
             if (m_MenuPanel && m_MenuPanel->isMenuVisible()) {
@@ -6750,11 +6829,18 @@ void Session::exec()
             break;
 #if SDL_VERSION_ATLEAST(2, 0, 14)
         case SDL_CONTROLLERSENSORUPDATE:
+            if (embedMode && !m_Preferences->backgroundGamepad && !isStreamingWindowFocused()) {
+                break;
+            }
             m_InputHandler->handleControllerSensorEvent(&event.csensor);
             break;
         case SDL_CONTROLLERTOUCHPADDOWN:
         case SDL_CONTROLLERTOUCHPADUP:
         case SDL_CONTROLLERTOUCHPADMOTION:
+            if (event.type != SDL_CONTROLLERTOUCHPADUP &&
+                embedMode && !m_Preferences->backgroundGamepad && !isStreamingWindowFocused()) {
+                break;
+            }
             m_InputHandler->handleControllerTouchpadEvent(&event.ctouchpad);
             break;
 #endif

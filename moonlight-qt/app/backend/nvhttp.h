@@ -208,7 +208,7 @@ public:
              int screenCombinationMode,
              const std::optional<bool>& useVdd,
              const QString& displayName,
-             RemoteStreamConfig &remoteStreamConfig, bool reconfigure = false, bool privacyScreen = false);
+             RemoteStreamConfig &remoteStreamConfig, bool reconfigure = false, bool privacyScreen = false, bool hidHideAutoCloak = false);
 
     QVector<NvApp>
     getAppList();

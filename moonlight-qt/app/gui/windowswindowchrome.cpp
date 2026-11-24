@@ -10,6 +10,7 @@
 #include <QtMath>
 
 #include <limits>
+#include <string>
 
 #ifdef Q_OS_WIN32
 #include <windows.h>
@@ -221,21 +222,28 @@ bool WindowsWindowChrome::hideToTray()
         return m_TrayIcon && m_TrayIcon->isVisible();
     }
     if (!m_TrayIcon) {
+        m_TrayIcon = std::make_unique<QSystemTrayIcon>(QGuiApplication::windowIcon());
+        m_TrayIcon->setToolTip(QGuiApplication::applicationDisplayName());
+#ifndef Q_OS_WIN32
         m_TrayMenu = std::make_unique<QMenu>();
         connect(m_TrayMenu->addAction(tr("Open SunAndMon")), &QAction::triggered,
                 this, &WindowsWindowChrome::restoreFromTray);
         connect(m_TrayMenu->addAction(tr("Exit SunAndMon")), &QAction::triggered, this, [this] {
-            restoreFromTray();
-            emit exitRequested();
+            bringToFront();
+            QTimer::singleShot(30, this, &WindowsWindowChrome::exitRequested);
         });
-        m_TrayIcon = std::make_unique<QSystemTrayIcon>(QGuiApplication::windowIcon());
-        m_TrayIcon->setToolTip(QGuiApplication::applicationDisplayName());
         m_TrayIcon->setContextMenu(m_TrayMenu.get());
+#endif
         connect(m_TrayIcon.get(), &QSystemTrayIcon::activated, this,
                 [this](QSystemTrayIcon::ActivationReason reason) {
             if (reason == QSystemTrayIcon::Trigger || reason == QSystemTrayIcon::DoubleClick) {
-                restoreFromTray();
+                bringToFront();
             }
+#ifdef Q_OS_WIN32
+            else if (reason == QSystemTrayIcon::Context) {
+                showNativeTrayMenu();
+            }
+#endif
         });
     }
 
@@ -248,6 +256,61 @@ bool WindowsWindowChrome::hideToTray()
     return true;
 }
 
+void WindowsWindowChrome::showNativeTrayMenu()
+{
+#ifdef Q_OS_WIN32
+    if (m_TrayMenuOpen || !m_Window) {
+        return;
+    }
+    m_TrayMenuOpen = true;
+
+    HWND ownerHwnd = m_WindowId ? reinterpret_cast<HWND>(m_WindowId)
+                                : reinterpret_cast<HWND>(m_Window->winId());
+    HMENU menu = CreatePopupMenu();
+    if (!menu || !ownerHwnd) {
+        if (menu) {
+            DestroyMenu(menu);
+        }
+        m_TrayMenuOpen = false;
+        return;
+    }
+
+    constexpr UINT kCmdOpen = 1001;
+    constexpr UINT kCmdExit = 1002;
+    const std::wstring openText = tr("Open SunAndMon").toStdWString();
+    const std::wstring exitText = tr("Exit SunAndMon").toStdWString();
+    AppendMenuW(menu, MF_STRING, kCmdOpen, openText.c_str());
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, kCmdExit, exitText.c_str());
+    SetMenuDefaultItem(menu, kCmdOpen, FALSE);
+
+    // Per Microsoft KB135788, the owner window must be foreground before
+    // TrackPopupMenuEx and receive a dummy WM_NULL afterwards so the tray
+    // context menu reliably opens and dismisses on every right-click.
+    SetForegroundWindow(ownerHwnd);
+    POINT pt {};
+    GetCursorPos(&pt);
+    const UINT selected = TrackPopupMenuEx(
+            menu,
+            TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY | TPM_LEFTALIGN | TPM_BOTTOMALIGN,
+            pt.x,
+            pt.y,
+            ownerHwnd,
+            nullptr);
+    PostMessageW(ownerHwnd, WM_NULL, 0, 0);
+    DestroyMenu(menu);
+    m_TrayMenuOpen = false;
+
+    if (selected == kCmdOpen) {
+        bringToFront();
+    }
+    else if (selected == kCmdExit) {
+        bringToFront();
+        QTimer::singleShot(30, this, &WindowsWindowChrome::exitRequested);
+    }
+#endif
+}
+
 void WindowsWindowChrome::restoreFromTray()
 {
     if (!m_Window || !m_TrayIcon || !m_TrayIcon->isVisible()) {
@@ -257,6 +320,42 @@ void WindowsWindowChrome::restoreFromTray()
     m_Window->raise();
     m_Window->requestActivate();
     m_TrayIcon->hide();
+#ifdef Q_OS_WIN32
+    const HWND nativeWindow = reinterpret_cast<HWND>(m_Window->winId());
+    if (nativeWindow) {
+        SetForegroundWindow(nativeWindow);
+    }
+#endif
+}
+
+void WindowsWindowChrome::bringToFront()
+{
+    if (!m_Window) {
+        return;
+    }
+    if (m_TrayIcon && m_TrayIcon->isVisible()) {
+        restoreFromTray();
+    }
+    else if (m_Window->visibility() == QWindow::Minimized) {
+        m_Window->setVisibility(m_Maximized ? QWindow::Maximized : QWindow::Windowed);
+    }
+    else if (!m_Window->isVisible()) {
+        m_Window->show();
+    }
+    m_Window->raise();
+    m_Window->requestActivate();
+#ifdef Q_OS_WIN32
+    const HWND nativeWindow = reinterpret_cast<HWND>(m_Window->winId());
+    if (nativeWindow) {
+        if (IsIconic(nativeWindow)) {
+            ShowWindow(nativeWindow, SW_RESTORE);
+        }
+        else {
+            ShowWindow(nativeWindow, SW_SHOW);
+        }
+        SetForegroundWindow(nativeWindow);
+    }
+#endif
 }
 
 void WindowsWindowChrome::minimize()
@@ -420,6 +519,22 @@ bool WindowsWindowChrome::nativeEventFilter(const QByteArray& eventType,
 
     auto* nativeMessage = static_cast<MSG*>(message);
     if (nativeMessage->hwnd != reinterpret_cast<HWND>(m_WindowId)) {
+        return false;
+    }
+
+    if (nativeMessage->message == WM_ENTERSIZEMOVE) {
+        if (!m_InSizeMove) {
+            m_InSizeMove = true;
+            emit inSizeMoveChanged();
+        }
+        return false;
+    }
+
+    if (nativeMessage->message == WM_EXITSIZEMOVE) {
+        if (m_InSizeMove) {
+            m_InSizeMove = false;
+            emit inSizeMoveChanged();
+        }
         return false;
     }
 

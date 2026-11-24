@@ -741,6 +741,7 @@ namespace stream {
     std::uint32_t launch_session_id;
     std::shared_ptr<void> nvidia_vsync_lease;
     std::shared_ptr<void> touch_keyboard_lease;
+    std::shared_ptr<void> hidhide_lease;
 
     // 保存 launch_session 的关键字段，用于动态参数更新
     bool enable_sops { false };
@@ -4888,6 +4889,7 @@ namespace stream {
 
       session.nvidia_vsync_lease.reset();
       session.touch_keyboard_lease.reset();
+      session.hidhide_lease.reset();
       perf::end_session(session.launch_session_id);
       {
         // what the clipboard did in this session, as fixed words (counts and the offer decision only; never content)
@@ -5163,6 +5165,7 @@ namespace stream {
       session->launch_session_id = launch_session.id;
       session->nvidia_vsync_lease = launch_session.nvidia_vsync_lease;
       session->touch_keyboard_lease = launch_session.touch_keyboard_lease;
+      session->hidhide_lease = launch_session.hidhide_lease;
       session->created_at_ms = steady_now_ms();
 
       // 设置客户端名称

@@ -54,6 +54,8 @@ namespace config {
     bool vdd_reuse;
     /** Automatically validate and expose Vulkan HDR colorspaces for HDR VDD sessions. */
     bool vdd_vulkan_hdr_bridge;
+    /** Unified host virtual display option: keeps headless/blanked sessions streamable (Windows VDD / Linux virtual display DPMS wake). Default false. */
+    bool virtual_display;
 
     struct {
       int preset;
@@ -245,6 +247,7 @@ namespace config {
     bool amf_draw_mouse_cursor;
     bool clipboard_sync;  ///< Bidirectional clipboard sync (text + single image). On by default; effective only when the user-session GUI agent is alive. Set to false to force-disable.
     bool client_gamepad_override;  ///< Honor the client-declared controller type carried on the /launch query (Sunshine extension). On by default; set false to keep host-side selection authoritative.
+    bool hidhide_auto_cloak;  ///< Automatically hide competing local gamepads via HidHide while streaming on Windows. Off by default unless requested by client or enabled in host config.
   };
 
   namespace flag {

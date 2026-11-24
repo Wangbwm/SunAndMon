@@ -1,49 +1,86 @@
 #include "autoupdatechecker.h"
 #include "portableupdateinstaller.h"
 #include "path.h"
+#include "settings/streamingpreferences.h"
 #include "versionutils.h"
 
+#include <QDesktopServices>
 #include <QDir>
 #include <QFile>
-#include <QJsonDocument>
+#include <QFileInfo>
 #include <QJsonArray>
+#include <QJsonDocument>
 #include <QJsonObject>
-#include <QNetworkRequest>
+#include <QNetworkProxy>
+#include <QNetworkProxyFactory>
 #include <QNetworkReply>
+#include <QNetworkRequest>
+#include <QRegularExpression>
 #include <QSysInfo>
 #include <QTextStream>
 #include <QTimer>
+#include <QUrl>
 
-// GitHub repository for update checks
+#ifdef SUNANDMON_APP
+#define GITHUB_OWNER "Wangbwm"
+#define GITHUB_REPO  "SunAndMon"
+#define APP_UA_PREFIX "SunAndMon"
+#else
 #define GITHUB_OWNER "qiin2333"
 #define GITHUB_REPO  "moonlight-qt"
+#define APP_UA_PREFIX "Moonlight"
+#endif
+
+namespace {
+
+// main.cpp globally disables system proxies so streaming/LAN never hit a proxy.
+// Use a per-NAM proxy factory here so GitHub update checks honor system/Clash proxy.
+class SystemUpdateProxyFactory : public QNetworkProxyFactory
+{
+public:
+    QList<QNetworkProxy> queryProxy(const QNetworkProxyQuery& query = QNetworkProxyQuery()) override
+    {
+        const QList<QNetworkProxy> proxies = QNetworkProxyFactory::systemProxyForQuery(query);
+        if (!proxies.isEmpty()) {
+            return proxies;
+        }
+        return {QNetworkProxy(QNetworkProxy::NoProxy)};
+    }
+};
+
+} // namespace
 
 AutoUpdateChecker::AutoUpdateChecker(QObject *parent) :
     QObject(parent)
 {
     m_Nam = new QNetworkAccessManager(this);
+    m_Nam->setProxyFactory(new SystemUpdateProxyFactory());
     m_PortableUpdateInstaller = new PortableUpdateInstaller(this);
 
-    // Never communicate over HTTP
     m_Nam->setStrictTransportSecurityEnabled(true);
-
-    // Allow HTTP redirects
     m_Nam->setRedirectPolicy(QNetworkRequest::NoLessSafeRedirectPolicy);
 
-    connect(m_Nam, &QNetworkAccessManager::finished,
-            this, &AutoUpdateChecker::handleUpdateCheckRequestFinished);
-
     QString currentVersion(VERSION_STR);
-    qDebug() << "Current Moonlight version:" << currentVersion;
+    qDebug() << "Current" << APP_UA_PREFIX << "version:" << currentVersion;
     m_CurrentVersion = VersionUtils::parseRelease(currentVersion);
-
-    // Should at least have a 1.0-style version number
     Q_ASSERT(m_CurrentVersion.segmentCount() > 1);
 
     connect(m_PortableUpdateInstaller, &PortableUpdateInstaller::onPortableUpdateStatusChanged,
-            this, &AutoUpdateChecker::onPortableUpdateStatusChanged);
+            this, [this](const QString& message) {
+                m_UpdateInProgress = true;
+                m_UpdateStatusMessage = message;
+                emit updateStateChanged();
+                emit onPortableUpdateStatusChanged(message);
+            });
     connect(m_PortableUpdateInstaller, &PortableUpdateInstaller::onPortableUpdateFailed,
-            this, &AutoUpdateChecker::onPortableUpdateFailed);
+            this, [this](const QString& message) {
+                m_UpdateInProgress = false;
+                m_UpdateStatusMessage = message;
+                emit updateStateChanged();
+                emit onPortableUpdateFailed(message);
+            });
+    connect(m_PortableUpdateInstaller, &PortableUpdateInstaller::prepareForRestart,
+            this, &AutoUpdateChecker::prepareForRestart);
 }
 
 bool AutoUpdateChecker::supportsInAppUpdate() const
@@ -53,7 +90,9 @@ bool AutoUpdateChecker::supportsInAppUpdate() const
 
 bool AutoUpdateChecker::supportsUpdateCheck() const
 {
-#if defined(Q_OS_WIN32) || defined(Q_OS_DARWIN) || defined(STEAM_LINK) || defined(APP_IMAGE)
+#if defined(SUNANDMON_APP) && (defined(Q_OS_WIN32) || defined(Q_OS_LINUX) || defined(Q_OS_DARWIN))
+    return true;
+#elif defined(Q_OS_WIN32) || defined(Q_OS_DARWIN) || defined(STEAM_LINK) || defined(APP_IMAGE)
     return true;
 #else
     return false;
@@ -66,9 +105,71 @@ void AutoUpdateChecker::installUpdate(QString url)
     m_PortableUpdateInstaller->installUpdate(url, expectedDigest);
 }
 
+void AutoUpdateChecker::installAvailableUpdate()
+{
+    if (m_UpdateDownloadUrl.isEmpty()) {
+        return;
+    }
+
+    if (supportsInAppUpdate() &&
+            m_UpdateDownloadUrl.endsWith(QStringLiteral(".zip"), Qt::CaseInsensitive)) {
+        installUpdate(m_UpdateDownloadUrl);
+    }
+    else {
+        QDesktopServices::openUrl(QUrl(m_UpdateDownloadUrl));
+    }
+}
+
+void AutoUpdateChecker::installLocalUpdate(QString zipFilePath)
+{
+    QString localPath = zipFilePath.trimmed();
+    QUrl asUrl(localPath);
+    if (asUrl.isValid() && asUrl.isLocalFile()) {
+        localPath = asUrl.toLocalFile();
+    }
+
+    if (localPath.isEmpty() || !QFileInfo::exists(localPath)) {
+        const QString errMsg = tr("The selected update archive does not exist.");
+        m_UpdateInProgress = false;
+        m_UpdateStatusMessage = errMsg;
+        emit updateStateChanged();
+        emit onPortableUpdateFailed(errMsg);
+        return;
+    }
+
+    m_PortableUpdateInstaller->installLocalArchive(localPath);
+}
+
 void AutoUpdateChecker::start()
 {
     checkForUpdates();
+}
+
+QString AutoUpdateChecker::applyCustomDownloadProxy(const QString& url) const
+{
+#ifdef SUNANDMON_APP
+    StreamingPreferences* prefs = StreamingPreferences::get();
+    if (prefs == nullptr) {
+        return url;
+    }
+
+    const QString proxy = prefs->customUpdateUrl.trimmed();
+    if (proxy.isEmpty()) {
+        return url;
+    }
+
+    if (proxy.contains(QStringLiteral("{url}"))) {
+        QString replaced = proxy;
+        return replaced.replace(QStringLiteral("{url}"), url);
+    }
+
+    if (proxy.endsWith(QLatin1Char('/'))) {
+        return proxy + url;
+    }
+    return proxy + QLatin1Char('/') + url;
+#else
+    return url;
+#endif
 }
 
 bool AutoUpdateChecker::checkForUpdates()
@@ -78,50 +179,52 @@ bool AutoUpdateChecker::checkForUpdates()
     }
 
     if (m_UpdateCheckInProgress) {
-        // The automatic startup check may still be running. Do not let a
-        // newly opened settings page wait for a signal it cannot observe.
         return false;
     }
 
     m_UpdateCheckInProgress = true;
+    if (!m_UpdateInProgress && !m_UpdateStatusMessage.isEmpty()) {
+        m_UpdateStatusMessage.clear();
+        emit updateStateChanged();
+    }
     emit onUpdateCheckStarted();
 
-#if defined(Q_OS_WIN32) || defined(Q_OS_DARWIN) || defined(STEAM_LINK) || defined(APP_IMAGE)
-#if QT_VERSION >= QT_VERSION_CHECK(5, 14, 0) && QT_VERSION < QT_VERSION_CHECK(5, 15, 1) && !defined(QT_NO_BEARERMANAGEMENT)
-    // HACK: Set network accessibility to work around QTBUG-80947 (introduced in Qt 5.14.0 and fixed in Qt 5.15.1)
-    QT_WARNING_PUSH
-    QT_WARNING_DISABLE_DEPRECATED
-    m_Nam->setNetworkAccessible(QNetworkAccessManager::Accessible);
-    QT_WARNING_POP
+#if defined(SUNANDMON_APP) || defined(Q_OS_WIN32) || defined(Q_OS_DARWIN) || defined(STEAM_LINK) || defined(APP_IMAGE)
+    bool includePreReleases = false;
+#ifdef SUNANDMON_APP
+    if (StreamingPreferences* prefs = StreamingPreferences::get()) {
+        includePreReleases = prefs->includePreReleaseUpdates;
+    }
 #endif
 
-    // Query GitHub Releases API for the latest release
-    QUrl url(QString("https://api.github.com/repos/%1/%2/releases/latest")
-                 .arg(GITHUB_OWNER, GITHUB_REPO));
-    QNetworkRequest request(url);
+    const QString apiUrl = includePreReleases
+            ? QStringLiteral("https://api.github.com/repos/%1/%2/releases?per_page=10")
+                  .arg(QStringLiteral(GITHUB_OWNER), QStringLiteral(GITHUB_REPO))
+            : QStringLiteral("https://api.github.com/repos/%1/%2/releases/latest")
+                  .arg(QStringLiteral(GITHUB_OWNER), QStringLiteral(GITHUB_REPO));
 
+    QNetworkRequest request{QUrl(apiUrl)};
 #if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
-    // Keep a manual check from leaving its button busy forever when the
-    // network is unavailable but the connection never closes.
     request.setTransferTimeout(15000);
 #endif
-
-    // GitHub API requires a User-Agent header
     request.setHeader(QNetworkRequest::UserAgentHeader,
-                      QString("Moonlight/%1").arg(VERSION_STR));
-    // Request JSON response
+                      QStringLiteral("%1/%2").arg(QStringLiteral(APP_UA_PREFIX), QStringLiteral(VERSION_STR)));
     request.setRawHeader("Accept", "application/vnd.github+json");
-
 #if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
     request.setAttribute(QNetworkRequest::Http2AllowedAttribute, true);
 #else
     request.setAttribute(QNetworkRequest::HTTP2AllowedAttribute, true);
 #endif
+
     QNetworkReply* reply = m_Nam->get(request);
-    // Some macOS network paths can remain in DNS/connect state without
-    // honoring QNetworkRequest::setTransferTimeout(). Abort explicitly so
-    // the UI always receives a terminal result. Parent the timer to the
-    // reply so it cannot outlive the request or touch a deleted reply.
+    m_ReleaseReply = reply;
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        if (m_ReleaseReply == reply) {
+            m_ReleaseReply = nullptr;
+        }
+        handleUpdateCheckRequestFinished(reply);
+    });
+
     QTimer* timeout = new QTimer(reply);
     timeout->setSingleShot(true);
     connect(reply, &QNetworkReply::finished, timeout, &QTimer::stop);
@@ -145,14 +248,15 @@ bool AutoUpdateChecker::checkForUpdates()
 
 QString AutoUpdateChecker::getPreferredAssetSuffix() const
 {
-#if defined(Q_OS_DARWIN)
-    // CI 出的 DMG 现在带架构后缀（Moonlight-<版本>-arm64.dmg）。
-    // QSysInfo::buildCpuArchitecture() 给的是 arm64 / x86_64，和 generate-dmg.sh
-    // 里的 MOONLIGHT_ARCH 用词一致。
-    //
-    // 只是「优先」而不是「必须」：这个后缀是从某个版本才开始有的，旧 release 里是
-    // Moonlight-<版本>.dmg。匹配不到就退回任意 .dmg，否则老版本的用户会看到
-    // 「找不到更新包」。
+#if defined(SUNANDMON_APP)
+#if defined(Q_OS_WIN32)
+    return QStringLiteral("-x64.zip");
+#elif defined(Q_OS_LINUX)
+    return QStringLiteral("_amd64.deb");
+#else
+    return QString();
+#endif
+#elif defined(Q_OS_DARWIN)
     return QStringLiteral("-") + QSysInfo::buildCpuArchitecture() + QStringLiteral(".dmg");
 #elif defined(APP_IMAGE)
     QString architecture = QSysInfo::buildCpuArchitecture().toLower();
@@ -167,7 +271,15 @@ QString AutoUpdateChecker::getPreferredAssetSuffix() const
 
 QString AutoUpdateChecker::getExpectedAssetSuffix() const
 {
+#if defined(SUNANDMON_APP)
 #if defined(Q_OS_WIN32)
+    return QStringLiteral(".zip");
+#elif defined(Q_OS_LINUX)
+    return QStringLiteral(".deb");
+#else
+    return QString();
+#endif
+#elif defined(Q_OS_WIN32)
     return isPortableInstall() ? QStringLiteral(".zip") : QStringLiteral(".exe");
 #elif defined(Q_OS_DARWIN)
     return QStringLiteral(".dmg");
@@ -189,11 +301,18 @@ bool AutoUpdateChecker::isPortableInstall() const
 
 QString AutoUpdateChecker::getExpectedAssetPrefix() const
 {
+#if defined(SUNANDMON_APP)
 #if defined(Q_OS_WIN32)
+    return QStringLiteral("SunAndMon-Windows-");
+#elif defined(Q_OS_LINUX)
+    return QStringLiteral("sunandmon_");
+#else
+    return QString();
+#endif
+#elif defined(Q_OS_WIN32)
     if (isPortableInstall()) {
         return QStringLiteral("Moonlight-VPlus-Portable-%1-").arg(getCurrentBuildArch());
     }
-
     return QStringLiteral("Moonlight-VPlus-Setup-");
 #else
     return QString();
@@ -203,15 +322,76 @@ QString AutoUpdateChecker::getExpectedAssetPrefix() const
 QString AutoUpdateChecker::getCurrentBuildArch() const
 {
     QString buildArch = QSysInfo::buildCpuArchitecture();
-
     if (buildArch == "x86_64") {
         return QStringLiteral("x64");
     }
     else if (buildArch == "i386") {
         return QStringLiteral("x86");
     }
-
     return buildArch.toLower();
+}
+
+QString AutoUpdateChecker::extractSha256FromChecksums(const QString& text, const QString& assetName)
+{
+    if (assetName.isEmpty()) {
+        return QString();
+    }
+
+    static const QRegularExpression linePattern(QStringLiteral("^([0-9a-fA-F]{64})\\s+\\*?(.+)$"));
+    const QStringList lines = text.split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+    for (const QString& rawLine : lines) {
+        const QRegularExpressionMatch match = linePattern.match(rawLine.trimmed());
+        if (!match.hasMatch()) {
+            continue;
+        }
+        const QString digest = match.captured(1).toLower();
+        const QString fileName = QFileInfo(match.captured(2).trimmed()).fileName();
+        if (fileName.compare(assetName, Qt::CaseInsensitive) == 0) {
+            return QStringLiteral("sha256:") + digest;
+        }
+    }
+    return QString();
+}
+
+void AutoUpdateChecker::emitDiscoveredUpdate(const QString& tagName,
+                                             const QString& downloadUrl,
+                                             const QString& assetDigest)
+{
+    m_UpdateAvailable = true;
+    m_LatestVersion = tagName;
+    m_UpdateDownloadUrl = downloadUrl;
+    m_UpdateAssetDigest = assetDigest;
+    m_UpdateCheckInProgress = false;
+
+    emit updateStateChanged();
+    emit onUpdateAvailable(tagName, downloadUrl);
+    emit onUpdateCheckFinished(true);
+}
+
+void AutoUpdateChecker::handleChecksumsReplyFinished()
+{
+    QNetworkReply* reply = m_ChecksumsReply;
+    m_ChecksumsReply = nullptr;
+    if (reply == nullptr) {
+        return;
+    }
+
+    QString digest;
+    if (reply->error() == QNetworkReply::NoError) {
+        digest = extractSha256FromChecksums(QString::fromUtf8(reply->readAll()), m_PendingAssetName);
+    }
+    else {
+        qWarning() << "Failed to fetch SHA256SUMS.txt:" << reply->errorString();
+    }
+    reply->deleteLater();
+
+    const QString tagName = m_PendingTagName;
+    const QString downloadUrl = m_PendingDownloadUrl;
+    m_PendingTagName.clear();
+    m_PendingDownloadUrl.clear();
+    m_PendingAssetName.clear();
+
+    emitDiscoveredUpdate(tagName, downloadUrl, digest);
 }
 
 void AutoUpdateChecker::handleUpdateCheckRequestFinished(QNetworkReply* reply)
@@ -220,6 +400,10 @@ void AutoUpdateChecker::handleUpdateCheckRequestFinished(QNetworkReply* reply)
 
     auto finish = [this](bool updateAvailable) {
         m_UpdateCheckInProgress = false;
+        if (!updateAvailable) {
+            m_UpdateAvailable = false;
+            emit updateStateChanged();
+        }
         emit onUpdateCheckFinished(updateAvailable);
     };
     auto fail = [this]() {
@@ -227,173 +411,205 @@ void AutoUpdateChecker::handleUpdateCheckRequestFinished(QNetworkReply* reply)
         emit onUpdateCheckFailed();
     };
 
-    if (reply->error() == QNetworkReply::NoError) {
-        QTextStream stream(reply);
-
-#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
-        stream.setEncoding(QStringConverter::Utf8);
-#else
-        stream.setCodec("UTF-8");
-#endif
-
-        // Read all data and queue the reply for deletion
-        QString jsonString = stream.readAll();
-        reply->deleteLater();
-
-        QJsonParseError error;
-        QJsonDocument jsonDoc = QJsonDocument::fromJson(jsonString.toUtf8(), &error);
-        if (jsonDoc.isNull()) {
-            qWarning() << "GitHub release response malformed:" << error.errorString();
-            fail();
-            return;
-        }
-
-        if (!jsonDoc.isObject()) {
-            qWarning() << "GitHub release response is not a JSON object";
-            fail();
-            return;
-        }
-
-        QJsonObject releaseObj = jsonDoc.object();
-
-        // GitHub Releases API response format:
-        // {
-        //   "tag_name": "v6.3.0",
-        //   "name": "Release 6.3.0",
-        //   "html_url": "https://github.com/owner/repo/releases/tag/v6.3.0",
-        //   "prerelease": false,
-        //   "draft": false,
-        //   "assets": [
-        //     {
-        //       "name": "MoonlightSetup-x64-6.3.0.exe",
-        //       "browser_download_url": "https://github.com/..."
-        //     }
-        //   ]
-        // }
-
-        // Skip pre-releases and drafts
-        if (releaseObj["prerelease"].toBool(false) || releaseObj["draft"].toBool(false)) {
-            qDebug() << "Latest GitHub release is a pre-release or draft, skipping";
-            finish(false);
-            return;
-        }
-
-        if (!releaseObj.contains("tag_name") || !releaseObj["tag_name"].isString()) {
-            qWarning() << "GitHub release missing tag_name";
-            fail();
-            return;
-        }
-
-        QString tagName = releaseObj["tag_name"].toString();
-        qDebug() << "Latest GitHub release tag:" << tagName;
-
-        // Parse version from tag (strip 'v' prefix if present)
-        const QVersionNumber latestVersion = VersionUtils::parseRelease(tagName);
-        if (m_CurrentVersion.segmentCount() < 2 || latestVersion.segmentCount() < 2) {
-            qWarning() << "Invalid release version:" << QStringLiteral(VERSION_STR) << tagName;
-            fail();
-            return;
-        }
-
-        int res = VersionUtils::compare(m_CurrentVersion, latestVersion);
-        if (res < 0) {
-            // Current version is older than latest release
-            qDebug() << "Update available:" << tagName;
-
-            // Try to find a platform-specific download URL from assets
-            QString downloadUrl;
-            QString assetDigest;
-            QString expectedPrefix = getExpectedAssetPrefix();
-            QString expectedSuffix = getExpectedAssetSuffix();
-
-            QString preferredSuffix = getPreferredAssetSuffix();
-
-            if (!expectedSuffix.isEmpty() && releaseObj.contains("assets") && releaseObj["assets"].isArray()) {
-                QJsonArray assets = releaseObj["assets"].toArray();
-
-                // 后备候选：后缀对得上但不带本机架构后缀的那个（旧 release 的命名）
-                QString fallbackUrl;
-                QString fallbackName;
-                QString fallbackDigest;
-
-                for (const auto& asset : std::as_const(assets)) {
-                    if (asset.isObject()) {
-                        QJsonObject assetObj = asset.toObject();
-                        QString assetName = assetObj["name"].toString();
-                        bool prefixMatches = expectedPrefix.isEmpty() ||
-                                             assetName.startsWith(expectedPrefix, Qt::CaseInsensitive);
-#if defined(Q_OS_WIN32)
-                        // Accept pre-rebrand assets while users transition from Moonlight PC.
-                        if (!prefixMatches) {
-                            const QString legacyPrefix = isPortableInstall()
-                                    ? QStringLiteral("MoonlightPortable-%1-").arg(getCurrentBuildArch())
-                                    : QStringLiteral("MoonlightSetup-");
-                            prefixMatches = assetName.startsWith(legacyPrefix, Qt::CaseInsensitive);
-                        }
-#endif
-                        bool suffixMatches = assetName.endsWith(expectedSuffix, Qt::CaseInsensitive);
-
-                        if (!prefixMatches || !suffixMatches) {
-                            continue;
-                        }
-
-                        if (!preferredSuffix.isEmpty() &&
-                                assetName.endsWith(preferredSuffix, Qt::CaseInsensitive)) {
-                            downloadUrl = assetObj["browser_download_url"].toString();
-                            assetDigest = assetObj["digest"].toString();
-                            qDebug() << "Found matching asset for this architecture:" << assetName;
-                            break;
-                        }
-
-                        // 后备只认「没带架构后缀」的旧命名。带了别的架构后缀的资产
-                        // 绝对不能当后备 —— 只发了 arm64 包的 release 会把 arm64 的
-                        // DMG 喂给 Intel 客户端。这种情况下宁可让 downloadUrl 留空，
-                        // 退回打开 release 页面让用户自己看。
-                        bool isOtherArchAsset =
-                                assetName.endsWith(QStringLiteral("-arm64.dmg"), Qt::CaseInsensitive) ||
-                                assetName.endsWith(QStringLiteral("-x86_64.dmg"), Qt::CaseInsensitive) ||
-                                (!preferredSuffix.isEmpty() &&
-                                 (assetName.endsWith(QStringLiteral("-aarch64.AppImage"), Qt::CaseInsensitive) ||
-                                  assetName.endsWith(QStringLiteral("-x86_64.AppImage"), Qt::CaseInsensitive)));
-
-                        if (fallbackUrl.isEmpty() && !isOtherArchAsset) {
-                            fallbackUrl = assetObj["browser_download_url"].toString();
-                            fallbackName = assetName;
-                            fallbackDigest = assetObj["digest"].toString();
-                        }
-                    }
-                }
-
-                if (downloadUrl.isEmpty() && !fallbackUrl.isEmpty()) {
-                    downloadUrl = fallbackUrl;
-                    assetDigest = fallbackDigest;
-                    qDebug() << "Found matching asset:" << fallbackName;
-                }
-            }
-
-            // Fall back to the release page URL if no matching asset found
-            if (downloadUrl.isEmpty()) {
-                downloadUrl = releaseObj["html_url"].toString();
-            }
-
-            m_UpdateDownloadUrl = downloadUrl;
-            m_UpdateAssetDigest = assetDigest;
-
-            emit onUpdateAvailable(tagName, downloadUrl);
-            finish(true);
-        }
-        else if (res > 0) {
-            qDebug() << "Current version is newer than latest release";
-            finish(false);
-        }
-        else {
-            qDebug() << "Current version matches latest release";
-            finish(false);
-        }
-    }
-    else {
+    if (reply->error() != QNetworkReply::NoError) {
         qWarning() << "Update checking failed:" << reply->error() << reply->errorString();
         reply->deleteLater();
         fail();
+        return;
     }
+
+    QTextStream stream(reply);
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+    stream.setEncoding(QStringConverter::Utf8);
+#else
+    stream.setCodec("UTF-8");
+#endif
+    QString jsonString = stream.readAll();
+    reply->deleteLater();
+
+    QJsonParseError error;
+    QJsonDocument jsonDoc = QJsonDocument::fromJson(jsonString.toUtf8(), &error);
+    if (jsonDoc.isNull()) {
+        qWarning() << "GitHub release response malformed:" << error.errorString();
+        fail();
+        return;
+    }
+
+    bool includePreReleases = false;
+#ifdef SUNANDMON_APP
+    if (StreamingPreferences* prefs = StreamingPreferences::get()) {
+        includePreReleases = prefs->includePreReleaseUpdates;
+    }
+#endif
+
+    QJsonObject releaseObj;
+    if (jsonDoc.isObject()) {
+        releaseObj = jsonDoc.object();
+    }
+    else if (jsonDoc.isArray()) {
+        const QJsonArray releases = jsonDoc.array();
+        for (const auto& entry : releases) {
+            if (!entry.isObject()) {
+                continue;
+            }
+            const QJsonObject candidate = entry.toObject();
+            if (candidate["draft"].toBool(false)) {
+                continue;
+            }
+            if (!includePreReleases && candidate["prerelease"].toBool(false)) {
+                continue;
+            }
+            releaseObj = candidate;
+            break;
+        }
+        if (releaseObj.isEmpty()) {
+            finish(false);
+            return;
+        }
+    }
+    else {
+        fail();
+        return;
+    }
+
+    if (releaseObj["draft"].toBool(false) ||
+            (!includePreReleases && releaseObj["prerelease"].toBool(false))) {
+        finish(false);
+        return;
+    }
+
+    if (!releaseObj.contains("tag_name") || !releaseObj["tag_name"].isString()) {
+        fail();
+        return;
+    }
+
+    QString tagName = releaseObj["tag_name"].toString();
+    qDebug() << "Latest GitHub release tag:" << tagName;
+
+    const QVersionNumber latestVersion = VersionUtils::parseRelease(tagName);
+    if (m_CurrentVersion.segmentCount() < 2 || latestVersion.segmentCount() < 2) {
+        qWarning() << "Invalid release version:" << QStringLiteral(VERSION_STR) << tagName;
+        fail();
+        return;
+    }
+
+    int res = VersionUtils::compare(m_CurrentVersion, latestVersion);
+    if (res >= 0) {
+        finish(false);
+        return;
+    }
+
+    qDebug() << "Update available:" << tagName;
+
+    QString downloadUrl;
+    QString matchedAssetName;
+    QString assetDigest;
+    QString checksumsUrl;
+
+    const QString expectedPrefix = getExpectedAssetPrefix();
+    const QString expectedSuffix = getExpectedAssetSuffix();
+    const QString preferredSuffix = getPreferredAssetSuffix();
+
+    if (!expectedSuffix.isEmpty() && releaseObj.contains("assets") && releaseObj["assets"].isArray()) {
+        QJsonArray assets = releaseObj["assets"].toArray();
+        QString fallbackUrl;
+        QString fallbackName;
+        QString fallbackDigest;
+
+#if defined(SUNANDMON_APP) && defined(Q_OS_WIN32)
+        QString setupFallbackUrl;
+        QString setupFallbackName;
+        QString setupFallbackDigest;
+#endif
+
+        for (const auto& asset : std::as_const(assets)) {
+            if (!asset.isObject()) {
+                continue;
+            }
+            QJsonObject assetObj = asset.toObject();
+            QString assetName = assetObj["name"].toString();
+
+            if (assetName.compare(QStringLiteral("SHA256SUMS.txt"), Qt::CaseInsensitive) == 0) {
+                checksumsUrl = assetObj["browser_download_url"].toString();
+                continue;
+            }
+
+#if defined(SUNANDMON_APP) && defined(Q_OS_WIN32)
+            if (assetName.startsWith(QStringLiteral("SunAndMon-Setup-"), Qt::CaseInsensitive) &&
+                    assetName.endsWith(QStringLiteral(".exe"), Qt::CaseInsensitive) &&
+                    setupFallbackUrl.isEmpty()) {
+                setupFallbackUrl = assetObj["browser_download_url"].toString();
+                setupFallbackName = assetName;
+                setupFallbackDigest = assetObj["digest"].toString();
+            }
+#endif
+
+            bool prefixMatches = expectedPrefix.isEmpty() ||
+                                 assetName.startsWith(expectedPrefix, Qt::CaseInsensitive);
+            bool suffixMatches = assetName.endsWith(expectedSuffix, Qt::CaseInsensitive);
+            if (!prefixMatches || !suffixMatches) {
+                continue;
+            }
+
+            if (!preferredSuffix.isEmpty() &&
+                    assetName.endsWith(preferredSuffix, Qt::CaseInsensitive)) {
+                downloadUrl = assetObj["browser_download_url"].toString();
+                matchedAssetName = assetName;
+                assetDigest = assetObj["digest"].toString();
+                break;
+            }
+
+            bool isOtherArchAsset =
+                    assetName.endsWith(QStringLiteral("-arm64.dmg"), Qt::CaseInsensitive) ||
+                    assetName.endsWith(QStringLiteral("-x86_64.dmg"), Qt::CaseInsensitive) ||
+                    (!preferredSuffix.isEmpty() &&
+                     (assetName.endsWith(QStringLiteral("-aarch64.AppImage"), Qt::CaseInsensitive) ||
+                      assetName.endsWith(QStringLiteral("-x86_64.AppImage"), Qt::CaseInsensitive)));
+
+            if (fallbackUrl.isEmpty() && !isOtherArchAsset) {
+                fallbackUrl = assetObj["browser_download_url"].toString();
+                fallbackName = assetName;
+                fallbackDigest = assetObj["digest"].toString();
+            }
+        }
+
+        if (downloadUrl.isEmpty() && !fallbackUrl.isEmpty()) {
+            downloadUrl = fallbackUrl;
+            matchedAssetName = fallbackName;
+            assetDigest = fallbackDigest;
+        }
+#if defined(SUNANDMON_APP) && defined(Q_OS_WIN32)
+        if (downloadUrl.isEmpty() && !setupFallbackUrl.isEmpty()) {
+            downloadUrl = setupFallbackUrl;
+            matchedAssetName = setupFallbackName;
+            assetDigest = setupFallbackDigest;
+        }
+#endif
+    }
+
+    if (downloadUrl.isEmpty()) {
+        downloadUrl = releaseObj["html_url"].toString();
+    }
+    else {
+        downloadUrl = applyCustomDownloadProxy(downloadUrl);
+    }
+
+    if (assetDigest.isEmpty() && !checksumsUrl.isEmpty() && !matchedAssetName.isEmpty()) {
+        m_PendingTagName = tagName;
+        m_PendingDownloadUrl = downloadUrl;
+        m_PendingAssetName = matchedAssetName;
+
+        QNetworkRequest sumReq{QUrl(applyCustomDownloadProxy(checksumsUrl))};
+#if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
+        sumReq.setTransferTimeout(10000);
+#endif
+        sumReq.setHeader(QNetworkRequest::UserAgentHeader,
+                         QStringLiteral("%1/%2").arg(QStringLiteral(APP_UA_PREFIX), QStringLiteral(VERSION_STR)));
+        m_ChecksumsReply = m_Nam->get(sumReq);
+        connect(m_ChecksumsReply, &QNetworkReply::finished,
+                this, &AutoUpdateChecker::handleChecksumsReplyFinished);
+        return;
+    }
+
+    emitDiscoveredUpdate(tagName, downloadUrl, assetDigest);
 }

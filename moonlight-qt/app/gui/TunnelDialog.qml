@@ -112,6 +112,25 @@ Basic.Dialog {
                 text: qsTr("Tailscale / Headscale and EasyTier can run simultaneously in isolated userspace without touching your system VPN or routes. When both tunnels are available, SunAndMon automatically selects and fails over according to your route policy.")
             }
 
+            Rectangle {
+                visible: !!tunnel && tunnel.managedBySystemService
+                Layout.fillWidth: true
+                implicitHeight: svcManagedLabel.implicitHeight + 14
+                radius: Theme.radiusControl
+                color: Theme.accentSoft
+                border.color: Theme.accent
+                border.width: 1
+
+                LabelText {
+                    id: svcManagedLabel
+                    anchors.fill: parent
+                    anchors.margins: 7
+                    color: Theme.text
+                    wrapMode: Text.WordWrap
+                    text: qsTr("内置隧道当前由登录前系统服务（Session 0）统一托管，锁屏与重启登录前均可直接远控；此处操作将直接作用于系统服务隧道。")
+                }
+            }
+
             // Route priority policy (solves multi-tunnel automatic selection!)
             Rectangle {
                 Layout.fillWidth: true

@@ -273,6 +273,7 @@ public:
     Q_PROPERTY(bool swapWinAltKeys MEMBER swapWinAltKeys NOTIFY swapWinAltKeysChanged)
     Q_PROPERTY(bool muteOnFocusLoss MEMBER muteOnFocusLoss NOTIFY muteOnFocusLossChanged)
     Q_PROPERTY(bool backgroundGamepad MEMBER backgroundGamepad NOTIFY backgroundGamepadChanged)
+    Q_PROPERTY(bool hidHideAutoCloak MEMBER hidHideAutoCloak NOTIFY hidHideAutoCloakChanged)
     Q_PROPERTY(bool enableGamepadUiNavigation READ gamepadUiNavigationEnabled WRITE
                    setGamepadUiNavigationEnabled NOTIFY enableGamepadUiNavigationChanged)
     Q_PROPERTY(GamepadQuitCombo gamepadQuitCombo MEMBER gamepadQuitCombo NOTIFY gamepadQuitComboChanged)
@@ -285,6 +286,8 @@ public:
     Q_PROPERTY(bool enableMicrophone MEMBER enableMicrophone NOTIFY enableMicrophoneChanged)
     Q_PROPERTY(OverlayMenuPosition overlayMenuPosition MEMBER overlayMenuPosition NOTIFY overlayMenuPositionChanged)
     Q_PROPERTY(bool autoUpdateCheck MEMBER autoUpdateCheck NOTIFY autoUpdateCheckChanged)
+    Q_PROPERTY(bool includePreReleaseUpdates MEMBER includePreReleaseUpdates NOTIFY includePreReleaseUpdatesChanged)
+    Q_PROPERTY(QString customUpdateUrl MEMBER customUpdateUrl NOTIFY customUpdateUrlChanged)
     Q_PROPERTY(bool usbForwardingEnabled MEMBER usbForwardingEnabled NOTIFY usbForwardingEnabledChanged)
     Q_PROPERTY(QStringList usbForwardingBoundDevices READ usbForwardingBoundDevices WRITE setUsbForwardingBoundDevices NOTIFY usbForwardingBoundDevicesChanged)
 
@@ -333,6 +336,7 @@ public:
     bool swapWinAltKeys;
     bool muteOnFocusLoss;
     bool backgroundGamepad;
+    bool hidHideAutoCloak;
     bool enableGamepadUiNavigation;
     GamepadQuitCombo gamepadQuitCombo;
 
@@ -365,6 +369,8 @@ public:
     bool enableMicrophone;
     OverlayMenuPosition overlayMenuPosition;
     bool autoUpdateCheck;
+    bool includePreReleaseUpdates;
+    QString customUpdateUrl;
     bool usbForwardingEnabled;
     RendererSelection rendererSelection;
 
@@ -424,6 +430,7 @@ signals:
     void swapWinAltKeysChanged();
     void muteOnFocusLossChanged();
     void backgroundGamepadChanged();
+    void hidHideAutoCloakChanged();
     void enableGamepadUiNavigationChanged();
     void gamepadQuitComboChanged();
     void gamepadDeadzoneChanged();
@@ -436,6 +443,8 @@ signals:
     void enableMicrophoneChanged();
     void overlayMenuPositionChanged();
     void autoUpdateCheckChanged();
+    void includePreReleaseUpdatesChanged();
+    void customUpdateUrlChanged();
     void usbForwardingEnabledChanged();
     void usbForwardingBoundDevicesChanged();
     void rendererSelectionChanged();

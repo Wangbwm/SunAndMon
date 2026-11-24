@@ -20,6 +20,12 @@
 #include <QUrl>
 #include <memory>
 
+#ifdef Q_OS_WIN
+#include <windows.h>
+#include <sddl.h>
+#include <aclapi.h>
+#endif
+
 namespace {
 
 QByteArray generateRandomHexToken()
@@ -52,6 +58,69 @@ QString normalizeRoutePolicy(const QString& p)
     }
     return QStringLiteral("auto");
 }
+
+#ifdef Q_OS_WIN
+void setSystemEndpointReadAcl(const QString& filePath)
+{
+    // SYSTEM & Administrators: Full; Authenticated Users (S-1-5-11): Read
+    // so the interactive desktop SunAndMon client can attach to the Session 0 tunnel daemon.
+    PSECURITY_DESCRIPTOR sd = nullptr;
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            L"D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;AU)",
+            SDDL_REVISION_1, &sd, nullptr)) {
+        return;
+    }
+    BOOL daclPresent = FALSE;
+    BOOL daclDefaulted = FALSE;
+    PACL dacl = nullptr;
+    if (GetSecurityDescriptorDacl(sd, &daclPresent, &dacl, &daclDefaulted) && daclPresent) {
+        const std::wstring wpath = QDir::toNativeSeparators(filePath).toStdWString();
+        SetNamedSecurityInfoW(const_cast<LPWSTR>(wpath.c_str()),
+                              SE_FILE_OBJECT,
+                              DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                              nullptr, nullptr, dacl, nullptr);
+    }
+    LocalFree(sd);
+}
+
+bool copyDirectoryTreeSkipDaemonJson(const QString& srcDir, const QString& dstDir)
+{
+    QDir src(srcDir);
+    if (!src.exists()) {
+        return true;
+    }
+    if (!QDir().mkpath(dstDir)) {
+        return false;
+    }
+    bool ok = true;
+    const auto entries = src.entryInfoList(QDir::NoDotAndDotDot | QDir::AllEntries | QDir::Hidden);
+    for (const QFileInfo& info : entries) {
+        const QString name = info.fileName();
+        if (name.compare(QStringLiteral("daemon.json"), Qt::CaseInsensitive) == 0) {
+            continue;
+        }
+        const QString srcPath = info.absoluteFilePath();
+        const QString dstPath = QDir(dstDir).filePath(name);
+        if (info.isDir()) {
+            if (!copyDirectoryTreeSkipDaemonJson(srcPath, dstPath)) {
+                ok = false;
+            }
+        } else if (info.isFile()) {
+            // Preserve newer state already stored in ProgramData, otherwise seed from user dir.
+            QFileInfo dstInfo(dstPath);
+            if (!dstInfo.exists() || info.lastModified() > dstInfo.lastModified()) {
+                if (dstInfo.exists()) {
+                    QFile::remove(dstPath);
+                }
+                if (!QFile::copy(srcPath, dstPath)) {
+                    ok = false;
+                }
+            }
+        }
+    }
+    return ok;
+}
+#endif
 
 } // namespace
 
@@ -231,7 +300,7 @@ QList<QPair<QString, QString>> TunnelManager::connectedHostTunnels() const
     return out;
 }
 
-QString TunnelManager::tunnelStateDir() const
+QString TunnelManager::userTunnelStateDir() const
 {
     const QString base = QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation);
     QDir dir(base.isEmpty() ? QDir::homePath() + QStringLiteral("/.sunandmon") : base);
@@ -240,9 +309,136 @@ QString TunnelManager::tunnelStateDir() const
     return path;
 }
 
+QString TunnelManager::systemTunnelStateDir()
+{
+#ifdef Q_OS_WIN
+    QString programData = qEnvironmentVariable("ProgramData").trimmed();
+    if (programData.isEmpty()) {
+        programData = QStringLiteral("C:/ProgramData");
+    }
+    const QString path = QDir(programData).filePath(QStringLiteral("SunAndMon/tunnel"));
+    QDir().mkpath(path);
+    return path;
+#else
+    return QStringLiteral("/var/lib/sunandmon/tunnel");
+#endif
+}
+
+QString TunnelManager::systemDaemonEndpointFile()
+{
+    return QDir(systemTunnelStateDir()).filePath(QStringLiteral("daemon.json"));
+}
+
+bool TunnelManager::syncUserStateToSystemDir(const QString& userStateDir)
+{
+#ifdef Q_OS_WIN
+    const QString sysDir = systemTunnelStateDir();
+    if (QDir::cleanPath(userStateDir).compare(QDir::cleanPath(sysDir), Qt::CaseInsensitive) == 0) {
+        return true;
+    }
+    return copyDirectoryTreeSkipDaemonJson(userStateDir, sysDir);
+#else
+    Q_UNUSED(userStateDir);
+    return false;
+#endif
+}
+
+QString TunnelManager::tunnelStateDir() const
+{
+    if (m_SystemServiceMode || m_AttachedToSystemDaemon) {
+        return systemTunnelStateDir();
+    }
+    return userTunnelStateDir();
+}
+
 QString TunnelManager::daemonEndpointFile() const
 {
-    return QDir(tunnelStateDir()).filePath(QStringLiteral("daemon.json"));
+    if (m_SystemServiceMode) {
+        return systemDaemonEndpointFile();
+    }
+    return QDir(userTunnelStateDir()).filePath(QStringLiteral("daemon.json"));
+}
+
+void TunnelManager::setSystemServiceMode(bool enabled)
+{
+    if (m_SystemServiceMode != enabled) {
+        m_SystemServiceMode = enabled;
+        emit changed();
+    }
+}
+
+void TunnelManager::setPreferSystemServiceAttach(bool prefer)
+{
+    m_PreferSystemServiceAttach = prefer;
+}
+
+QJsonObject TunnelManager::exportProfile() const
+{
+    return QJsonObject{
+        {QStringLiteral("routePolicy"), m_RoutePolicy},
+        {QStringLiteral("hostname"), m_Hostname},
+        {QStringLiteral("tsAutoConnect"), m_TsAutoConnect},
+        {QStringLiteral("tsControlUrl"), m_TsControlUrl},
+        {QStringLiteral("tsAuthKey"), m_TsAuthKey},
+        {QStringLiteral("tsUseWebOAuth"), m_TsUseWebOAuth},
+        {QStringLiteral("etAutoConnect"), m_EtAutoConnect},
+        {QStringLiteral("etNetworkName"), m_EtNetworkName},
+        {QStringLiteral("etNetworkSecret"), m_EtNetworkSecret},
+        {QStringLiteral("etPeers"), m_EtPeers},
+        {QStringLiteral("etStaticIp"), m_EtStaticIp},
+        {QStringLiteral("etCoreBinary"), m_EtCoreBinary},
+    };
+}
+
+void TunnelManager::applyBootProfile(const QJsonObject& profile)
+{
+    if (profile.isEmpty()) {
+        return;
+    }
+    if (profile.contains(QStringLiteral("routePolicy"))) {
+        m_RoutePolicy = normalizeRoutePolicy(profile.value(QStringLiteral("routePolicy")).toString());
+    }
+    if (profile.contains(QStringLiteral("hostname"))) {
+        m_Hostname = profile.value(QStringLiteral("hostname")).toString().trimmed();
+    }
+    m_TsAutoConnect = profile.value(QStringLiteral("tsAutoConnect")).toBool(false);
+    m_TsControlUrl = profile.value(QStringLiteral("tsControlUrl")).toString().trimmed();
+    m_TsAuthKey = profile.value(QStringLiteral("tsAuthKey")).toString().trimmed();
+    m_TsUseWebOAuth = profile.value(QStringLiteral("tsUseWebOAuth")).toBool(true);
+
+    m_EtAutoConnect = profile.value(QStringLiteral("etAutoConnect")).toBool(false);
+    m_EtNetworkName = profile.value(QStringLiteral("etNetworkName")).toString().trimmed();
+    m_EtNetworkSecret = profile.value(QStringLiteral("etNetworkSecret")).toString().trimmed();
+    if (profile.contains(QStringLiteral("etPeers"))) {
+        m_EtPeers = profile.value(QStringLiteral("etPeers")).toString().trimmed();
+    }
+    m_EtStaticIp = profile.value(QStringLiteral("etStaticIp")).toString().trimmed();
+    m_EtCoreBinary = profile.value(QStringLiteral("etCoreBinary")).toString().trimmed();
+    emit changed();
+}
+
+void TunnelManager::reattachAfterServiceModeChange(bool serviceEnabled)
+{
+    m_PreferSystemServiceAttach = serviceEnabled;
+    m_SystemAttachRetries = 0;
+    stopDaemon();
+    m_AttachedToSystemDaemon = false;
+    emit changed();
+    if (serviceEnabled) {
+        // Give SunAndMonHostService a moment to spawn its Session 0 tunnel daemon,
+        // then attach to C:\ProgramData\SunAndMon\tunnel\daemon.json.
+        QTimer::singleShot(1500, this, [this] {
+            if (!m_DaemonReady && !m_ProbingExistingDaemon) {
+                startOnLaunch(m_SecondaryMode);
+            }
+        });
+    } else {
+        QTimer::singleShot(500, this, [this] {
+            if (!m_DaemonReady && !m_ProbingExistingDaemon) {
+                startOnLaunch(m_SecondaryMode);
+            }
+        });
+    }
 }
 
 void TunnelManager::writeDaemonEndpointFile() const
@@ -256,14 +452,25 @@ void TunnelManager::writeDaemonEndpointFile() const
         return;
     }
     file.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner);
-    const QJsonObject obj{
+    QJsonObject obj{
         {QStringLiteral("port"), static_cast<int>(m_DaemonPort)},
         {QStringLiteral("token"), QString::fromLatin1(m_Token)},
         {QStringLiteral("ownerPid"), QCoreApplication::applicationPid()},
     };
+    if (m_SystemServiceMode) {
+        obj.insert(QStringLiteral("systemService"), true);
+    }
     file.write(QJsonDocument(obj).toJson(QJsonDocument::Compact));
     if (file.commit()) {
+#ifdef Q_OS_WIN
+        if (m_SystemServiceMode) {
+            setSystemEndpointReadAcl(path);
+        } else {
+            QFile::setPermissions(path, QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+        }
+#else
         QFile::setPermissions(path, QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+#endif
     }
 }
 
@@ -350,9 +557,9 @@ void TunnelManager::startOnLaunch(bool secondaryInstance)
     if (needDaemon) {
         emit changed();
         tryAttachExistingDaemon(true);
-    } else if (secondaryInstance) {
-        // Always attach to the primary instance's running tunnel daemon if present,
-        // even when auto-connect wasn't enabled in settings.
+    } else if (secondaryInstance || m_PreferSystemServiceAttach) {
+        // Always attach to the primary or Session 0 system tunnel daemon if present,
+        // even when auto-connect wasn't enabled in user settings.
         tryAttachExistingDaemon(false);
     }
 }
@@ -532,11 +739,57 @@ void TunnelManager::tryAttachExistingDaemon(bool spawnFallback)
     if (m_DaemonReady || m_Daemon.state() != QProcess::NotRunning || m_ProbingExistingDaemon) {
         return;
     }
-    QFile file(daemonEndpointFile());
-    if (!file.open(QIODevice::ReadOnly)) {
+#ifdef Q_OS_WIN
+    if (!m_SystemServiceMode) {
+        const QString sysEndpoint = systemDaemonEndpointFile();
+        if (QFileInfo::exists(sysEndpoint)) {
+            probeDaemonEndpoint(sysEndpoint, true, spawnFallback);
+            return;
+        }
+        // When pre-login system service mode is active, SunAndMonHostService may
+        // still be starting its Session 0 tunnel daemon right after Windows boot.
+        if (m_PreferSystemServiceAttach && m_SystemAttachRetries < 8) {
+            ++m_SystemAttachRetries;
+            QTimer::singleShot(1000, this, [this, spawnFallback] {
+                tryAttachExistingDaemon(spawnFallback);
+            });
+            return;
+        }
+    }
+#endif
+    probeDaemonEndpoint(daemonEndpointFile(), m_SystemServiceMode, spawnFallback);
+}
+
+void TunnelManager::probeDaemonEndpoint(const QString& endpointPath, bool isSystemEndpoint, bool spawnFallback)
+{
+    auto fallback = [this, isSystemEndpoint, spawnFallback]() {
+#ifdef Q_OS_WIN
+        if (isSystemEndpoint && !m_SystemServiceMode) {
+            if (m_PreferSystemServiceAttach && m_SystemAttachRetries < 8) {
+                ++m_SystemAttachRetries;
+                QTimer::singleShot(1000, this, [this, spawnFallback] {
+                    tryAttachExistingDaemon(spawnFallback);
+                });
+                return;
+            }
+            const QString userEndpoint = daemonEndpointFile();
+            if (userEndpoint != systemDaemonEndpointFile() && QFileInfo::exists(userEndpoint)) {
+                probeDaemonEndpoint(userEndpoint, false, spawnFallback);
+                return;
+            }
+        }
+#else
+        Q_UNUSED(isSystemEndpoint);
+#endif
         if (spawnFallback) {
             spawnLocalDaemon();
         }
+        emit daemonAttachFinished();
+    };
+
+    QFile file(endpointPath);
+    if (!file.open(QIODevice::ReadOnly)) {
+        fallback();
         return;
     }
     const auto obj = QJsonDocument::fromJson(file.read(4096)).object();
@@ -545,9 +798,7 @@ void TunnelManager::tryAttachExistingDaemon(bool spawnFallback)
     const QByteArray token = obj.value(QStringLiteral("token")).toString().toLatin1();
     const qint64 ownerPid = obj.value(QStringLiteral("ownerPid")).toVariant().toLongLong();
     if (port <= 0 || port > 65535 || token.isEmpty() || ownerPid == QCoreApplication::applicationPid()) {
-        if (spawnFallback) {
-            spawnLocalDaemon();
-        }
+        fallback();
         return;
     }
 
@@ -561,13 +812,15 @@ void TunnelManager::tryAttachExistingDaemon(bool spawnFallback)
     req.setRawHeader("Authorization", "Bearer " + token);
     req.setTransferTimeout(800);
     auto* reply = m_Network.get(req);
-    connect(reply, &QNetworkReply::finished, this, [this, reply, port, token, spawnFallback] {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, port, token, endpointPath, isSystemEndpoint, spawnFallback, fallback] {
         reply->deleteLater();
         m_ProbingExistingDaemon = false;
         const int code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         if (reply->error() == QNetworkReply::NoError && code == 200) {
             const auto root = QJsonDocument::fromJson(reply->readAll()).object();
             m_AttachedToExistingDaemon = true;
+            m_AttachedToSystemDaemon = isSystemEndpoint && !m_SystemServiceMode;
+            m_SystemAttachRetries = 0;
             m_DaemonPort = static_cast<quint16>(port);
             m_Token = token;
             m_DaemonReady = true;
@@ -587,17 +840,16 @@ void TunnelManager::tryAttachExistingDaemon(bool spawnFallback)
                 }
             }
             m_PollTimer.start();
+            emit changed();
             emit daemonAttachFinished();
             return;
         }
-        // Stale descriptor or primary daemon exited; spawn locally if requested.
-        if (reply->error() == QNetworkReply::ConnectionRefusedError) {
-            QFile::remove(daemonEndpointFile());
+        // Only remove stale user endpoint files; leave ProgramData file to SYSTEM.
+        if (reply->error() == QNetworkReply::ConnectionRefusedError &&
+            (!isSystemEndpoint || m_SystemServiceMode)) {
+            QFile::remove(endpointPath);
         }
-        if (spawnFallback) {
-            spawnLocalDaemon();
-        }
-        emit daemonAttachFinished();
+        fallback();
     });
 }
 
@@ -628,6 +880,7 @@ void TunnelManager::stopDaemon()
     m_PollTimer.stop();
     if (m_AttachedToExistingDaemon) {
         m_AttachedToExistingDaemon = false;
+        m_AttachedToSystemDaemon = false;
         m_DaemonReady = false;
         m_DaemonPort = 0;
         return;
@@ -778,11 +1031,19 @@ void TunnelManager::pollStatus()
         reply->deleteLater();
         if (reply->error() != QNetworkReply::NoError) {
             if (m_AttachedToExistingDaemon && ++m_PollFailures >= 3) {
+                const bool wasSystem = m_AttachedToSystemDaemon;
                 m_PollTimer.stop();
                 m_AttachedToExistingDaemon = false;
+                m_AttachedToSystemDaemon = false;
                 m_DaemonReady = false;
                 m_DaemonPort = 0;
                 emit changed();
+                if (wasSystem || m_PreferSystemServiceAttach) {
+                    m_SystemAttachRetries = 0;
+                    QTimer::singleShot(1500, this, [this] {
+                        tryAttachExistingDaemon(!m_PreferSystemServiceAttach);
+                    });
+                }
             }
             return;
         }

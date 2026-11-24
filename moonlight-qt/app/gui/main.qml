@@ -74,6 +74,13 @@ ApplicationWindow {
         onExitRequested: quitConfirmationDialog.open()
     }
 
+    Connections {
+        target: ComputerManager.center
+        function onActivateWindowRequested() {
+            windowsWindowChrome.bringToFront()
+        }
+    }
+
     // Windows 保留标准顶层窗口状态和系统命令，只由 WindowsWindowChrome 移除
     // 非客户区并绘制自定义标题栏。macOS 保留扩展客户区，Linux 使用原生窗口边框。
     flags: Qt.platform.os === "osx"
@@ -199,6 +206,20 @@ ApplicationWindow {
 
     Connections {
         target: StreamTabManager
+        function onChanged() {
+            if (window.embeddedChildMode) {
+                return
+            }
+            if (StreamTabManager.streamTabActive) {
+                // Release SDL controller handles in the parent UI process while
+                // streaming inside an embedded tab so the child stream process
+                // owns gamepad/HID/DualSense devices without contention.
+                SdlGamepadKeyNavigation.disable()
+            } else {
+                SdlGamepadKeyNavigation.enable()
+                SdlGamepadKeyNavigation.notifyWindowFocus(window.visible && window.active)
+            }
+        }
         function onFullscreenStreamChanged() {
             if (window.embeddedChildMode) {
                 return
@@ -225,9 +246,12 @@ ApplicationWindow {
 
     Timer {
         id: viewportSyncTimer
-        interval: 60
+        interval: 120
         repeat: false
-        onTriggered: streamViewportContainer.syncViewport()
+        onTriggered: {
+            streamViewportContainer.syncViewport()
+            StreamTabManager.forceSyncViewport()
+        }
     }
 
     onClosing: function(event) {
@@ -971,7 +995,8 @@ ApplicationWindow {
                 visible: false
 
                 onClicked: {
-                    if (AutoUpdateChecker.supportsInAppUpdate()) {
+                    if (AutoUpdateChecker.supportsInAppUpdate() &&
+                            browserUrl.toLowerCase().endsWith(".zip")) {
                         portableUpdateDialog.text = qsTr("Preparing update...")
                         portableUpdateDialog.open()
                         AutoUpdateChecker.installUpdate(browserUrl)
@@ -983,7 +1008,9 @@ ApplicationWindow {
 
                 function updateAvailable(version, url)
                 {
-                    ToolTip.text = Brand.text(qsTr("Update available for Moonlight: Version %1")).arg(version)
+                    ToolTip.text = SystemProperties.isSunAndMon
+                        ? qsTr("Update available for SunAndMon: Version %1").arg(version)
+                        : Brand.text(qsTr("Update available for Moonlight: Version %1")).arg(version)
                     updateButton.browserUrl = url
                     updateButton.visible = true
                 }
@@ -1003,10 +1030,20 @@ ApplicationWindow {
                     portableUpdateErrorDialog.open()
                 }
 
+                function handlePrepareForRestart()
+                {
+                    StreamTabManager.closeAllTabs()
+                    if (ComputerManager.center && ComputerManager.center.hostActive) {
+                        ComputerManager.center.stopHost()
+                    }
+                    window.exitConfirmed = true
+                }
+
                 Component.onCompleted: {
                     AutoUpdateChecker.onUpdateAvailable.connect(updateAvailable)
                     AutoUpdateChecker.onPortableUpdateStatusChanged.connect(portableUpdateStatusChanged)
                     AutoUpdateChecker.onPortableUpdateFailed.connect(portableUpdateFailed)
+                    AutoUpdateChecker.prepareForRestart.connect(handlePrepareForRestart)
                     if (StreamingPreferences.autoUpdateCheck) {
                         AutoUpdateChecker.start()
                     }
@@ -1234,6 +1271,19 @@ ApplicationWindow {
         }
 
         Connections {
+            target: windowsWindowChrome
+            function onMaximizedChanged() {
+                Qt.callLater(streamViewportContainer.syncViewport)
+                viewportSyncTimer.restart()
+            }
+            function onInSizeMoveChanged() {
+                if (!window.embeddedChildMode) {
+                    StreamTabManager.setHostSizeMoveActive(windowsWindowChrome.inSizeMove)
+                }
+            }
+        }
+
+        Connections {
             target: toolBar
             function onHeightChanged() { Qt.callLater(streamViewportContainer.syncViewport) }
         }
@@ -1358,7 +1408,9 @@ ApplicationWindow {
         standardButtons: Dialog.Ok | Dialog.Cancel
         text: Brand.text(qsTr("This version of Moonlight isn't optimized for your PC. Please download the '%1' version of Moonlight for the best streaming performance.")).arg(SystemProperties.friendlyNativeArchName)
         onAccepted: {
-            Qt.openUrlExternally("https://github.com/moonlight-stream/moonlight-qt/releases");
+            Qt.openUrlExternally(SystemProperties.isSunAndMon
+                                 ? "https://github.com/Wangbwm/SunAndMon/releases"
+                                 : "https://github.com/moonlight-stream/moonlight-qt/releases");
         }
     }
 

@@ -9,7 +9,7 @@ constexpr auto LocalStateFileName = "overlay-button-placement.ini";
 constexpr auto LocalStateVersionKey = "meta/version";
 constexpr auto NormalizedXKey = "position/normalizedX";
 constexpr auto NormalizedYKey = "position/normalizedY";
-constexpr int LocalStateVersion = 1;
+constexpr int LocalStateVersion = 2;
 
 struct AxisBounds
 {
@@ -48,7 +48,7 @@ QPoint OverlayButtonPlacement::defaultPosition(const QRect& parentGeometry,
                                                const QSize& buttonSize,
                                                int margin)
 {
-    return resolve(QPointF(1.0, 0.0), parentGeometry, buttonSize, margin);
+    return resolve(QPointF(0.5, 0.0), parentGeometry, buttonSize, margin);
 }
 
 QPoint OverlayButtonPlacement::clamp(const QPoint& position,

@@ -115,6 +115,7 @@ namespace confighttp::configuration {
       // The Windows build the host runs on (RtlGetVersion), for the first-run guide: the base virtual display has no HDR on Windows 10 (build 19045 at most). Left out where it is unknown.
       if (const auto windows_build = doctor::os::windows_build()) outputTree.put("windows_build", *windows_build);
       outputTree.put("version", build_info::version());
+      outputTree.put("sunandmon_managed", "true");
 
       auto vars = config::parse_config(file_handler::read_file(config::sunshine.config_file.c_str()));
       for (auto &[name, value] : vars) {

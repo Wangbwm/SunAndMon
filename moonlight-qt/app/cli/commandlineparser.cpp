@@ -189,6 +189,7 @@ GlobalCommandLineParser::ParseResult GlobalCommandLineParser::parse(const QStrin
     );
     parser.addPositionalArgument("action", "Action to execute", "<action>");
     parser.addFlagOption("disable-ui-gamepad", "disable gamepad navigation in the Moonlight UI");
+    parser.addFlagOption("new-window", "open a separate window even when a primary instance is running");
     parser.addValueOption("center-connect", "center device ID to connect automatically in a new window");
     parser.addValueOption("center-action", "center auto-connect action (desktop, apps, displays)");
     parser.addValueOption("embed-parent", "native parent window ID for single-window embedded streaming tab");

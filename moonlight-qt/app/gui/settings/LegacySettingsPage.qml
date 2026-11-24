@@ -19,6 +19,7 @@ Column {
     id: settingsPage
 
     signal languageChanged()
+    signal aboutRequested()
 
     property string category: ""
     // 关闭捕获时保留用户上次选择的作用范围，重新开启后恢复原模式。
@@ -459,9 +460,31 @@ Column {
         ToggleRow {
             title: qsTr("Automatically check for updates")
             searchKeywords: "Automatically check for updates"
-            description: Brand.text(qsTr("Check for new versions of Moonlight when the app starts."))
+            description: SystemProperties.isSunAndMon
+                ? (StreamingPreferences.language === StreamingPreferences.LANG_EN
+                    ? "Check for new versions of SunAndMon when the app starts."
+                    : "启动时检查 SunAndMon 是否有新版本。")
+                : Brand.text(qsTr("Check for new versions of Moonlight when the app starts."))
             checked: StreamingPreferences.autoUpdateCheck
             onToggled: function(value) { StreamingPreferences.autoUpdateCheck = value }
+        }
+
+        SettingsRow {
+            applicable: SystemProperties.isSunAndMon
+            title: StreamingPreferences.language === StreamingPreferences.LANG_EN
+                ? "Updates & Hot-Update"
+                : "版本与热更新"
+            searchKeywords: "hot update zip version check 更新 热更新 版本"
+            description: StreamingPreferences.language === StreamingPreferences.LANG_EN
+                ? ("Current version " + SystemProperties.versionString + ". Check for updates, run one-click hot-update, or install from a local ZIP package.")
+                : ("当前版本 " + SystemProperties.versionString + "。可前往「关于」页面在线检查更新、一键热更新或从本地 ZIP 热更新。")
+
+            HardButton {
+                text: StreamingPreferences.language === StreamingPreferences.LANG_EN
+                    ? "Open Updates"
+                    : "前往热更新"
+                onClicked: settingsPage.aboutRequested()
+            }
         }
     }
 
@@ -685,6 +708,41 @@ Column {
             description: Brand.text(qsTr("Allows Moonlight to capture gamepad inputs even if it's not the current window in focus"))
             checked: StreamingPreferences.backgroundGamepad
             onToggled: function(value) { StreamingPreferences.backgroundGamepad = value }
+        }
+
+        ToggleRow {
+            title: qsTr("Auto-hide conflicting host gamepads with HidHide")
+            searchKeywords: "Auto-hide conflicting host gamepads with HidHide"
+            description: qsTr("When streaming to a Windows host with HidHide installed, temporarily hides competing local gamepads (such as analog keyboard virtual controllers) during the stream and restores them after disconnecting.")
+            checked: StreamingPreferences.hidHideAutoCloak
+            onToggled: function(value) { StreamingPreferences.hidHideAutoCloak = value }
+        }
+
+        SettingsRow {
+            id: hidHideStatusRow
+            applicable: !SystemProperties.isDarwin && !SystemProperties.isLinux
+            property bool hidHideInstalled: SystemProperties.isHidHideInstalled()
+            title: qsTr("Local HidHide driver")
+            searchKeywords: "Local HidHide driver"
+            description: hidHideInstalled
+                ? qsTr("Installed. This PC can automatically hide competing local gamepads when acting as a streaming host.")
+                : qsTr("Not installed on this PC. Install HidHide on the Windows host if local virtual controllers conflict with remote gamepads.")
+            onVisibleChanged: if (visible) hidHideInstalled = SystemProperties.isHidHideInstalled()
+
+            Flow {
+                width: Math.min(260, Math.max(0, hidHideStatusRow.width - Theme.spaceMd * 2))
+                spacing: Theme.spaceSm
+
+                HardButton {
+                    text: qsTr("Refresh")
+                    onClicked: hidHideStatusRow.hidHideInstalled = SystemProperties.isHidHideInstalled()
+                }
+
+                HardLink {
+                    text: qsTr("Download HidHide")
+                    onClicked: Qt.openUrlExternally("https://github.com/nefarius/HidHide/releases/latest")
+                }
+            }
         }
     }
 

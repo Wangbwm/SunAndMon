@@ -32,6 +32,17 @@ MOONLIGHT_NUMERIC_VERSION = $$system($$VERSION_PYTHON $$VERSION_SCRIPT --source-
 isEmpty(MOONLIGHT_VERSION): MOONLIGHT_VERSION = $$cat(version.txt)
 isEmpty(MOONLIGHT_NUMERIC_VERSION): MOONLIGHT_NUMERIC_VERSION = $$cat(version.txt)
 
+sunandmon {
+    SUNANDMON_VER = $$(SUNANDMON_VERSION)
+    isEmpty(SUNANDMON_VER): SUNANDMON_VER = $$cat(sunandmon-version.txt)
+    !isEmpty(SUNANDMON_VER) {
+        SUNANDMON_VER = $$replace(SUNANDMON_VER, ^v, )
+        MOONLIGHT_VERSION = $$SUNANDMON_VER
+        MOONLIGHT_NUMERIC_VERSION = $$replace(SUNANDMON_VER, -.*$, )
+        MOONLIGHT_NUMERIC_VERSION = $$replace(MOONLIGHT_NUMERIC_VERSION, \+.*$, )
+    }
+}
+
 # Precompile QML files to avoid writing qmlcache on portable versions.
 # Since this binds the app against the Qt runtime version, we will only
 # do this for Windows and Mac (when disable-prebuilts is not defined),

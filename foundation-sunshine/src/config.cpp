@@ -464,6 +464,7 @@ namespace config {
     false,  // vdd_headless_create_enabled
     false,  // vdd_reuse (default: recreate VDD for each client)
     true,  // vdd_vulkan_hdr_bridge (automatic for HDR VDD sessions)
+    false,  // virtual_display (unified host virtual display option)
     {},  // nv_legacy
 
     {
@@ -631,6 +632,7 @@ namespace config {
     false,  // amf_draw_mouse_cursor
     true,  // clipboard_sync (default on; effective only when the user-session GUI agent is alive and forwards data)
     true,  // client_gamepad_override (client-declared type wins; no official client sends it today)
+    false,  // hidhide_auto_cloak (opt-in; can also be requested per-session via sunandmonHidHide=1)
   };
 
   sunshine_t sunshine {
@@ -1458,6 +1460,12 @@ namespace config {
     bool_f(vars, "vdd_headless_create", video.vdd_headless_create_enabled);
     bool_f(vars, "vdd_reuse", video.vdd_reuse);
     bool_f(vars, "vdd_vulkan_hdr_bridge", video.vdd_vulkan_hdr_bridge);
+    bool_f(vars, "virtual_display", video.virtual_display);
+#ifdef _WIN32
+    if (video.virtual_display) {
+      video.vdd_headless_create_enabled = true;
+    }
+#endif
 
     // Whether to composite the host mouse cursor into the captured frames.
     // The runtime toggle Ctrl+Alt+Shift+N (handled in input.cpp) overrides this at runtime.
@@ -1662,6 +1670,7 @@ namespace config {
     bool_f(vars, "touchpad_as_ds4", input.touchpad_as_ds4);
     bool_f(vars, "enable_dsu_server", input.enable_dsu_server);
     bool_f(vars, "client_gamepad_override", input.client_gamepad_override);
+    bool_f(vars, "hidhide_auto_cloak", input.hidhide_auto_cloak);
 
     int temp_port = static_cast<int>(input.dsu_server_port);
     int_between_f(vars, "dsu_server_port", temp_port, { 1024, 65535 });

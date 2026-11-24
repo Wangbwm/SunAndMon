@@ -1,6 +1,10 @@
 #include "overlaymenubutton.h"
+#include "uifont.h"
 
+#include <QFontMetrics>
 #include <QGuiApplication>
+#include <QLinearGradient>
+#include <QLocale>
 #include <QScreen>
 #include <QPainterPath>
 #include <QStyleHints>
@@ -189,7 +193,7 @@ OverlayMenuButton::OverlayMenuButton(QWindow* parent, OverlayWindowMode windowMo
     fmt.setAlphaBufferSize(8);
     setFormat(fmt);
 
-    setOpacity(m_Compact ? 0.40 : 0.86);
+    setOpacity(0.50);
 }
 
 OverlayMenuButton::~OverlayMenuButton()
@@ -304,31 +308,43 @@ void OverlayMenuButton::repositionTo(int parentX, int parentY, int parentW, int 
     m_ParentGeometry = newParentGeometry;
 
     QPoint newPosition;
+    QSize targetSize;
     if (m_InputSource != InputSource::None) {
+        targetSize = buttonSize();
         const QPoint parentTranslation = previousParentGeometry.isValid()
                 ? m_ParentGeometry.topLeft() - previousParentGeometry.topLeft()
                 : QPoint();
         newPosition = OverlayButtonPlacement::clamp(
                 previousPosition + parentTranslation,
                 m_ParentGeometry,
-                buttonSize(),
+                targetSize,
                 kMargin);
-        // Keep the active drag origin aligned with any parent movement or
-        // resize so the next pointer event cannot jump back to stale bounds.
+        m_DockEdge = detectDockEdge(newPosition, targetSize);
         m_WindowPositionAtPress += newPosition - previousPosition;
     }
     else if (m_NormalizedPosition) {
+        // Resolve the remembered normalized anchor using a reference top-edge
+        // size first to determine which screen edge it belongs to, then apply
+        // the exact idle/expanded dimensions flush to that edge.
+        const QSize probeSize(kIdleLength, kIdleThickness);
+        const QPoint probePos = OverlayButtonPlacement::snapToEdge(
+                OverlayButtonPlacement::resolve(*m_NormalizedPosition, m_ParentGeometry, probeSize, kMargin),
+                m_ParentGeometry, probeSize, kMargin);
+        m_DockEdge = detectDockEdge(probePos, probeSize);
+        targetSize = buttonSize();
         newPosition = OverlayButtonPlacement::snapToEdge(
-                OverlayButtonPlacement::resolve(*m_NormalizedPosition, m_ParentGeometry, buttonSize(), kMargin),
-                m_ParentGeometry, buttonSize(), kMargin);
-        m_NormalizedPosition = OverlayButtonPlacement::normalize(newPosition, m_ParentGeometry, buttonSize(), kMargin);
+                OverlayButtonPlacement::resolve(*m_NormalizedPosition, m_ParentGeometry, targetSize, kMargin),
+                m_ParentGeometry, targetSize, kMargin);
+        m_NormalizedPosition = OverlayButtonPlacement::normalize(newPosition, m_ParentGeometry, targetSize, kMargin);
     }
     else {
+        m_DockEdge = DockEdge::Top;
+        targetSize = buttonSize();
         newPosition = OverlayButtonPlacement::defaultPosition(
-                m_ParentGeometry, buttonSize(), kMargin);
+                m_ParentGeometry, targetSize, kMargin);
     }
 
-    setGeometry(QRect(clampToParent(newPosition), buttonSize()));
+    setGeometry(QRect(clampToParent(newPosition), targetSize));
     if (m_ButtonVisible.load(std::memory_order_acquire)) {
         requestEventProcessing();
     }
@@ -350,6 +366,8 @@ void OverlayMenuButton::showButton(int parentX, int parentY, int parentW, int pa
 void OverlayMenuButton::hideButton()
 {
     cancelInteraction();
+    m_Hovered = false;
+    setOpacity(0.50);
     m_ButtonVisible.store(false, std::memory_order_release);
 #if defined(Q_OS_WIN32) || defined(Q_OS_DARWIN) || \
         defined(HAVE_LINUX_DISPLAY_EVENT_MONITOR)
@@ -457,6 +475,7 @@ void OverlayMenuButton::updateInteraction(const QPoint& globalPosition)
             delta.manhattanLength() >= QGuiApplication::styleHints()->startDragDistance()) {
         m_Dragging = true;
         setCursor(Qt::ClosedHandCursor);
+        requestButtonUpdate();
     }
 
     if (m_Dragging) {
@@ -478,16 +497,21 @@ void OverlayMenuButton::finishInteraction(const QPoint& globalPosition)
     const bool activate = !m_Dragging && geometry().contains(globalPosition);
 
     if (dragged && m_ParentGeometry.isValid()) {
-        const auto snapped = OverlayButtonPlacement::snapToEdge(position(), m_ParentGeometry, buttonSize(), kMargin);
+        const QSize currentSize = buttonSize();
+        const auto snapped = OverlayButtonPlacement::snapToEdge(position(), m_ParentGeometry, currentSize, kMargin);
+        m_DockEdge = detectDockEdge(snapped, currentSize);
         setPosition(snapped);
         m_NormalizedPosition = OverlayButtonPlacement::normalize(
-                snapped, m_ParentGeometry, buttonSize(), kMargin);
+                snapped, m_ParentGeometry, currentSize, kMargin);
         if (!m_PositionStore.save(*m_NormalizedPosition)) {
             qWarning("Failed to save the device-local overlay button position");
         }
     }
 
     cancelInteraction();
+    if (dragged) {
+        requestButtonUpdate();
+    }
 
     if (activate && m_ClickCallback) {
         // Touch input has no reliable QCursor position, so it must not use
@@ -507,12 +531,13 @@ void OverlayMenuButton::cancelInteraction()
     if (wasTouch) {
         // Touch input has no hover state after the finger is released.
         m_Hovered = false;
-        setOpacity(m_Compact ? 0.40 : 0.86);
+        setOpacity(0.50);
+        updateAnchoredGeometry(false);
         requestButtonUpdate();
     }
 
     if (m_Hovered) {
-        setCursor(Qt::OpenHandCursor);
+        setCursor(Qt::PointingHandCursor);
     }
     else {
         unsetCursor();
@@ -523,47 +548,219 @@ void OverlayMenuButton::setCompact(bool compact)
 {
     if (m_Compact != compact) {
         m_Compact = compact;
-        setOpacity(m_Hovered ? 1.0 : m_Compact ? 0.40 : 0.86);
+        setOpacity((m_Hovered || m_Dragging) ? 0.96 : 0.50);
     }
+}
+
+QString OverlayMenuButton::controlCenterLabel() const
+{
+    const QString lang = QLocale().name().toLower();
+    if (lang.startsWith(QStringLiteral("zh"))) {
+        return QStringLiteral("控制中心");
+    }
+    return tr("Control Center");
+}
+
+QSize OverlayMenuButton::idleSizeForEdge(DockEdge edge) const
+{
+    if (edge == DockEdge::Left || edge == DockEdge::Right) {
+        return QSize(kIdleThickness, kSideIdleHeight);
+    }
+    return QSize(kIdleLength, kIdleThickness);
+}
+
+QSize OverlayMenuButton::expandedSizeForEdge(DockEdge edge) const
+{
+    QFont labelFont;
+    labelFont.setFamilies(UiFont::familyChain(QStringLiteral("Manrope")));
+    labelFont.setPixelSize(12);
+    labelFont.setWeight(QFont::DemiBold);
+    const int textW = QFontMetrics(labelFont).horizontalAdvance(controlCenterLabel());
+    const int w = qMax(104, 34 + textW + 14);
+    const int h = (edge == DockEdge::Left || edge == DockEdge::Right)
+            ? kSideIdleHeight
+            : kExpandedHeight;
+    return QSize(w, h);
 }
 
 QSize OverlayMenuButton::buttonSize() const
 {
-    QFont labelFont;
-    labelFont.setPixelSize(13);
-    labelFont.setWeight(QFont::DemiBold);
-    return QSize(m_Compact ? kButtonSize
-                           : 46 + QFontMetrics(labelFont).horizontalAdvance(tr("Stream controls")),
-                 kButtonSize);
+    return (m_Hovered || m_Dragging)
+            ? expandedSizeForEdge(m_DockEdge)
+            : idleSizeForEdge(m_DockEdge);
+}
+
+OverlayMenuButton::DockEdge OverlayMenuButton::detectDockEdge(const QPoint& pos, const QSize& sz) const
+{
+    if (!m_ParentGeometry.isValid()) {
+        return DockEdge::Top;
+    }
+    const int leftDist = qAbs(pos.x() - m_ParentGeometry.x());
+    const int rightDist = qAbs((m_ParentGeometry.x() + m_ParentGeometry.width()) - (pos.x() + sz.width()));
+    const int topDist = qAbs(pos.y() - m_ParentGeometry.y());
+    const int bottomDist = qAbs((m_ParentGeometry.y() + m_ParentGeometry.height()) - (pos.y() + sz.height()));
+
+    const int minHoriz = qMin(leftDist, rightDist);
+    const int minVert = qMin(topDist, bottomDist);
+    if (minVert <= minHoriz) {
+        return topDist <= bottomDist ? DockEdge::Top : DockEdge::Bottom;
+    }
+    return leftDist <= rightDist ? DockEdge::Left : DockEdge::Right;
+}
+
+void OverlayMenuButton::updateAnchoredGeometry(bool expanded)
+{
+    if (!m_ParentGeometry.isValid()) {
+        return;
+    }
+    const QRect cur = geometry();
+    const QSize targetSize = expanded
+            ? expandedSizeForEdge(m_DockEdge)
+            : idleSizeForEdge(m_DockEdge);
+    if (cur.size() == targetSize) {
+        return;
+    }
+
+    QPoint newPos = cur.topLeft();
+    switch (m_DockEdge) {
+    case DockEdge::Top:
+        newPos.setX(cur.center().x() - targetSize.width() / 2);
+        newPos.setY(m_ParentGeometry.y());
+        break;
+    case DockEdge::Bottom:
+        newPos.setX(cur.center().x() - targetSize.width() / 2);
+        newPos.setY(m_ParentGeometry.y() + m_ParentGeometry.height() - targetSize.height());
+        break;
+    case DockEdge::Left:
+        newPos.setX(m_ParentGeometry.x());
+        newPos.setY(cur.center().y() - targetSize.height() / 2);
+        break;
+    case DockEdge::Right:
+        newPos.setX(m_ParentGeometry.x() + m_ParentGeometry.width() - targetSize.width());
+        newPos.setY(cur.center().y() - targetSize.height() / 2);
+        break;
+    }
+
+    const QPoint clamped = OverlayButtonPlacement::clamp(newPos, m_ParentGeometry, targetSize, kMargin);
+    setGeometry(QRect(clamped, targetSize));
 }
 
 void OverlayMenuButton::paintOverlay(QPainter& painter)
 {
-    painter.setRenderHint(QPainter::Antialiasing);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setRenderHint(QPainter::TextAntialiasing, true);
     painter.setCompositionMode(QPainter::CompositionMode_Source);
     painter.fillRect(0, 0, width(), height(), Qt::transparent);
     painter.setCompositionMode(QPainter::CompositionMode_SourceOver);
 
-    const QRectF surface = QRectF(0, 0, width(), height()).adjusted(1, 1, -1, -1);
-    painter.setBrush(m_Hovered ? QColor("#243c58") : QColor("#162438"));
-    painter.setPen(QPen(QColor("#597999"), 1));
-    painter.drawRoundedRect(surface, 9, 9);
+    const bool expanded = m_Hovered || m_Dragging;
+    const qreal w = static_cast<qreal>(width());
+    const qreal h = static_cast<qreal>(height());
+    const qreal r = m_Dragging ? 11.0 : (expanded ? 10.0 : 7.0);
 
-    const QPointF icon(kButtonSize / 2.0, height() / 2.0);
-    QColor ink("#e8f2ff");
-    painter.setPen(QPen(ink, 1.5, Qt::SolidLine, Qt::RoundCap));
-    for (const qreal offset : {-5.0, 0.0, 5.0}) {
-        painter.drawLine(icon + QPointF(-7, offset), icon + QPointF(7, offset));
-        painter.drawLine(icon + QPointF(offset / 2, offset - 1.5), icon + QPointF(offset / 2, offset + 1.5));
+    // Build an edge-docked glass path (flat against the docked screen border,
+    // softly rounded on the interior corners) or a floating pill while dragging.
+    QPainterPath path;
+    if (m_Dragging) {
+        path.addRoundedRect(QRectF(0.5, 0.5, w - 1.0, h - 1.0), r, r);
     }
-    if (!m_Compact) {
-        QFont labelFont;
-        labelFont.setPixelSize(13);
-        labelFont.setWeight(QFont::DemiBold);
-        painter.setFont(labelFont);
-        painter.drawText(QRect(kButtonSize, 0, width() - kButtonSize - 10, height()),
-                         Qt::AlignLeft | Qt::AlignVCenter, tr("Stream controls"));
+    else if (m_DockEdge == DockEdge::Top) {
+        const qreal x0 = 0.5, y0 = 0.0, x1 = w - 0.5, y1 = h - 0.5;
+        path.moveTo(x0, y0);
+        path.lineTo(x1, y0);
+        path.lineTo(x1, y1 - r);
+        path.quadTo(x1, y1, x1 - r, y1);
+        path.lineTo(x0 + r, y1);
+        path.quadTo(x0, y1, x0, y1 - r);
+        path.closeSubpath();
     }
+    else if (m_DockEdge == DockEdge::Bottom) {
+        const qreal x0 = 0.5, y0 = 0.5, x1 = w - 0.5, y1 = h;
+        path.moveTo(x0, y1);
+        path.lineTo(x0, y0 + r);
+        path.quadTo(x0, y0, x0 + r, y0);
+        path.lineTo(x1 - r, y0);
+        path.quadTo(x1, y0, x1, y0 + r);
+        path.lineTo(x1, y1);
+        path.closeSubpath();
+    }
+    else if (m_DockEdge == DockEdge::Left) {
+        const qreal x0 = 0.0, y0 = 0.5, x1 = w - 0.5, y1 = h - 0.5;
+        path.moveTo(x0, y0);
+        path.lineTo(x1 - r, y0);
+        path.quadTo(x1, y0, x1, y0 + r);
+        path.lineTo(x1, y1 - r);
+        path.quadTo(x1, y1, x1 - r, y1);
+        path.lineTo(x0, y1);
+        path.closeSubpath();
+    }
+    else { // Right
+        const qreal x0 = 0.5, y0 = 0.5, x1 = w, y1 = h - 0.5;
+        path.moveTo(x1, y0);
+        path.lineTo(x0 + r, y0);
+        path.quadTo(x0, y0, x0, y0 + r);
+        path.lineTo(x0, y1 - r);
+        path.quadTo(x0, y1, x0 + r, y1);
+        path.lineTo(x1, y1);
+        path.closeSubpath();
+    }
+
+    QLinearGradient fill(0, 0, 0, h);
+    if (expanded) {
+        fill.setColorAt(0.0, QColor(27, 45, 71, 242));
+        fill.setColorAt(1.0, QColor(15, 25, 40, 246));
+    }
+    else {
+        fill.setColorAt(0.0, QColor(16, 27, 44, 215));
+        fill.setColorAt(1.0, QColor(11, 19, 32, 225));
+    }
+
+    painter.setBrush(fill);
+    painter.setPen(QPen(expanded ? QColor(149, 191, 255, 135) : QColor(149, 191, 255, 85), 1.0));
+    painter.drawPath(path);
+
+    if (!expanded) {
+        // Minimalist edge grab pill when idle
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(QColor(210, 230, 255, 200));
+        if (m_DockEdge == DockEdge::Left || m_DockEdge == DockEdge::Right) {
+            const qreal pillW = 3.0;
+            const qreal pillH = 16.0;
+            painter.drawRoundedRect(QRectF((w - pillW) / 2.0, (h - pillH) / 2.0, pillW, pillH), 1.5, 1.5);
+        }
+        else {
+            const qreal pillW = 28.0;
+            const qreal pillH = 3.0;
+            painter.drawRoundedRect(QRectF((w - pillW) / 2.0, (h - pillH) / 2.0, pillW, pillH), 1.5, 1.5);
+        }
+        return;
+    }
+
+    // Expanded glass capsule: refined slider icon + "控制中心" label
+    const qreal cy = h / 2.0;
+    const qreal iconCx = 18.0;
+    painter.setPen(QPen(QColor("#DCEBFF"), 1.4, Qt::SolidLine, Qt::RoundCap));
+    const qreal rows[3] = { -4.0, 0.0, 4.0 };
+    const qreal knobs[3] = { -2.5, 2.5, -1.0 };
+    for (int i = 0; i < 3; ++i) {
+        const qreal ry = cy + rows[i];
+        painter.drawLine(QPointF(iconCx - 6.0, ry), QPointF(iconCx + 6.0, ry));
+    }
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(QColor("#95BFFF"));
+    for (int i = 0; i < 3; ++i) {
+        painter.drawEllipse(QPointF(iconCx + knobs[i], cy + rows[i]), 2.0, 2.0);
+    }
+
+    QFont labelFont;
+    labelFont.setFamilies(UiFont::familyChain(QStringLiteral("Manrope")));
+    labelFont.setPixelSize(12);
+    labelFont.setWeight(QFont::DemiBold);
+    painter.setFont(labelFont);
+    painter.setPen(QColor("#EFF5FF"));
+    painter.drawText(QRectF(31.0, 0.0, w - 41.0, h),
+                     Qt::AlignLeft | Qt::AlignVCenter,
+                     controlCenterLabel());
 }
 
 void OverlayMenuButton::mousePressEvent(QMouseEvent* event)
@@ -579,12 +776,13 @@ void OverlayMenuButton::mouseMoveEvent(QMouseEvent* event)
 {
     if (!m_Hovered) {
         m_Hovered = true;
-        setOpacity(0.95);
+        setOpacity(0.96);
+        updateAnchoredGeometry(true);
         requestButtonUpdate();
     }
 
     if (m_InputSource == InputSource::None) {
-        setCursor(Qt::OpenHandCursor);
+        setCursor(Qt::PointingHandCursor);
         return;
     }
 
@@ -712,10 +910,21 @@ void OverlayMenuButton::touchEvent(QTouchEvent* event)
 
 bool OverlayMenuButton::event(QEvent* ev)
 {
-    if (ev->type() == QEvent::Leave) {
-        m_Hovered = false;
-        setOpacity(m_Compact ? 0.40 : 0.86);
-        requestButtonUpdate();
+    if (ev->type() == QEvent::Enter) {
+        if (!m_Hovered) {
+            m_Hovered = true;
+            setOpacity(0.96);
+            updateAnchoredGeometry(true);
+            requestButtonUpdate();
+        }
+    }
+    else if (ev->type() == QEvent::Leave) {
+        if (!m_Dragging) {
+            m_Hovered = false;
+            setOpacity(0.50);
+            updateAnchoredGeometry(false);
+            requestButtonUpdate();
+        }
     }
     else if (ev->type() == QEvent::UngrabMouse && m_InputSource == InputSource::Mouse) {
         cancelInteraction();

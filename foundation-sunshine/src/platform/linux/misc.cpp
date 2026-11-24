@@ -9,8 +9,13 @@
 #endif
 
 // standard includes
+#include <algorithm>
+#include <cctype>
+#include <chrono>
 #include <fstream>
 #include <iostream>
+#include <mutex>
+#include <thread>
 
 // lib includes
 #include <arpa/inet.h>
@@ -920,6 +925,160 @@ namespace platf {
   }  // namespace source
 
   static std::bitset<source::MAX_FLAGS> sources;
+  static std::mutex capture_sources_mutex;
+
+  namespace {
+    bool
+    env_non_empty(const char *name) {
+      const char *val = std::getenv(name);
+      return val != nullptr && val[0] != '\0';
+    }
+
+    bool
+    read_virtual_display_from_config_file() {
+      if (config::sunshine.config_file.empty()) {
+        return false;
+      }
+      std::ifstream file(config::sunshine.config_file);
+      if (!file.is_open()) {
+        return false;
+      }
+      std::string line;
+      while (std::getline(file, line)) {
+        const auto hash = line.find('#');
+        if (hash != std::string::npos) {
+          line.resize(hash);
+        }
+        const auto eq = line.find('=');
+        if (eq == std::string::npos) {
+          continue;
+        }
+        auto trim = [](std::string s) {
+          const auto first = s.find_first_not_of(" \t\r\n");
+          if (first == std::string::npos) {
+            return std::string {};
+          }
+          const auto last = s.find_last_not_of(" \t\r\n");
+          return s.substr(first, last - first + 1);
+        };
+        if (trim(line.substr(0, eq)) != "virtual_display") {
+          continue;
+        }
+        auto val = trim(line.substr(eq + 1));
+        std::transform(val.begin(), val.end(), val.begin(), [](unsigned char c) {
+          return static_cast<char>(std::tolower(c));
+        });
+        return val == "enabled" || val == "true" || val == "1" || val == "yes" || val == "on";
+      }
+      return false;
+    }
+
+    bool
+    wake_x11_dpms_if_blanked() {
+      if (!env_non_empty("DISPLAY")) {
+        return false;
+      }
+
+      using XOpenDisplay_t = void *(*) (const char *);
+      using XCloseDisplay_t = int (*) (void *);
+      using XFlush_t = int (*) (void *);
+      using XResetScreenSaver_t = int (*) (void *);
+      using DPMSQueryExtension_t = int (*) (void *, int *, int *);
+      using DPMSCapable_t = int (*) (void *);
+      using DPMSInfo_t = int (*) (void *, std::uint16_t *, std::uint8_t *);
+      using DPMSForceLevel_t = int (*) (void *, std::uint16_t);
+
+      static void *x11_handle = nullptr;
+      static void *xext_handle = nullptr;
+      static XOpenDisplay_t fn_open_display = nullptr;
+      static XCloseDisplay_t fn_close_display = nullptr;
+      static XFlush_t fn_flush = nullptr;
+      static XResetScreenSaver_t fn_reset_ss = nullptr;
+      static DPMSQueryExtension_t fn_dpms_query = nullptr;
+      static DPMSCapable_t fn_dpms_capable = nullptr;
+      static DPMSInfo_t fn_dpms_info = nullptr;
+      static DPMSForceLevel_t fn_dpms_force = nullptr;
+      static bool loaded = false;
+      static bool load_failed = false;
+
+      if (!loaded && !load_failed) {
+        x11_handle = dyn::handle({ "libX11.so.6", "libX11.so" });
+        xext_handle = dyn::handle({ "libXext.so.6", "libXext.so" });
+        if (!x11_handle || !xext_handle) {
+          load_failed = true;
+          return false;
+        }
+        std::vector<std::tuple<dyn::apiproc *, const char *>> x11_funcs {
+          { (dyn::apiproc *) &fn_open_display, "XOpenDisplay" },
+          { (dyn::apiproc *) &fn_close_display, "XCloseDisplay" },
+          { (dyn::apiproc *) &fn_flush, "XFlush" },
+          { (dyn::apiproc *) &fn_reset_ss, "XResetScreenSaver" },
+        };
+        std::vector<std::tuple<dyn::apiproc *, const char *>> xext_funcs {
+          { (dyn::apiproc *) &fn_dpms_query, "DPMSQueryExtension" },
+          { (dyn::apiproc *) &fn_dpms_capable, "DPMSCapable" },
+          { (dyn::apiproc *) &fn_dpms_info, "DPMSInfo" },
+          { (dyn::apiproc *) &fn_dpms_force, "DPMSForceLevel" },
+        };
+        if (dyn::load(x11_handle, x11_funcs) || dyn::load(xext_handle, xext_funcs)) {
+          load_failed = true;
+          return false;
+        }
+        loaded = true;
+      }
+
+      if (!loaded) {
+        return false;
+      }
+
+      void *dpy = fn_open_display(nullptr);
+      if (!dpy) {
+        return false;
+      }
+
+      bool woke = false;
+      int event_base = 0;
+      int error_base = 0;
+      if (fn_dpms_query(dpy, &event_base, &error_base) && fn_dpms_capable(dpy)) {
+        std::uint16_t power_level = 0;
+        std::uint8_t state = 0;
+        if (fn_dpms_info(dpy, &power_level, &state) && state != 0 && power_level != 0 /* DPMSModeOn */) {
+          // Wake DPMS on demand without disabling DPMS or changing user idle timeouts.
+          fn_dpms_force(dpy, 0 /* DPMSModeOn */);
+          fn_reset_ss(dpy);
+          fn_flush(dpy);
+          BOOST_LOG(info) << "Woke X11 DPMS from power level "sv << power_level
+                          << " for virtual display capture"sv;
+          woke = true;
+        }
+      }
+
+      fn_close_display(dpy);
+      return woke;
+    }
+
+    void
+    detect_window_system_locked() {
+      window_system = window_system_e::NONE;
+#ifdef SUNSHINE_BUILD_WAYLAND
+      if (env_non_empty("WAYLAND_DISPLAY")) {
+        window_system = window_system_e::WAYLAND;
+      }
+#endif
+#if defined(SUNSHINE_BUILD_X11) || defined(SUNSHINE_BUILD_CUDA)
+      if (env_non_empty("DISPLAY") && window_system != window_system_e::WAYLAND) {
+        if (env_non_empty("WAYLAND_DISPLAY")) {
+          BOOST_LOG(warning) << "Wayland detected, yet sunshine will use X11 for screencasting, screencasting will only work on XWayland applications"sv;
+        }
+
+        window_system = window_system_e::X11;
+      }
+#endif
+    }
+
+    void
+    refresh_capture_sources_locked();
+  }  // namespace
 
 #ifdef SUNSHINE_BUILD_CUDA
   std::vector<std::string>
@@ -971,6 +1130,12 @@ namespace platf {
 
   std::vector<std::string>
   display_names(mem_type_e hwdevice_type) {
+    {
+      std::lock_guard<std::mutex> lock(capture_sources_mutex);
+      if (sources.none()) {
+        refresh_capture_sources_locked();
+      }
+    }
 #ifdef SUNSHINE_BUILD_CUDA
     // display using NvFBC only supports mem_type_e::cuda
     if (sources[source::NVFBC] && hwdevice_type == mem_type_e::cuda) return nvfbc_display_names();
@@ -999,6 +1164,12 @@ namespace platf {
 
   std::shared_ptr<display_t>
   display(mem_type_e hwdevice_type, const std::string &display_name, const video::config_t &config) {
+    {
+      std::lock_guard<std::mutex> lock(capture_sources_mutex);
+      if (sources.none()) {
+        refresh_capture_sources_locked();
+      }
+    }
 #ifdef SUNSHINE_BUILD_CUDA
     if (sources[source::NVFBC] && hwdevice_type == mem_type_e::cuda) {
       BOOST_LOG(info) << "Screencasting with NvFBC"sv;
@@ -1027,6 +1198,78 @@ namespace platf {
     return nullptr;
   }
 
+  namespace {
+    void
+    refresh_capture_sources_locked() {
+      detect_window_system_locked();
+      sources.reset();
+
+#ifdef SUNSHINE_BUILD_CUDA
+      if ((config::video.capture.empty() && sources.none()) || config::video.capture == "nvfbc") {
+        if (verify_nvfbc()) {
+          sources[source::NVFBC] = true;
+        }
+      }
+#endif
+#ifdef SUNSHINE_BUILD_WAYLAND
+      if ((config::video.capture.empty() && sources.none()) || config::video.capture == "wlr") {
+        if (verify_wl()) {
+          sources[source::WAYLAND] = true;
+        }
+      }
+#endif
+#ifdef SUNSHINE_BUILD_DRM
+      if ((config::video.capture.empty() && sources.none()) || config::video.capture == "kms") {
+        if (verify_kms()) {
+          sources[source::KMS] = true;
+        }
+      }
+#endif
+#ifdef SUNSHINE_BUILD_X11
+      // We enumerate this capture backend regardless of other suitable sources,
+      // since it may be needed as a NvFBC fallback for software encoding on X11.
+      if (config::video.capture.empty() || config::video.capture == "x11") {
+        if (verify_x11()) {
+          sources[source::X11] = true;
+        }
+      }
+#endif
+    }
+  }  // namespace
+
+  bool
+  ensure_linux_virtual_display_ready(bool force_wake) {
+    std::lock_guard<std::mutex> lock(capture_sources_mutex);
+
+    const bool virtual_display_enabled =
+      force_wake || config::video.virtual_display || read_virtual_display_from_config_file();
+
+    bool woke = false;
+    if (virtual_display_enabled) {
+      woke = wake_x11_dpms_if_blanked();
+    }
+
+    const bool wants_kms = config::video.capture.empty() || config::video.capture == "kms";
+    if (woke || sources.none() || (wants_kms && !sources[source::KMS])) {
+      const int max_attempts = woke ? 15 : 1;
+      for (int attempt = 0; attempt < max_attempts; ++attempt) {
+        if (attempt > 0) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        refresh_capture_sources_locked();
+        if (sources[source::KMS] || (!wants_kms && sources.any())) {
+          break;
+        }
+      }
+      if (woke) {
+        BOOST_LOG(info) << "Linux virtual display wake finished: kms="sv << sources[source::KMS]
+                        << ", x11="sv << sources[source::X11];
+      }
+    }
+
+    return sources.any();
+  }
+
   std::unique_ptr<deinit_t>
   init() {
     // enable low latency mode for AMD
@@ -1036,60 +1279,22 @@ namespace platf {
     // These are allowed to fail.
     gbm::init();
 
-    window_system = window_system_e::NONE;
-#ifdef SUNSHINE_BUILD_WAYLAND
-    if (std::getenv("WAYLAND_DISPLAY")) {
-      window_system = window_system_e::WAYLAND;
-    }
-#endif
-#if defined(SUNSHINE_BUILD_X11) || defined(SUNSHINE_BUILD_CUDA)
-    if (std::getenv("DISPLAY") && window_system != window_system_e::WAYLAND) {
-      if (std::getenv("WAYLAND_DISPLAY")) {
-        BOOST_LOG(warning) << "Wayland detected, yet sunshine will use X11 for screencasting, screencasting will only work on XWayland applications"sv;
-      }
-
-      window_system = window_system_e::X11;
-    }
-#endif
-
-#ifdef SUNSHINE_BUILD_CUDA
-    if ((config::video.capture.empty() && sources.none()) || config::video.capture == "nvfbc") {
-      if (verify_nvfbc()) {
-        sources[source::NVFBC] = true;
-      }
-    }
-#endif
-#ifdef SUNSHINE_BUILD_WAYLAND
-    if ((config::video.capture.empty() && sources.none()) || config::video.capture == "wlr") {
-      if (verify_wl()) {
-        sources[source::WAYLAND] = true;
-      }
-    }
-#endif
-#ifdef SUNSHINE_BUILD_DRM
-    if ((config::video.capture.empty() && sources.none()) || config::video.capture == "kms") {
-      if (verify_kms()) {
-        sources[source::KMS] = true;
-      }
-    }
-#endif
-#ifdef SUNSHINE_BUILD_X11
-    // We enumerate this capture backend regardless of other suitable sources,
-    // since it may be needed as a NvFBC fallback for software encoding on X11.
-    if (config::video.capture.empty() || config::video.capture == "x11") {
-      if (verify_x11()) {
-        sources[source::X11] = true;
-      }
-    }
-#endif
-
-    if (sources.none()) {
-      BOOST_LOG(error) << "Unable to initialize capture method"sv;
-      return nullptr;
+    {
+      std::lock_guard<std::mutex> lock(capture_sources_mutex);
+      refresh_capture_sources_locked();
     }
 
     if (!gladLoaderLoadEGL(EGL_NO_DISPLAY) || !eglGetPlatformDisplay) {
       BOOST_LOG(warning) << "Couldn't load EGL library"sv;
+    }
+
+    if (sources.none()) {
+      if (window_system != window_system_e::NONE) {
+        BOOST_LOG(warning) << "No active capture display found at startup (display may be blanked/DPMS off); will re-probe when a stream starts"sv;
+        return std::make_unique<deinit_t>();
+      }
+      BOOST_LOG(error) << "Unable to initialize capture method"sv;
+      return nullptr;
     }
 
     return std::make_unique<deinit_t>();

@@ -1,9 +1,11 @@
 #pragma once
 
+#include <QElapsedTimer>
 #include <QObject>
 #include <QPointer>
 #include <QProcess>
 #include <QRect>
+#include <QTimer>
 #include <QVariantList>
 #include <QWindow>
 
@@ -32,6 +34,8 @@ public:
 
     Q_INVOKABLE void bindHostWindow(QWindow* hostWindow);
     Q_INVOKABLE void updateViewport(qreal logicalX, qreal logicalY, qreal logicalW, qreal logicalH);
+    Q_INVOKABLE void forceSyncViewport();
+    Q_INVOKABLE void setHostSizeMoveActive(bool active);
     Q_INVOKABLE void openCenterTab(const QString& deviceId, const QString& deviceName);
     Q_INVOKABLE void activateTab(const QString& tabId);
     Q_INVOKABLE void closeTab(const QString& tabId);
@@ -67,6 +71,7 @@ private:
 
     int indexOfTab(const QString& tabId) const;
     QRect nativeViewportRect() const;
+    void flushViewportResize(bool force);
     void sendCommand(TabEntry& tab, const QByteArray& cmd);
     void applyNativeHide(quintptr childWinId);
     void handleChildLine(const QString& tabId, const QByteArray& line);
@@ -79,6 +84,10 @@ private:
     qreal m_LogicalW = 1280;
     qreal m_LogicalH = 600;
     QRect m_LastSentNativeRect;
+    QTimer m_ResizeCoalesceTimer;
+    QTimer m_MoveCoalesceTimer;
+    QElapsedTimer m_LastResizeSent;
+    bool m_HostSizeMoveActive = false;
     bool m_FullscreenStream = false;
     int m_NextTabSeq = 1;
 };

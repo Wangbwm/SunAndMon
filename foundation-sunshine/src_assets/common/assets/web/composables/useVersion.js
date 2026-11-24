@@ -100,6 +100,13 @@ export function useVersion() {
         buildInfo.value = null
       }
       
+      // Managed SunAndMon host builds receive updates through SunAndMon itself,
+      // not upstream Foundation Sunshine releases.
+      if (toBoolean(config?.sunandmon_managed)) {
+        versionCheckStatus.value = VERSION_CHECK_STATUS.READY
+        return
+      }
+
       // 稳定版检查始终执行，预发布列表仅在用户订阅时请求
       const latestData = await fetchGitHub(`${GITHUB_API_BASE}/latest`)
       githubVersion.value = new SunshineVersion(latestData, null)

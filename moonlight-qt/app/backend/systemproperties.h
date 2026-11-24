@@ -29,6 +29,7 @@ public:
     Q_PROPERTY(bool usesMaterial3Theme MEMBER usesMaterial3Theme CONSTANT)
     Q_PROPERTY(bool usesFluentTheme MEMBER usesFluentTheme CONSTANT)
     Q_PROPERTY(QString versionString MEMBER versionString CONSTANT)
+    Q_PROPERTY(bool isSunAndMon MEMBER isSunAndMon CONSTANT)
     Q_PROPERTY(bool usbForwardingAvailable MEMBER usbForwardingAvailable CONSTANT)
 
     // Properties queried asynchronously (startAsyncLoad() must be called!)
@@ -44,6 +45,7 @@ public:
     Q_INVOKABLE int getRefreshRate(int displayIndex);
     Q_INVOKABLE bool isVideoEnhancementCapable();
     Q_INVOKABLE bool isVideoEnhancementExperimental();
+    Q_INVOKABLE bool isHidHideInstalled() const;
 
     Q_INVOKABLE void startAsyncLoad();
     Q_INVOKABLE void waitForAsyncLoad();
@@ -73,6 +75,7 @@ private:
     bool hasDiscordIntegration;
     bool hasPhysicalDualSenseHaptics;
     QString versionString;
+    bool isSunAndMon = false;
     bool usesMaterial3Theme;
     bool usesFluentTheme;
     bool isDarwin;

@@ -17,6 +17,7 @@ class WindowsWindowChrome : public QObject, public QAbstractNativeEventFilter
     Q_PROPERTY(QWindow* window READ window WRITE setWindow NOTIFY windowChanged)
     Q_PROPERTY(QQuickItem* titleBar READ titleBar WRITE setTitleBar NOTIFY titleBarChanged)
     Q_PROPERTY(bool maximized READ isMaximized NOTIFY maximizedChanged)
+    Q_PROPERTY(bool inSizeMove READ isInSizeMove NOTIFY inSizeMoveChanged)
     Q_PROPERTY(bool minimizeToTray MEMBER m_MinimizeToTray)
 
 public:
@@ -36,12 +37,14 @@ public:
     void setTitleBar(QQuickItem* titleBar);
 
     bool isMaximized() const;
+    bool isInSizeMove() const { return m_InSizeMove; }
 
     Q_INVOKABLE void activate();
     Q_INVOKABLE void minimize();
     Q_INVOKABLE void toggleMaximized();
     Q_INVOKABLE void close();
     Q_INVOKABLE bool hideToTray();
+    Q_INVOKABLE void bringToFront();
     Q_INVOKABLE bool clientAreaAnimationsEnabled() const;
 
     bool nativeEventFilter(const QByteArray& eventType, void* message, NativeEventResult* result) override;
@@ -50,6 +53,7 @@ signals:
     void windowChanged();
     void titleBarChanged();
     void maximizedChanged();
+    void inSizeMoveChanged();
     void exitRequested();
 
 private:
@@ -57,14 +61,17 @@ private:
     void logWindowState(const QString& action, const char* phase) const;
     void scheduleNativeStateUpdate();
     void restoreFromTray();
+    void showNativeTrayMenu();
 
     QPointer<QWindow> m_Window;
     QPointer<QQuickItem> m_TitleBar;
     WId m_WindowId = 0;
     bool m_Installed = false;
     bool m_Maximized = false;
+    bool m_InSizeMove = false;
     bool m_StateUpdatePending = false;
     bool m_MinimizeToTray = false;
+    bool m_TrayMenuOpen = false;
     QWindow::Visibility m_TrayRestoreVisibility = QWindow::Windowed;
     std::unique_ptr<QMenu> m_TrayMenu;
     std::unique_ptr<QSystemTrayIcon> m_TrayIcon;

@@ -857,6 +857,26 @@ int main(int argc, char *argv[])
                 : CenterClient::configureWindowsBootHost(mode == "--sunandmon-configure-center-boot-host");
         }
     }
+
+    // When launched without arguments (e.g. double-clicking the desktop shortcut)
+    // while a primary SunAndMon window is already running (such as hidden in the
+    // system tray), wake the primary window instead of opening a secondary window.
+    if (argc == 1 &&
+        !QFile::exists(QDir(startupApplicationDir).filePath("portable.dat")) &&
+        !qEnvironmentVariableIsSet("SUNANDMON_ALLOW_MULTI_INSTANCE")) {
+        HANDLE primaryMutex = OpenMutexW(SYNCHRONIZE, FALSE, L"Local\\SunAndMon.PrimaryInstance");
+        if (primaryMutex != nullptr) {
+            HANDLE activateEvent = OpenEventW(EVENT_MODIFY_STATE, FALSE, L"Local\\SunAndMon.ActivatePrimary");
+            if (activateEvent != nullptr) {
+                AllowSetForegroundWindow(ASFW_ANY);
+                SetEvent(activateEvent);
+                CloseHandle(activateEvent);
+                CloseHandle(primaryMutex);
+                return 0;
+            }
+            CloseHandle(primaryMutex);
+        }
+    }
 #endif
 
     // Override the default QML cache directory with the one we chose

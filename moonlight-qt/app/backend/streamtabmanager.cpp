@@ -14,6 +14,24 @@
 StreamTabManager::StreamTabManager(QObject* parent)
     : QObject(parent)
 {
+    m_ResizeCoalesceTimer.setSingleShot(true);
+    m_ResizeCoalesceTimer.setInterval(45);
+    connect(&m_ResizeCoalesceTimer, &QTimer::timeout, this, [this]() {
+        if (!m_HostSizeMoveActive) {
+            flushViewportResize(false);
+        }
+    });
+    m_MoveCoalesceTimer.setSingleShot(true);
+    m_MoveCoalesceTimer.setInterval(60);
+    connect(&m_MoveCoalesceTimer, &QTimer::timeout, this, [this]() {
+        if (m_HostSizeMoveActive) {
+            return;
+        }
+        const int idx = indexOfTab(m_ActiveTabId);
+        if (idx >= 0 && m_Tabs[idx].embedded && m_Tabs[idx].embeddedReady) {
+            sendCommand(m_Tabs[idx], QByteArrayLiteral("SYNC_OVERLAY\n"));
+        }
+    });
     connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit,
             this, &StreamTabManager::closeAllTabs);
 }
@@ -117,18 +135,14 @@ QRect StreamTabManager::nativeViewportRect() const
     return QRect(x, y, w, h);
 }
 
-void StreamTabManager::updateViewport(qreal logicalX, qreal logicalY, qreal logicalW, qreal logicalH)
+void StreamTabManager::flushViewportResize(bool force)
 {
-    m_LogicalX = logicalX;
-    m_LogicalY = logicalY;
-    m_LogicalW = logicalW;
-    m_LogicalH = logicalH;
-
     const QRect nr = nativeViewportRect();
-    if (nr == m_LastSentNativeRect) {
+    if (!force && nr == m_LastSentNativeRect) {
         return;
     }
     m_LastSentNativeRect = nr;
+    m_LastResizeSent.restart();
 
     const QByteArray cmd = QByteArray("RESIZE ")
         + QByteArray::number(nr.x()) + " "
@@ -142,6 +156,57 @@ void StreamTabManager::updateViewport(qreal logicalX, qreal logicalY, qreal logi
         if (tab.embedded && tab.embeddedReady) {
             sendCommand(tab, cmd);
         }
+    }
+}
+
+void StreamTabManager::updateViewport(qreal logicalX, qreal logicalY, qreal logicalW, qreal logicalH)
+{
+    m_LogicalX = logicalX;
+    m_LogicalY = logicalY;
+    m_LogicalW = logicalW;
+    m_LogicalH = logicalH;
+
+    // On Windows, sending RESIZE to a cross-process WS_CHILD HWND while the parent
+    // thread is inside Win32's modal WM_ENTERSIZEMOVE drag loop can trigger an AB-BA
+    // deadlock between DefWindowProc and the child's SetWindowPos/SDL_SetWindowSize.
+    // Defer cross-process geometry sync until WM_EXITSIZEMOVE completes.
+    if (m_HostSizeMoveActive) {
+        return;
+    }
+
+    if (!m_LastResizeSent.isValid() || m_LastResizeSent.elapsed() >= 45) {
+        flushViewportResize(false);
+    }
+    m_ResizeCoalesceTimer.start();
+}
+
+void StreamTabManager::forceSyncViewport()
+{
+    if (m_HostSizeMoveActive) {
+        return;
+    }
+    m_ResizeCoalesceTimer.stop();
+    flushViewportResize(true);
+}
+
+void StreamTabManager::setHostSizeMoveActive(bool active)
+{
+    if (m_HostSizeMoveActive == active) {
+        return;
+    }
+    m_HostSizeMoveActive = active;
+    if (active) {
+        m_ResizeCoalesceTimer.stop();
+        m_MoveCoalesceTimer.stop();
+        return;
+    }
+
+    // Drag/move modal loop finished: apply the settled viewport geometry and
+    // overlay positions once cleanly.
+    flushViewportResize(false);
+    const int idx = indexOfTab(m_ActiveTabId);
+    if (idx >= 0 && m_Tabs[idx].embedded && m_Tabs[idx].embeddedReady) {
+        sendCommand(m_Tabs[idx], QByteArrayLiteral("SYNC_OVERLAY\n"));
     }
 }
 
@@ -541,14 +606,17 @@ void StreamTabManager::toggleActiveMenu()
 
 void StreamTabManager::notifyHostWindowMoved()
 {
-    const int idx = indexOfTab(m_ActiveTabId);
-    if (idx >= 0 && m_Tabs[idx].embedded && m_Tabs[idx].embeddedReady) {
-        sendCommand(m_Tabs[idx], QByteArrayLiteral("SYNC_OVERLAY\n"));
+    if (m_HostSizeMoveActive) {
+        return;
     }
+    m_MoveCoalesceTimer.start();
 }
 
 void StreamTabManager::notifyHostWindowFocusChanged(bool active)
 {
+    if (m_HostSizeMoveActive) {
+        return;
+    }
     const QString tabId = m_ActiveTabId;
     if (tabId.isEmpty()) {
         return;

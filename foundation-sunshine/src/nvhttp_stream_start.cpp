@@ -818,6 +818,9 @@ namespace nvhttp::stream_start {
     pt::ptree &tree,
     rtsp_stream::launch_session_t &launch_session,
     bool is_reconfigure) {
+#ifdef __linux__
+    platf::ensure_linux_virtual_display_ready(launch_session.use_vdd);
+#endif
     if (!launch_session.privacy_screen) {
       platf::set_privacy_curtain(false);
       return prepare_display_and_probe_encoders_inner(tree, launch_session, is_reconfigure);

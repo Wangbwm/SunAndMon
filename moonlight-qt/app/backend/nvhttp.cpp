@@ -239,7 +239,7 @@ NvHTTP::startApp(QString verb,
                  int screenCombinationMode,
                  const std::optional<bool>& useVdd,
                  const QString& displayName,
-                 RemoteStreamConfig &remoteStreamConfig, bool reconfigure, bool privacyScreen)
+                 RemoteStreamConfig &remoteStreamConfig, bool reconfigure, bool privacyScreen, bool hidHideAutoCloak)
 {
     int riKeyId;
 
@@ -298,6 +298,9 @@ NvHTTP::startApp(QString verb,
     }
     if (privacyScreen) {
         query += "&sunandmonPrivacyScreen=1";
+    }
+    if (hidHideAutoCloak) {
+        query += "&sunandmonHidHide=1";
     }
     if (screenCombinationMode != -1) {
         query += "&customScreenMode="+QString::number(screenCombinationMode);

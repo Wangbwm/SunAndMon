@@ -1436,11 +1436,15 @@ bool D3D11VARenderer::notifyWindowChanged(PWINDOW_STATE_CHANGE_INFO stateInfo)
     }
 
     if (stateInfo->stateChangeFlags & WINDOW_STATE_CHANGE_SIZE) {
+        if (stateInfo->width <= 0 || stateInfo->height <= 0) {
+            stateInfo->stateChangeFlags &= ~WINDOW_STATE_CHANGE_SIZE;
+            return stateInfo->stateChangeFlags == 0;
+        }
+
         // Enhancement resources (AMF scaler, VP rectangles and output textures)
         // are sized during initialization. Let Session recreate them together,
         // rather than resizing only the swapchain and stretching stale output.
-        if (m_VideoEnhancement->isVideoEnhancementEnabled() && stateInfo->width > 0 &&
-            stateInfo->height > 0 &&
+        if (m_VideoEnhancement->isVideoEnhancementEnabled() &&
             (stateInfo->width != m_DisplayWidth || stateInfo->height != m_DisplayHeight)) {
             return false;
         }
@@ -1472,7 +1476,9 @@ bool D3D11VARenderer::notifyWindowChanged(PWINDOW_STATE_CHANGE_INFO stateInfo)
         }
         SDL_AtomicUnlock(&m_OverlayLock);
 
-        // We must release all references to the back buffer
+        // Unbind render targets and release all references to the back buffer
+        // before ResizeBuffers() (required on strict DXGI drivers like AMD).
+        m_RenderDeviceContext->OMSetRenderTargets(0, nullptr, nullptr);
         m_RenderTargetView.Reset();
         m_RenderDeviceContext->Flush();
 

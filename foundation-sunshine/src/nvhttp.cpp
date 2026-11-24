@@ -193,6 +193,7 @@ namespace nvhttp {
 
     launch_session->host_audio = host_audio;
     launch_session->privacy_screen = get_arg(args, "sunandmonPrivacyScreen", "0") == "1";
+    launch_session->hidhide_auto_cloak = (get_arg(args, "sunandmonHidHide", "0") == "1") || config::input.hidhide_auto_cloak;
     if (launch_session->privacy_screen) {
       launch_session->host_audio = false;
     }
@@ -785,6 +786,9 @@ namespace nvhttp {
 
 #ifdef _WIN32
     launch_session->touch_keyboard_lease = touch_kb::acquire(touch_keyboard_intent);
+    if (launch_session->hidhide_auto_cloak) {
+      launch_session->hidhide_lease = platf::acquire_hidhide_cloak_lease();
+    }
     if (display_device::resolve_display_intent(config::video, *launch_session).target ==
         display_device::display_intent_t::target_e::vdd) {
       launch_session->nvidia_vsync_lease = nvprefs_instance.acquire_vsync();
@@ -1019,6 +1023,9 @@ namespace nvhttp {
 
 #ifdef _WIN32
     launch_session->touch_keyboard_lease = touch_kb::acquire(touch_keyboard_intent);
+    if (launch_session->hidhide_auto_cloak) {
+      launch_session->hidhide_lease = platf::acquire_hidhide_cloak_lease();
+    }
     if (display_device::resolve_display_intent(config::video, *launch_session).target ==
         display_device::display_intent_t::target_e::vdd) {
       launch_session->nvidia_vsync_lease = nvprefs_instance.acquire_vsync();

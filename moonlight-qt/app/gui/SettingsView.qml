@@ -54,7 +54,7 @@ FocusScope {
     // 没有的平台连分类一起隐藏，避免出现空页。
     readonly property var categories: rawCategories.filter(
         function(c) {
-            return (!Theme.modern || (c.key !== "ecosystem" && c.key !== "about"))
+            return (!Theme.modern || (c.key !== "ecosystem" && (c.key !== "about" || SystemProperties.isSunAndMon)))
                 && (c.key !== "peripherals" || SystemProperties.usbForwardingAvailable)
         })
 
@@ -126,6 +126,8 @@ FocusScope {
         walk(legacyPage, "")
         if (!Theme.modern) {
             walk(ecosystemPage, "ecosystem")
+        }
+        if (!Theme.modern || SystemProperties.isSunAndMon) {
             walk(aboutPage, "about")
         }
         walk(peripheralsPage, "peripherals")
@@ -437,6 +439,11 @@ FocusScope {
                     category: settingsPage.category
 
                     onLanguageChanged: settingsPage.languageChanged()
+                    onAboutRequested: {
+                        settingsPage.category = "about"
+                        rail.focusCurrent()
+                        scrollArea.contentY = 0
+                    }
                 }
 
                 EcosystemSettingsPage {
@@ -456,7 +463,7 @@ FocusScope {
                     id: aboutPage
                     y: pageHeading.height + basicPage.height + displayPage.height + legacyPage.height + ecosystemPage.height
                     width: parent.width
-                    visible: !Theme.modern && settingsPage.category === "about"
+                    visible: (!Theme.modern || SystemProperties.isSunAndMon) && settingsPage.category === "about"
                     height: visible ? implicitHeight : 0
                     onScrollToEndRequested: scrollArea.scrollToEnd()
                 }

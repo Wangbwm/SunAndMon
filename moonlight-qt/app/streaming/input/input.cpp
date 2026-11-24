@@ -297,8 +297,16 @@ SdlInputHandler::SdlInputHandler(StreamingPreferences& prefs, int streamWidth, i
         SDL_SetHint(SDL_HINT_MOUSE_AUTO_CAPTURE, "0");
     }
 
-    // Allow gamepad input when the app doesn't have focus if requested
-    SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, prefs.backgroundGamepad ? "1" : "0");
+    // Allow gamepad input when the app doesn't have focus if requested.
+    // In embedded tab mode (WS_CHILD / XReparentWindow), the SDL child window
+    // never receives WM_ACTIVATE / SDL_WINDOW_INPUT_FOCUS from SDL3 because
+    // the parent Qt process owns the top-level foreground window. Always enable
+    // background joystick events in SDL for embedded sessions and gate active
+    // gamepad input in Session::exec() via isStreamingWindowFocused().
+    const bool allowSdlBackgroundGamepad =
+        prefs.backgroundGamepad || Session::embedParentWindowId() != 0;
+    SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS,
+                allowSdlBackgroundGamepad ? "1" : "0");
 
 #if !SDL_VERSION_ATLEAST(2, 0, 15)
     // For older versions of SDL (2.0.14 and earlier), use SDL_HINT_GRAB_KEYBOARD

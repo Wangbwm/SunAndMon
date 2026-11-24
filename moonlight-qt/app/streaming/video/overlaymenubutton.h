@@ -99,8 +99,14 @@ private:
 #endif
 
     enum class InputSource { None, Mouse, Touch };
+    enum class DockEdge { Top, Bottom, Left, Right };
 
     QSize buttonSize() const;
+    QSize idleSizeForEdge(DockEdge edge) const;
+    QSize expandedSizeForEdge(DockEdge edge) const;
+    QString controlCenterLabel() const;
+    DockEdge detectDockEdge(const QPoint& pos, const QSize& sz) const;
+    void updateAnchoredGeometry(bool expanded);
     QPoint clampToParent(const QPoint& position) const;
     void beginInteraction(InputSource source, const QPoint& globalPosition);
     void updateInteraction(const QPoint& globalPosition);
@@ -120,6 +126,7 @@ private:
     OverlayEventWakeState m_EventWakeState;
     bool m_Hovered;
     bool m_Compact = true;
+    DockEdge m_DockEdge = DockEdge::Top;
     std::atomic_bool m_ButtonVisible;
     bool m_Dragging;
     InputSource m_InputSource;
@@ -139,7 +146,10 @@ private:
     std::unique_ptr<LinuxDisplayEventMonitor> m_NativeEventMonitor;
 #endif
 
-    // Button size (logical pixels)
-    static constexpr int kButtonSize = 36;
-    static constexpr int kMargin = 10;  // margin from window edge
+    // Edge-docked notch / glass capsule dimensions (logical pixels)
+    static constexpr int kIdleLength = 78;
+    static constexpr int kIdleThickness = 14;
+    static constexpr int kSideIdleHeight = 32;
+    static constexpr int kExpandedHeight = 30;
+    static constexpr int kMargin = 0;  // flush against screen edge
 };

@@ -42,6 +42,11 @@ void SdlGamepadKeyNavigation::enable()
         return;
     }
 
+    // Qt owns the UI window rather than SDL, so SDL3 never sees an SDL_Window
+    // with keyboard focus. Enable background joystick events while GUI gamepad
+    // navigation is enabled; polling itself is strictly gated by m_HasFocus.
+    SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+
     // We have to initialize and uninitialize this in enable()/disable()
     // because we need to get out of the way of the Session class. If it
     // doesn't get to reinitialize the GC subsystem, it won't get initial
@@ -49,6 +54,7 @@ void SdlGamepadKeyNavigation::enable()
     // our QML objects being destroyed and SDL being deinitialized that
     // this solves too.
     if (SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) != 0) {
+        SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "0");
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                      "SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) failed: %s",
                      SDL_GetError());
@@ -103,6 +109,7 @@ void SdlGamepadKeyNavigation::disable()
     }
 
     SDL_QuitSubSystem(SDL_INIT_GAMECONTROLLER);
+    SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "0");
 }
 
 void SdlGamepadKeyNavigation::notifyWindowFocus(bool hasFocus)
@@ -505,7 +512,9 @@ bool SdlGamepadKeyNavigation::uiNavModeActive() const
 
 int SdlGamepadKeyNavigation::getConnectedGamepads()
 {
-    Q_ASSERT(m_Enabled);
+    if (!m_Enabled) {
+        return 0;
+    }
 
     int count = 0;
     int numJoysticks = SDL_NumJoysticks();

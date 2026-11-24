@@ -5,18 +5,103 @@
 #include <QCryptographicHash>
 #include <QDateTime>
 #include <QDir>
-#include <QFile>
 #include <QEventLoop>
+#include <QFile>
 #include <QFileInfo>
+#include <QNetworkProxy>
+#include <QNetworkProxyFactory>
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QProcess>
 #include <QRegularExpression>
-#include <QTemporaryFile>
 #include <QStandardPaths>
 #include <QStorageInfo>
+#include <QTemporaryFile>
 #include <QTimer>
 #include <QUrl>
+
+#ifdef Q_OS_WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <Windows.h>
+#include <shellapi.h>
+#include <vector>
+#endif
+
+namespace {
+
+class SystemDownloadProxyFactory : public QNetworkProxyFactory
+{
+public:
+    QList<QNetworkProxy> queryProxy(const QNetworkProxyQuery& query = QNetworkProxyQuery()) override
+    {
+        const QList<QNetworkProxy> proxies = QNetworkProxyFactory::systemProxyForQuery(query);
+        if (!proxies.isEmpty()) {
+            return proxies;
+        }
+        return {QNetworkProxy(QNetworkProxy::NoProxy)};
+    }
+};
+
+#ifdef Q_OS_WIN32
+QString quoteWindowsArg(const QString& arg)
+{
+    if (!arg.isEmpty() && !arg.contains(QLatin1Char(' ')) &&
+            !arg.contains(QLatin1Char('\t')) && !arg.contains(QLatin1Char('"'))) {
+        return arg;
+    }
+
+    QString out;
+    out.append(QLatin1Char('"'));
+    int backslashes = 0;
+    for (QChar ch : arg) {
+        if (ch == QLatin1Char('\\')) {
+            backslashes++;
+        }
+        else if (ch == QLatin1Char('"')) {
+            out.append(QString(backslashes * 2 + 1, QLatin1Char('\\')));
+            out.append(QLatin1Char('"'));
+            backslashes = 0;
+        }
+        else {
+            if (backslashes > 0) {
+                out.append(QString(backslashes, QLatin1Char('\\')));
+                backslashes = 0;
+            }
+            out.append(ch);
+        }
+    }
+    if (backslashes > 0) {
+        out.append(QString(backslashes * 2, QLatin1Char('\\')));
+    }
+    out.append(QLatin1Char('"'));
+    return out;
+}
+
+QString joinWindowsArgs(const QStringList& args)
+{
+    QStringList quoted;
+    quoted.reserve(args.size());
+    for (const QString& arg : args) {
+        quoted.append(quoteWindowsArg(arg));
+    }
+    return quoted.join(QLatin1Char(' '));
+}
+
+QString extractFirstCommandToken(QString cmd)
+{
+    cmd = cmd.trimmed();
+    if (cmd.startsWith(QLatin1Char('"'))) {
+        const int endQuote = cmd.indexOf(QLatin1Char('"'), 1);
+        if (endQuote > 1) {
+            return cmd.mid(1, endQuote - 1);
+        }
+    }
+    const int space = cmd.indexOf(QLatin1Char(' '));
+    return space > 0 ? cmd.left(space) : cmd;
+}
+#endif
+
+} // namespace
 
 PortableUpdateInstaller::PortableUpdateInstaller(QObject *parent) :
     QObject(parent),
@@ -30,11 +115,12 @@ PortableUpdateInstaller::PortableUpdateInstaller(QObject *parent) :
 bool PortableUpdateInstaller::supportsInAppUpdate() const
 {
 #if defined(Q_OS_WIN32)
-    return isPortableInstall() &&
-            !getPortableUpdaterExecutable().isEmpty();
+#ifdef SUNANDMON_APP
+    return !getPortableUpdaterExecutable().isEmpty();
+#else
+    return isPortableInstall() && !getPortableUpdaterExecutable().isEmpty();
+#endif
 #elif defined(Q_OS_DARWIN)
-    // 条件就两个：从 .app 里运行，而且那个 bundle 所在的目录可写。装在 root 拥有的
-    // 目录里、或者直接从 DMG 的只读卷上跑的时候退回浏览器下载。
     QString errorMessage;
     return isBundleInstall() &&
             !getPortableUpdaterExecutable().isEmpty() &&
@@ -85,11 +171,13 @@ void PortableUpdateInstaller::installUpdate(const QString& url, const QString& e
     }
 #endif
 
+#if !defined(SUNANDMON_APP) || !defined(Q_OS_WIN32)
     QString errorMessage;
     if (!ensureWritableInstallDir(errorMessage)) {
         emit onPortableUpdateFailed(errorMessage);
         return;
     }
+#endif
 
     QString workspace = createPortableUpdateWorkspace();
     if (workspace.isEmpty()) {
@@ -105,6 +193,7 @@ void PortableUpdateInstaller::installUpdate(const QString& url, const QString& e
 
     if (m_UpdateNam == nullptr) {
         m_UpdateNam = new QNetworkAccessManager(this);
+        m_UpdateNam->setProxyFactory(new SystemDownloadProxyFactory());
         m_UpdateNam->setStrictTransportSecurityEnabled(true);
         m_UpdateNam->setRedirectPolicy(QNetworkRequest::NoLessSafeRedirectPolicy);
     }
@@ -119,10 +208,14 @@ void PortableUpdateInstaller::installUpdate(const QString& url, const QString& e
     }
 
     QNetworkRequest request(downloadUrl);
+#ifdef SUNANDMON_APP
     request.setHeader(QNetworkRequest::UserAgentHeader,
-                      QString("Moonlight/%1").arg(VERSION_STR));
+                      QStringLiteral("SunAndMon/%1").arg(QStringLiteral(VERSION_STR)));
+#else
+    request.setHeader(QNetworkRequest::UserAgentHeader,
+                      QStringLiteral("Moonlight/%1").arg(QStringLiteral(VERSION_STR)));
+#endif
     request.setRawHeader("Accept", "application/octet-stream");
-
 #if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
     request.setAttribute(QNetworkRequest::Http2AllowedAttribute, true);
 #else
@@ -142,6 +235,77 @@ void PortableUpdateInstaller::installUpdate(const QString& url, const QString& e
     emit onPortableUpdateStatusChanged(tr("Downloading update..."));
 }
 
+void PortableUpdateInstaller::installLocalArchive(const QString& localZipPath, const QString& expectedDigest)
+{
+    if (!supportsInAppUpdate()) {
+        emit onPortableUpdateFailed(tr("In-app update is not supported for this installation."));
+        return;
+    }
+
+    if (m_UpdateReply != nullptr) {
+        emit onPortableUpdateStatusChanged(tr("An update is already in progress."));
+        return;
+    }
+
+    QFileInfo sourceInfo(localZipPath);
+    if (!sourceInfo.exists() || !sourceInfo.isFile() ||
+            !sourceInfo.fileName().endsWith(getUpdateArchiveSuffix(), Qt::CaseInsensitive)) {
+        emit onPortableUpdateFailed(tr("Please select a valid .zip update archive."));
+        return;
+    }
+
+    QString normalizedDigest = expectedDigest.trimmed();
+    if (normalizedDigest.startsWith(QStringLiteral("sha256:"), Qt::CaseInsensitive)) {
+        normalizedDigest.remove(0, 7);
+    }
+    static const QRegularExpression sha256Pattern(QStringLiteral("^[0-9a-fA-F]{64}$"));
+    if (!normalizedDigest.isEmpty() && !sha256Pattern.match(normalizedDigest).hasMatch()) {
+        emit onPortableUpdateFailed(tr("The update package has invalid integrity information."));
+        return;
+    }
+
+    QString spaceError;
+    if (!ensureSufficientDiskSpace(estimateRequiredWorkspaceBytes(sourceInfo.size()), spaceError)) {
+        emit onPortableUpdateFailed(spaceError);
+        return;
+    }
+
+    QString workspace = createPortableUpdateWorkspace();
+    if (workspace.isEmpty()) {
+        emit onPortableUpdateFailed(tr("Unable to create a temporary folder for the update."));
+        return;
+    }
+
+    resetPortableUpdateState(true);
+    m_PortableUpdateWorkspace = workspace;
+    m_PortableUpdateError.clear();
+    m_ExpectedSha256 = normalizedDigest.toLatin1().toLower();
+
+    emit onPortableUpdateStatusChanged(tr("Preparing local update archive..."));
+
+    QString stagedArchive = QDir(workspace).filePath(getUpdateArchiveName());
+    if (!QFile::copy(sourceInfo.absoluteFilePath(), stagedArchive)) {
+        resetPortableUpdateState(true);
+        emit onPortableUpdateFailed(tr("Unable to copy the selected update archive to workspace."));
+        return;
+    }
+
+    emit onPortableUpdateStatusChanged(tr("Verifying update..."));
+    QString verificationError;
+    if (!verifyUpdateArchive(stagedArchive, verificationError)) {
+        resetPortableUpdateState(true);
+        emit onPortableUpdateFailed(verificationError);
+        return;
+    }
+
+    QString launchError;
+    if (!launchUpdaterAndQuit(stagedArchive, launchError)) {
+        resetPortableUpdateState(true);
+        emit onPortableUpdateFailed(launchError);
+        return;
+    }
+}
+
 bool PortableUpdateInstaller::isPortableInstall() const
 {
 #if defined(Q_OS_WIN32)
@@ -159,12 +323,10 @@ bool PortableUpdateInstaller::isBundleInstall() const
 QString PortableUpdateInstaller::getInstalledBundlePath() const
 {
 #if defined(Q_OS_DARWIN)
-    // 可执行文件在 Moonlight.app/Contents/MacOS/Moonlight，往上两级就是 bundle 本身
     QDir dir(QCoreApplication::applicationDirPath());
     if (!dir.cdUp() || !dir.cdUp()) {
         return QString();
     }
-
     QString path = dir.absolutePath();
     return path.endsWith(QLatin1String(".app")) ? path : QString();
 #else
@@ -185,26 +347,38 @@ QString PortableUpdateInstaller::getUpdateArchiveName() const
 {
 #if defined(Q_OS_DARWIN)
     return QStringLiteral("MoonlightUpdate.dmg");
+#elif defined(SUNANDMON_APP)
+    return QStringLiteral("SunAndMonUpdate.zip");
 #else
     return QStringLiteral("MoonlightPortableUpdate.zip");
+#endif
+}
+
+QString PortableUpdateInstaller::getInstallRootDir() const
+{
+#if defined(Q_OS_WIN32)
+    const QString appDir = QCoreApplication::applicationDirPath();
+    return appDir.isEmpty() ? Path::getPortableRootDir() : appDir;
+#else
+    return Path::getPortableRootDir();
 #endif
 }
 
 QString PortableUpdateInstaller::getUpdateStorageProbePath() const
 {
 #if defined(Q_OS_DARWIN)
-    // 工作目录放在已安装 bundle 的旁边，不放缓存目录。
-    //
-    // 缓存目录通常和 /Applications 不在同一个卷上，那样两次 mv（备份、换新）都会退化
-    // 成 200MB 级的递归复制：慢，而且中途被打断会在目标位置留下半个 bundle。放在同一个
-    // 卷上，两次 mv 都是原子 rename。父目录的可写性 ensureWritableInstallDir() 已经
-    // 确认过，磁盘空间检查也就自然落在真正要写入的那个卷上。
     QString bundlePath = getInstalledBundlePath();
     if (!bundlePath.isEmpty()) {
         return QFileInfo(bundlePath).absolutePath();
     }
-
     return QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
+#elif defined(SUNANDMON_APP) && defined(Q_OS_WIN32)
+    QString appData = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
+    if (!appData.isEmpty()) {
+        QDir().mkpath(appData);
+        return appData;
+    }
+    return QDir::tempPath();
 #else
     return Path::getPortableRootDir();
 #endif
@@ -217,7 +391,6 @@ QString PortableUpdateInstaller::getPortableUpdaterExecutable() const
     if (!executable.isEmpty()) {
         return executable;
     }
-
     return QStandardPaths::findExecutable(QStringLiteral("pwsh.exe"));
 #elif defined(Q_OS_DARWIN)
     return QFile::exists(QStringLiteral("/bin/sh")) ? QStringLiteral("/bin/sh") : QString();
@@ -226,18 +399,66 @@ QString PortableUpdateInstaller::getPortableUpdaterExecutable() const
 #endif
 }
 
+bool PortableUpdateInstaller::isInstallDirWritable() const
+{
+#if defined(Q_OS_WIN32)
+    QTemporaryFile probeFile(QDir(getInstallRootDir()).filePath("SunAndMonUpdateWriteProbe-XXXXXX.tmp"));
+    probeFile.setAutoRemove(true);
+    if (!probeFile.open()) {
+        return false;
+    }
+    probeFile.close();
+    return true;
+#else
+    return false;
+#endif
+}
+
+bool PortableUpdateInstaller::isOwnedHostServiceRunning() const
+{
+#if defined(Q_OS_WIN32) && defined(SUNANDMON_APP)
+    SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+    if (scm == nullptr) {
+        return false;
+    }
+    SC_HANDLE svc = OpenServiceW(scm, L"SunAndMonHostService", SERVICE_QUERY_STATUS | SERVICE_QUERY_CONFIG);
+    bool ownedAndRunning = false;
+    if (svc != nullptr) {
+        SERVICE_STATUS status{};
+        if (QueryServiceStatus(svc, &status) &&
+                (status.dwCurrentState == SERVICE_RUNNING || status.dwCurrentState == SERVICE_START_PENDING)) {
+            DWORD needed = 0;
+            QueryServiceConfigW(svc, nullptr, 0, &needed);
+            if (needed > 0) {
+                std::vector<BYTE> buf(needed);
+                auto* cfg = reinterpret_cast<QUERY_SERVICE_CONFIGW*>(buf.data());
+                if (QueryServiceConfigW(svc, cfg, needed, &needed) && cfg->lpBinaryPathName != nullptr) {
+                    const QString svcBin = QDir::cleanPath(
+                        QDir::fromNativeSeparators(extractFirstCommandToken(QString::fromWCharArray(cfg->lpBinaryPathName))));
+                    QString rootPrefix = QDir::cleanPath(QDir::fromNativeSeparators(getInstallRootDir()));
+                    if (!rootPrefix.endsWith(QLatin1Char('/'))) {
+                        rootPrefix += QLatin1Char('/');
+                    }
+                    ownedAndRunning = svcBin.startsWith(rootPrefix, Qt::CaseInsensitive);
+                }
+            }
+        }
+        CloseServiceHandle(svc);
+    }
+    CloseServiceHandle(scm);
+    return ownedAndRunning;
+#else
+    return false;
+#endif
+}
+
 bool PortableUpdateInstaller::ensureWritableInstallDir(QString& errorMessage) const
 {
 #if defined(Q_OS_WIN32)
-    QTemporaryFile probeFile(QDir(Path::getPortableRootDir()).filePath("MoonlightUpdateWriteProbe-XXXXXX.tmp"));
-    probeFile.setAutoRemove(true);
-
-    if (!probeFile.open()) {
-        errorMessage = tr("The current Moonlight folder is not writable. Move Moonlight to a writable location, run it with sufficient permissions, or download and install the update manually.");
+    if (!isInstallDirWritable()) {
+        errorMessage = tr("The current installation folder is not writable. Run with sufficient permissions or install the update manually.");
         return false;
     }
-
-    probeFile.close();
     return true;
 #elif defined(Q_OS_DARWIN)
     QString bundlePath = getInstalledBundlePath();
@@ -245,20 +466,15 @@ bool PortableUpdateInstaller::ensureWritableInstallDir(QString& errorMessage) co
         errorMessage = tr("In-app update requires running Moonlight from an app bundle.");
         return false;
     }
-
-    // 换 bundle 是在它的父目录里做 mv，所以要探的是父目录的写权限，
-    // 不是 bundle 自己的。
     QFileInfo bundleInfo(bundlePath);
     QTemporaryFile probeFile(QDir(bundleInfo.absolutePath())
                              .filePath(QStringLiteral(".MoonlightUpdateWriteProbe-XXXXXX")));
     probeFile.setAutoRemove(true);
-
     if (!probeFile.open()) {
         errorMessage = tr("Moonlight is installed in a folder you can't write to. Move it to your "
                           "Applications folder, or download and install the update manually.");
         return false;
     }
-
     probeFile.close();
     return true;
 #else
@@ -270,13 +486,17 @@ bool PortableUpdateInstaller::ensureWritableInstallDir(QString& errorMessage) co
 QString PortableUpdateInstaller::createPortableUpdateWorkspace() const
 {
 #if defined(Q_OS_DARWIN)
-    // 工作目录就在 /Applications 边上，加个点前缀别让它出现在访达里
     static const QLatin1String kWorkspacePrefix(".MoonlightUpdate-");
+    QString baseDir = getUpdateStorageProbePath();
+#elif defined(SUNANDMON_APP) && defined(Q_OS_WIN32)
+    static const QLatin1String kWorkspacePrefix("hotupdate-");
+    QString baseDir = QDir(getUpdateStorageProbePath()).filePath(QStringLiteral("updates"));
 #else
     static const QLatin1String kWorkspacePrefix("MoonlightPortableUpdate-");
+    QString baseDir = getUpdateStorageProbePath();
 #endif
 
-    QString workspace = QDir(getUpdateStorageProbePath()).filePath(
+    QString workspace = QDir(baseDir).filePath(
                 kWorkspacePrefix + QString("%1-%2")
                 .arg(QCoreApplication::applicationPid())
                 .arg(QDateTime::currentMSecsSinceEpoch()));
@@ -284,7 +504,6 @@ QString PortableUpdateInstaller::createPortableUpdateWorkspace() const
     if (!QDir().mkpath(workspace)) {
         return QString();
     }
-
     return workspace;
 }
 
@@ -324,18 +543,15 @@ bool PortableUpdateInstaller::ensureSufficientDiskSpace(qint64 requiredBytes, QS
 
     QStorageInfo storage(getUpdateStorageProbePath());
     storage.refresh();
-
     if (!storage.isValid() || !storage.isReady()) {
         errorMessage = tr("Unable to determine free disk space for the update.");
         return false;
     }
-
     if (storage.bytesAvailable() < requiredBytes) {
         errorMessage = tr("Not enough free disk space for the update. Need about %1 MB free.")
                 .arg(QString::number(requiredBytes / (1024.0 * 1024.0), 'f', 0));
         return false;
     }
-
     return true;
 }
 
@@ -344,11 +560,7 @@ qint64 PortableUpdateInstaller::estimateRequiredWorkspaceBytes(qint64 archiveByt
     if (archiveBytes <= 0) {
         return 0;
     }
-
     static const qint64 kSafetyMarginBytes = 64LL * 1024 * 1024;
-
-    // 下载下来的包和解出来的一份要同时存在（Windows 是 zip + 解压目录，
-    // macOS 是 dmg + ditto 出来的 bundle），另外给替换过程留一份余量。
     return archiveBytes * 3 + kSafetyMarginBytes;
 }
 
@@ -379,7 +591,6 @@ bool PortableUpdateInstaller::verifyUpdateArchive(const QString& archivePath,
         errorMessage = tr("The downloaded update package failed its integrity check.");
         return false;
     }
-
     return true;
 }
 
@@ -398,10 +609,6 @@ bool PortableUpdateInstaller::runTool(const QString& program,
         return false;
     }
 
-    // 用局部事件循环等，而不是 waitForFinished()。hdiutil / ditto 正常也要跑几秒，
-    // 卡住的话就是分钟级 —— waitForFinished() 会把主线程连界面一起冻住，连那句
-    // 「正在校验更新…」都不会重绘。ExcludeUserInputEvents 保证重绘照做，但这期间
-    // 用户点不动东西，不会在半路触发别的操作。
     if (process.state() != QProcess::NotRunning) {
         QEventLoop loop;
         QTimer timeoutTimer;
@@ -418,20 +625,13 @@ bool PortableUpdateInstaller::runTool(const QString& program,
         loop.exec(QEventLoop::ExcludeUserInputEvents);
 
         if (timedOut) {
-            qWarning() << program << "timed out";
             process.kill();
             process.waitForFinished(5000);
             return false;
         }
     }
 
-    if (process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0) {
-        qWarning() << program << "failed with exit code" << process.exitCode()
-                   << process.readAll().trimmed();
-        return false;
-    }
-
-    return true;
+    return process.exitStatus() == QProcess::NormalExit && process.exitCode() == 0;
 }
 
 bool PortableUpdateInstaller::stageMacUpdateBundle(const QString& archivePath,
@@ -439,17 +639,12 @@ bool PortableUpdateInstaller::stageMacUpdateBundle(const QString& archivePath,
                                                    QString& errorMessage)
 {
 #if defined(Q_OS_DARWIN)
-    // 这几步是同步的，界面会卡住一两秒（ditto 一个 200MB 的 bundle）。放在这里而不是
-    // 丢给后面那个 detached 脚本，是为了让「DMG 打不开」「里面没有 Moonlight.app」
-    // 这类失败还能弹回对话框 —— 脚本是在进程退出之后才跑的，那时候没人能看到错误。
     QString mountPoint = QDir(m_PortableUpdateWorkspace).filePath(QStringLiteral("mnt"));
     if (!QDir().mkpath(mountPoint)) {
         errorMessage = tr("Unable to create a temporary folder for the update.");
         return false;
     }
 
-    // 挂到我们自己的目录下：-nobrowse 不在访达里露出来，也不会和用户手动挂载的
-    // 同名卷抢 /Volumes/Moonlight 这个位置。
     if (!runTool(QStringLiteral("/usr/bin/hdiutil"),
                  { QStringLiteral("attach"), archivePath,
                    QStringLiteral("-nobrowse"), QStringLiteral("-noautoopen"),
@@ -467,8 +662,6 @@ bool PortableUpdateInstaller::stageMacUpdateBundle(const QString& archivePath,
     if (!QFileInfo(bundleInImage).isDir()) {
         errorMessage = tr("The downloaded disk image does not contain Moonlight.");
     }
-    // 用 ditto 而不是 cp -R：它保留扩展属性、符号链接和 bundle 的元数据，
-    // 少了这些代码签名会直接失效。
     else if (!runTool(QStringLiteral("/usr/bin/ditto"), { bundleInImage, stagedBundle }, 300000)) {
         errorMessage = tr("Unable to extract the update.");
     }
@@ -476,7 +669,6 @@ bool PortableUpdateInstaller::stageMacUpdateBundle(const QString& archivePath,
         staged = true;
     }
 
-    // 成不成都要卸载，否则挂载点会一直留在系统里
     runTool(QStringLiteral("/usr/bin/hdiutil"),
             { QStringLiteral("detach"), mountPoint, QStringLiteral("-quiet") }, 60000);
 
@@ -484,18 +676,8 @@ bool PortableUpdateInstaller::stageMacUpdateBundle(const QString& archivePath,
         return false;
     }
 
-    // 下载下来的东西带 com.apple.quarantine。不清掉的话，未公证的包会被 Gatekeeper
-    // 拦下来，用户看到的是「应用已损坏，应移到废纸篓」。
     runTool(QStringLiteral("/usr/bin/xattr"),
             { QStringLiteral("-dr"), QStringLiteral("com.apple.quarantine"), stagedBundle }, 60000);
-
-    // 完整性自检。CI 出的包是 ad-hoc 签名，codesign 能验出封装有没有被动过；
-    // 但完全没签名的包这里也会失败，所以只记日志不拦下 —— 传输层已经有 TLS 和
-    // GitHub 的证书，为了这个把合法更新挡住不值得。
-    if (!runTool(QStringLiteral("/usr/bin/codesign"),
-                 { QStringLiteral("--verify"), QStringLiteral("--strict"), stagedBundle }, 120000)) {
-        qWarning() << "Update bundle failed codesign verification; installing anyway";
-    }
 
     stagedBundlePath = stagedBundle;
     return true;
@@ -505,6 +687,113 @@ bool PortableUpdateInstaller::stageMacUpdateBundle(const QString& archivePath,
     Q_UNUSED(errorMessage);
     return false;
 #endif
+}
+
+bool PortableUpdateInstaller::launchUpdaterAndQuit(const QString& archivePath, QString& errorMessage)
+{
+#if defined(Q_OS_DARWIN)
+    QString stagedBundle;
+    if (!stageMacUpdateBundle(archivePath, stagedBundle, errorMessage)) {
+        return false;
+    }
+#endif
+
+    QString scriptPath = materializePortableUpdateScript(m_PortableUpdateWorkspace);
+    if (scriptPath.isEmpty()) {
+        errorMessage = tr("Unable to prepare the update installer.");
+        return false;
+    }
+
+    QString updaterExecutable = getPortableUpdaterExecutable();
+    if (updaterExecutable.isEmpty()) {
+        errorMessage = tr("Unable to launch the updater.");
+        return false;
+    }
+
+    QStringList arguments;
+    QString workingDirectory;
+
+#if defined(Q_OS_DARWIN)
+    arguments << scriptPath
+              << m_PortableUpdateWorkspace
+              << getInstalledBundlePath()
+              << stagedBundle
+              << QString::number(QCoreApplication::applicationPid());
+    workingDirectory = QDir::homePath();
+
+    if (!QProcess::startDetached(updaterExecutable, arguments, workingDirectory)) {
+        errorMessage = tr("Unable to launch the updater.");
+        return false;
+    }
+#elif defined(Q_OS_WIN32)
+    const QString installDir = QDir::toNativeSeparators(getInstallRootDir());
+    const QString logDir = QDir::toNativeSeparators(getUpdateStorageProbePath());
+    const bool serviceRunning = isOwnedHostServiceRunning();
+    const bool needElevation = serviceRunning || !isInstallDirWritable();
+
+    arguments << "-NoProfile"
+              << "-ExecutionPolicy" << "Bypass"
+              << "-WindowStyle" << "Hidden"
+              << "-File" << QDir::toNativeSeparators(scriptPath)
+              << "-WorkspaceDir" << QDir::toNativeSeparators(m_PortableUpdateWorkspace)
+              << "-InstallDir" << installDir
+              << "-ZipPath" << QDir::toNativeSeparators(archivePath)
+              << "-ExePath" << QDir::toNativeSeparators(QCoreApplication::applicationFilePath())
+              << "-ParentPid" << QString::number(QCoreApplication::applicationPid())
+              << "-LogDir" << logDir;
+
+    if (serviceRunning) {
+        arguments << "-RestartService";
+    }
+    if (needElevation) {
+        arguments << "-RelaunchNonElevated";
+    }
+
+    workingDirectory = QDir::toNativeSeparators(m_PortableUpdateWorkspace);
+
+    if (needElevation) {
+        const QString params = joinWindowsArgs(arguments);
+        const std::wstring exeW = QDir::toNativeSeparators(updaterExecutable).toStdWString();
+        const std::wstring paramsW = params.toStdWString();
+        const std::wstring dirW = workingDirectory.toStdWString();
+        HINSTANCE rc = ShellExecuteW(nullptr, L"runas", exeW.c_str(), paramsW.c_str(), dirW.c_str(), SW_HIDE);
+        if (reinterpret_cast<intptr_t>(rc) <= 32) {
+            errorMessage = tr("Administrator permission is required to complete this hot update.");
+            return false;
+        }
+    }
+    else {
+        if (!QProcess::startDetached(updaterExecutable, arguments, workingDirectory)) {
+            errorMessage = tr("Unable to launch the updater.");
+            return false;
+        }
+    }
+#else
+    errorMessage = tr("In-app update is not supported on this platform.");
+    return false;
+#endif
+
+#ifdef SUNANDMON_APP
+    emit onPortableUpdateStatusChanged(tr("Applying hot update and restarting SunAndMon..."));
+#else
+    emit onPortableUpdateStatusChanged(tr("Installing update and restarting Moonlight..."));
+#endif
+
+    if (m_UpdateReply != nullptr) {
+        m_UpdateReply->deleteLater();
+        m_UpdateReply = nullptr;
+    }
+    if (m_UpdateFile != nullptr) {
+        if (m_UpdateFile->isOpen()) {
+            m_UpdateFile->close();
+        }
+        m_UpdateFile->deleteLater();
+        m_UpdateFile = nullptr;
+    }
+
+    emit prepareForRestart();
+    QTimer::singleShot(250, qApp, &QCoreApplication::quit);
+    return true;
 }
 
 void PortableUpdateInstaller::resetPortableUpdateState(bool removeWorkspace)
@@ -539,7 +828,6 @@ void PortableUpdateInstaller::handlePortableUpdateMetaDataChanged()
     if (m_UpdateReply == nullptr || m_MetadataChecked) {
         return;
     }
-
     m_MetadataChecked = true;
 
     bool ok = false;
@@ -618,75 +906,10 @@ void PortableUpdateInstaller::handlePortableUpdateDownloadFinished()
         return;
     }
 
-#if defined(Q_OS_DARWIN)
-    // 先把 DMG 里的 bundle 挂载、拷出来、清掉隔离属性，失败还来得及弹对话框
-    QString stagedBundle;
-    QString stageError;
-    if (!stageMacUpdateBundle(archivePath, stagedBundle, stageError)) {
+    QString launchError;
+    if (!launchUpdaterAndQuit(archivePath, launchError)) {
         resetPortableUpdateState(true);
-        emit onPortableUpdateFailed(stageError);
+        emit onPortableUpdateFailed(launchError);
         return;
     }
-#endif
-
-    QString scriptPath = materializePortableUpdateScript(m_PortableUpdateWorkspace);
-    if (scriptPath.isEmpty()) {
-        resetPortableUpdateState(true);
-        emit onPortableUpdateFailed(tr("Unable to prepare the update installer."));
-        return;
-    }
-
-    QString updaterExecutable = getPortableUpdaterExecutable();
-    QStringList arguments;
-    QString workingDirectory;
-
-#if defined(Q_OS_DARWIN)
-    // 换 bundle 必须等这个进程退出，所以把 pid 传给脚本让它自己等
-    arguments << scriptPath
-              << m_PortableUpdateWorkspace
-              << getInstalledBundlePath()
-              << stagedBundle
-              << QString::number(QCoreApplication::applicationPid());
-
-    // 工作目录不能落在即将被替换掉的 bundle 里
-    workingDirectory = QDir::homePath();
-#else
-    QString installDir = QDir::toNativeSeparators(Path::getPortableRootDir());
-
-    arguments << "-NoProfile"
-              << "-ExecutionPolicy" << "Bypass"
-              << "-WindowStyle" << "Hidden"
-              << "-File" << QDir::toNativeSeparators(scriptPath)
-              << "-WorkspaceDir" << QDir::toNativeSeparators(m_PortableUpdateWorkspace)
-              << "-InstallDir" << installDir
-              << "-ZipPath" << QDir::toNativeSeparators(archivePath)
-              << "-ExePath" << QDir::toNativeSeparators(QCoreApplication::applicationFilePath());
-
-    workingDirectory = installDir;
-#endif
-
-    if (updaterExecutable.isEmpty() ||
-            !QProcess::startDetached(updaterExecutable, arguments, workingDirectory)) {
-        resetPortableUpdateState(true);
-        emit onPortableUpdateFailed(tr("Unable to launch the updater."));
-        return;
-    }
-
-    emit onPortableUpdateStatusChanged(tr("Installing update and restarting Moonlight..."));
-
-    if (m_UpdateReply != nullptr) {
-        m_UpdateReply->deleteLater();
-        m_UpdateReply = nullptr;
-    }
-    if (m_UpdateFile != nullptr) {
-        if (m_UpdateFile->isOpen()) {
-            m_UpdateFile->close();
-        }
-        m_UpdateFile->deleteLater();
-        m_UpdateFile = nullptr;
-    }
-
-    // 注意：这里不能 resetPortableUpdateState(true) —— 工作目录里放着脚本、
-    // 暂存好的 bundle 和备份，删掉更新就没了。清理由脚本自己收尾。
-    QTimer::singleShot(0, qApp, &QCoreApplication::quit);
 }

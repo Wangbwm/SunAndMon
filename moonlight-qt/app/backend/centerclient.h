@@ -44,6 +44,7 @@ class CenterClient : public QObject
     Q_PROPERTY(QString hostStatus READ hostStatus NOTIFY changed)
     Q_PROPERTY(QUrl hostSettingsUrl READ hostSettingsUrl NOTIFY changed)
     Q_PROPERTY(bool startAtLogin READ startAtLogin NOTIFY changed)
+    Q_PROPERTY(bool hostVirtualDisplay READ hostVirtualDisplay NOTIFY changed)
     Q_PROPERTY(QString advertisedAddress READ advertisedAddress NOTIFY changed)
     Q_PROPERTY(TunnelManager* tunnel READ tunnel CONSTANT)
     Q_PROPERTY(QVariantMap centerTunnelDefaults READ centerTunnelDefaults NOTIFY changed)
@@ -85,6 +86,7 @@ public:
     QString hostStatus() const { return m_HostStatus; }
     QUrl hostSettingsUrl() const;
     bool startAtLogin() const;
+    bool hostVirtualDisplay() const;
     QString advertisedAddress() const { return m_AdvertisedAddress; }
     TunnelManager* tunnel() const { return m_Tunnel; }
     QVariantMap centerTunnelDefaults() const { return m_CenterTunnelDefaults; }
@@ -111,6 +113,7 @@ public:
     Q_INVOKABLE void startOnLaunch();
     Q_INVOKABLE bool openFirewallSettings() const;
     Q_INVOKABLE bool setStartAtLogin(bool enabled);
+    Q_INVOKABLE bool setHostVirtualDisplay(bool enabled);
     Q_INVOKABLE bool setElevatedHostService(bool enabled);
     Q_INVOKABLE bool setWindowsConsoleHost(bool enabled);
     Q_INVOKABLE void startHost(const QString& advertisedAddress);
@@ -124,6 +127,7 @@ signals:
     void adminMutationSucceeded();
     void startHostOnLaunchChanged();
     void hostConnected(QString uuid);
+    void activateWindowRequested();
 
 private:
     static QString localBootDeviceId();
@@ -154,6 +158,7 @@ private:
     void probeHost();
     void startClipboardAgent();
     void stopClipboardAgent();
+    void syncBootClipboardAgent();
     void publishHost();
     void withdrawHost();
     void setHostStatus(const QString& status);
@@ -218,4 +223,11 @@ private:
     QNetworkReply* m_Withdrawal = nullptr;
     bool m_SecondaryInstance = false;
     void* m_PrimaryLockHandle = nullptr;
+    void* m_ActivateEventHandle = nullptr;
+    QObject* m_ActivateNotifier = nullptr;
+#ifdef Q_OS_WIN
+    void* m_BootClipboardProcess = nullptr;
+    void* m_BootClipboardStdin = nullptr;
+    quint32 m_BootClipboardSessionId = 0xFFFFFFFFu;
+#endif
 };

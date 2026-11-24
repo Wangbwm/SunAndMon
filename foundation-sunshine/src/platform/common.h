@@ -1424,6 +1424,29 @@ namespace platf {
   platform_caps::caps_t
   get_capabilities(std::string_view client_gamepad);
 
+#ifdef _WIN32
+  /**
+   * @brief Acquire a ref-counted HidHide auto-cloak lease for a streaming session.
+   *        Non-destructively hides competing non-ViGEm local gaming controllers while
+   *        the lease is held and restores only what Sunshine changed when released.
+   * @return Shared lease handle, or nullptr when HidHide is unavailable.
+   */
+  std::shared_ptr<void>
+  acquire_hidhide_cloak_lease();
+#endif
+
+#ifdef __linux__
+  /**
+   * @brief Ensure the Linux virtual/X11 display is awake for capture when DPMS has
+   *        blanked the screen (without disabling DPMS or changing user idle timeouts),
+   *        and refresh available capture backends (KMS/X11).
+   * @param force_wake Wake DPMS even if config::video.virtual_display is false.
+   * @return true if capture sources are ready after the check/wake.
+   */
+  bool
+  ensure_linux_virtual_display_ready(bool force_wake = false);
+#endif
+
   /**
    * @brief Query whether the capture process's interactive session is locked.
    * @return The lock state, or std::nullopt when the platform cannot determine it.

@@ -1,6 +1,7 @@
 #include "systemproperties.h"
 #include "utils.h"
 
+#include <QFileInfo>
 #include <QGuiApplication>
 #include <QLibraryInfo>
 
@@ -48,6 +49,11 @@ private:
 SystemProperties::SystemProperties()
 {
     versionString = QString(VERSION_STR);
+#ifdef SUNANDMON_APP
+    isSunAndMon = true;
+#else
+    isSunAndMon = false;
+#endif
     hasDesktopEnvironment = WMUtils::isRunningDesktopEnvironment();
     isRunningWayland = WMUtils::isRunningWayland();
     isRunningXWayland = isRunningWayland && QGuiApplication::platformName() == "xcb";
@@ -324,4 +330,18 @@ bool SystemProperties::isVideoEnhancementExperimental()
 {
     VideoEnhancement* videoEnhancement = &VideoEnhancement::getInstance();
     return videoEnhancement->isExperimental();
+}
+
+bool SystemProperties::isHidHideInstalled() const
+{
+#ifdef Q_OS_WIN32
+    const QString programFiles = qEnvironmentVariable("ProgramFiles", QStringLiteral("C:/Program Files"));
+    const QString cliPath = programFiles + QStringLiteral("/Nefarius Software Solutions/HidHide/x64/HidHideCLI.exe");
+    if (QFileInfo::exists(cliPath)) {
+        return true;
+    }
+    return QFileInfo::exists(QStringLiteral("C:/Program Files/Nefarius Software Solutions/HidHide/x64/HidHideCLI.exe"));
+#else
+    return false;
+#endif
 }

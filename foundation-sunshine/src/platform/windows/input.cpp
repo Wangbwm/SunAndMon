@@ -8,14 +8,22 @@
 #endif
 #define WINVER 0x0A00
 #include <windows.h>
+#include <cfgmgr32.h>
 
+#include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
+#include <cwctype>
+#include <filesystem>
 #include <limits>
 #include <mutex>
+#include <set>
+#include <sstream>
 #include <thread>
 #include <vector>
 
+#include <nlohmann/json.hpp>
 #include <ViGEm/Client.h>
 
 #include "ds5/ds5_native_client.h"
@@ -2756,5 +2764,465 @@ namespace platf {
     }
 
     return caps;
+  }
+
+  namespace {
+    // DEVPKEY_Device_Service: {A45C254E-DF1C-4EFD-8020-67D146A850E0}, 6
+    constexpr DEVPROPKEY k_devpkey_device_service {
+      { 0xa45c254e, 0xdf1c, 0x4efd, { 0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0 } },
+      6
+    };
+
+    std::string
+    ascii_lower(std::string s) {
+      std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+      });
+      return s;
+    }
+
+    std::wstring
+    wide_lower(std::wstring s) {
+      std::transform(s.begin(), s.end(), s.begin(), [](wchar_t c) {
+        return static_cast<wchar_t>(std::towlower(c));
+      });
+      return s;
+    }
+
+    std::wstring
+    utf8_to_wide_hh(const std::string &s) {
+      if (s.empty()) {
+        return {};
+      }
+      const int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
+      if (n <= 0) {
+        return {};
+      }
+      std::wstring out(static_cast<size_t>(n), L'\0');
+      MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), out.data(), n);
+      return out;
+    }
+
+    std::string
+    wide_to_utf8_hh(const std::wstring &s) {
+      if (s.empty()) {
+        return {};
+      }
+      const int n = WideCharToMultiByte(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0, nullptr, nullptr);
+      if (n <= 0) {
+        return {};
+      }
+      std::string out(static_cast<size_t>(n), '\0');
+      WideCharToMultiByte(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), out.data(), n, nullptr, nullptr);
+      return out;
+    }
+
+    std::wstring
+    find_hidhide_cli_path() {
+      std::vector<std::wstring> candidates;
+      wchar_t pf[MAX_PATH] {};
+      if (GetEnvironmentVariableW(L"ProgramFiles", pf, MAX_PATH) > 0) {
+        candidates.emplace_back(std::wstring(pf) + L"\\Nefarius Software Solutions\\HidHide\\x64\\HidHideCLI.exe");
+      }
+      candidates.emplace_back(L"C:\\Program Files\\Nefarius Software Solutions\\HidHide\\x64\\HidHideCLI.exe");
+
+      for (const auto &path : candidates) {
+        std::error_code ec;
+        if (std::filesystem::is_regular_file(path, ec)) {
+          return path;
+        }
+      }
+      return {};
+    }
+
+    bool
+    is_hidhide_driver_accessible() {
+      HANDLE h = CreateFileW(
+        L"\\\\.\\HidHide",
+        GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        nullptr,
+        OPEN_EXISTING,
+        0,
+        nullptr);
+      if (h == INVALID_HANDLE_VALUE) {
+        return false;
+      }
+      CloseHandle(h);
+      return true;
+    }
+
+    bool
+    run_hidhide_cli(const std::wstring &cli_path, const std::vector<std::wstring> &args, std::string &stdout_out) {
+      stdout_out.clear();
+
+      SECURITY_ATTRIBUTES sa {};
+      sa.nLength = sizeof(sa);
+      sa.bInheritHandle = TRUE;
+
+      HANDLE read_pipe = nullptr;
+      HANDLE write_pipe = nullptr;
+      if (!CreatePipe(&read_pipe, &write_pipe, &sa, 0)) {
+        return false;
+      }
+      SetHandleInformation(read_pipe, HANDLE_FLAG_INHERIT, 0);
+
+      // HidHideCLI reads stdin unless stdin is at EOF; bind NUL so it never hangs.
+      HANDLE nul_in = CreateFileW(
+        L"NUL",
+        GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        &sa,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr);
+      if (nul_in == INVALID_HANDLE_VALUE) {
+        CloseHandle(read_pipe);
+        CloseHandle(write_pipe);
+        return false;
+      }
+
+      std::wstring cmd = L"\"" + cli_path + L"\"";
+      for (const auto &arg : args) {
+        cmd += L" ";
+        if (arg.find_first_of(L" \t\"") != std::wstring::npos) {
+          cmd += L"\"" + arg + L"\"";
+        }
+        else {
+          cmd += arg;
+        }
+      }
+      std::vector<wchar_t> cmd_buf(cmd.begin(), cmd.end());
+      cmd_buf.push_back(L'\0');
+
+      STARTUPINFOW si {};
+      si.cb = sizeof(si);
+      si.dwFlags = STARTF_USESTDHANDLES;
+      si.hStdInput = nul_in;
+      si.hStdOutput = write_pipe;
+      si.hStdError = write_pipe;
+
+      PROCESS_INFORMATION pi {};
+      const BOOL ok = CreateProcessW(
+        cli_path.c_str(),
+        cmd_buf.data(),
+        nullptr,
+        nullptr,
+        TRUE,
+        CREATE_NO_WINDOW,
+        nullptr,
+        nullptr,
+        &si,
+        &pi);
+
+      CloseHandle(write_pipe);
+      CloseHandle(nul_in);
+
+      if (!ok) {
+        CloseHandle(read_pipe);
+        return false;
+      }
+
+      std::thread reader([read_pipe, &stdout_out]() {
+        char buf[4096];
+        DWORD read_bytes = 0;
+        while (ReadFile(read_pipe, buf, sizeof(buf), &read_bytes, nullptr) && read_bytes > 0) {
+          stdout_out.append(buf, read_bytes);
+        }
+      });
+
+      const DWORD wait_rc = WaitForSingleObject(pi.hProcess, 5000);
+      bool timed_out = false;
+      if (wait_rc != WAIT_OBJECT_0) {
+        timed_out = true;
+        TerminateProcess(pi.hProcess, 1);
+      }
+
+      DWORD exit_code = 1;
+      GetExitCodeProcess(pi.hProcess, &exit_code);
+      CloseHandle(pi.hThread);
+      CloseHandle(pi.hProcess);
+
+      reader.join();
+      CloseHandle(read_pipe);
+
+      if (timed_out) {
+        BOOST_LOG(warning) << "HidHideCLI timed out after 5s"sv;
+        return false;
+      }
+      return exit_code == 0;
+    }
+
+    bool
+    is_vigem_device_instance(const std::wstring &instance_id) {
+      if (instance_id.empty()) {
+        return false;
+      }
+      DEVINST cur = 0;
+      if (CM_Locate_DevNodeW(&cur, const_cast<DEVINSTID_W>(instance_id.c_str()), CM_LOCATE_DEVNODE_PHANTOM) != CR_SUCCESS) {
+        return false;
+      }
+      for (int depth = 0; depth < 8 && cur != 0; ++depth) {
+        DEVPROPTYPE prop_type = 0;
+        ULONG buf_size = 0;
+        if (CM_Get_DevNode_PropertyW(cur, &k_devpkey_device_service, &prop_type, nullptr, &buf_size, 0) == CR_BUFFER_SMALL &&
+            buf_size >= sizeof(wchar_t) && buf_size < 4096) {
+          std::wstring svc(buf_size / sizeof(wchar_t), L'\0');
+          if (CM_Get_DevNode_PropertyW(
+                cur,
+                &k_devpkey_device_service,
+                &prop_type,
+                reinterpret_cast<PBYTE>(svc.data()),
+                &buf_size,
+                0) == CR_SUCCESS) {
+            if (const auto nul = svc.find(L'\0'); nul != std::wstring::npos) {
+              svc.resize(nul);
+            }
+            if (wide_lower(svc) == L"vigembus") {
+              return true;
+            }
+          }
+        }
+        wchar_t dev_id[MAX_DEVICE_ID_LEN] {};
+        if (CM_Get_Device_IDW(cur, dev_id, MAX_DEVICE_ID_LEN, 0) == CR_SUCCESS) {
+          const auto id_low = wide_lower(dev_id);
+          if (id_low.find(L"vigem") != std::wstring::npos) {
+            return true;
+          }
+        }
+        DEVINST parent = 0;
+        if (CM_Get_Parent(&parent, cur, 0) != CR_SUCCESS || parent == cur) {
+          break;
+        }
+        cur = parent;
+      }
+      return false;
+    }
+
+    void
+    collect_direct_children(const std::wstring &instance_id, std::vector<std::string> &out) {
+      DEVINST node = 0;
+      if (CM_Locate_DevNodeW(&node, const_cast<DEVINSTID_W>(instance_id.c_str()), CM_LOCATE_DEVNODE_NORMAL) != CR_SUCCESS) {
+        return;
+      }
+      DEVINST child = 0;
+      if (CM_Get_Child(&child, node, 0) != CR_SUCCESS) {
+        return;
+      }
+      for (int i = 0; i < 32 && child != 0; ++i) {
+        wchar_t child_id[MAX_DEVICE_ID_LEN] {};
+        if (CM_Get_Device_IDW(child, child_id, MAX_DEVICE_ID_LEN, 0) == CR_SUCCESS) {
+          out.push_back(wide_to_utf8_hh(child_id));
+        }
+        DEVINST next = 0;
+        if (CM_Get_Sibling(&next, child, 0) != CR_SUCCESS || next == child) {
+          break;
+        }
+        child = next;
+      }
+    }
+
+    class hidhide_manager_t {
+    public:
+      static hidhide_manager_t &
+      instance() {
+        static hidhide_manager_t mgr;
+        return mgr;
+      }
+
+      std::shared_ptr<void>
+      acquire() {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        const auto cli_path = find_hidhide_cli_path();
+        if (cli_path.empty() || !is_hidhide_driver_accessible()) {
+          if (!logged_unavailable_) {
+            BOOST_LOG(info) << "HidHide auto-cloak requested, but HidHide is not installed or driver is unavailable"sv;
+            logged_unavailable_ = true;
+          }
+          return nullptr;
+        }
+        logged_unavailable_ = false;
+        cli_path_ = cli_path;
+
+        // Snapshot current HidHide state so we never clobber user's existing rules.
+        std::string state_out;
+        if (!run_hidhide_cli(cli_path_, { L"--cloak-state", L"--dev-list" }, state_out)) {
+          BOOST_LOG(warning) << "HidHide auto-cloak: failed to query current state"sv;
+          return nullptr;
+        }
+
+        bool currently_cloaked = false;
+        std::set<std::string> existing_lower;
+        {
+          std::istringstream iss(state_out);
+          std::string line;
+          while (std::getline(iss, line)) {
+            while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) {
+              line.pop_back();
+            }
+            if (line == "--cloak-on") {
+              currently_cloaked = true;
+            }
+            else if (line.rfind("--dev-hide ", 0) == 0) {
+              const auto q1 = line.find('"');
+              const auto q2 = line.rfind('"');
+              if (q1 != std::string::npos && q2 != std::string::npos && q2 > q1 + 1) {
+                existing_lower.insert(ascii_lower(line.substr(q1 + 1, q2 - q1 - 1)));
+              }
+            }
+          }
+        }
+
+        // Discover currently present non-ViGEm gaming controllers (and non-ViGEm XboxComposite containers).
+        std::string gaming_json_text;
+        if (!run_hidhide_cli(cli_path_, { L"--dev-gaming" }, gaming_json_text)) {
+          BOOST_LOG(warning) << "HidHide auto-cloak: failed to enumerate gaming devices"sv;
+          return nullptr;
+        }
+
+        std::vector<std::string> candidates;
+        const auto parsed = nlohmann::json::parse(gaming_json_text, nullptr, false);
+        if (parsed.is_array()) {
+          for (const auto &group : parsed) {
+            if (!group.is_object() || !group.contains("devices") || !group["devices"].is_array()) {
+              continue;
+            }
+            for (const auto &dev : group["devices"]) {
+              if (!dev.is_object()) {
+                continue;
+              }
+              if (!dev.value("present", false) || !dev.value("gamingDevice", false)) {
+                continue;
+              }
+              const std::string inst = dev.value("deviceInstancePath", std::string {});
+              const std::string base = dev.value("baseContainerDeviceInstancePath", std::string {});
+              const std::string base_guid = ascii_lower(dev.value("baseContainerClassGuid", std::string {}));
+              if (inst.empty()) {
+                continue;
+              }
+              const auto w_inst = utf8_to_wide_hh(inst);
+              const auto w_base = utf8_to_wide_hh(base);
+              if (is_vigem_device_instance(w_inst) || (!w_base.empty() && is_vigem_device_instance(w_base))) {
+                continue;
+              }
+
+              candidates.push_back(inst);
+
+              // Only hide base container when it is an XboxComposite / XnaComposite controller,
+              // never a generic USB composite container (which would hide keyboards/mice).
+              if (!base.empty() && base_guid == "{d61ca365-5af4-4486-998b-9db4734c6ca3}") {
+                candidates.push_back(base);
+                collect_direct_children(w_base, candidates);
+              }
+            }
+          }
+        }
+
+        std::vector<std::string> newly_added;
+        std::set<std::string> seen_new;
+        for (const auto &id : candidates) {
+          const auto low = ascii_lower(id);
+          if (low.empty() || existing_lower.count(low) || seen_new.count(low)) {
+            continue;
+          }
+          seen_new.insert(low);
+          newly_added.push_back(id);
+        }
+
+        const bool should_enable_cloak =
+          (active_leases_ == 0) && !currently_cloaked && (!newly_added.empty() || !existing_lower.empty());
+
+        if (!newly_added.empty() || should_enable_cloak) {
+          std::vector<std::wstring> cmd_args;
+          for (const auto &id : newly_added) {
+            cmd_args.push_back(L"--dev-hide");
+            cmd_args.push_back(utf8_to_wide_hh(id));
+          }
+          if (should_enable_cloak) {
+            cmd_args.push_back(L"--cloak-on");
+          }
+
+          std::string apply_out;
+          if (run_hidhide_cli(cli_path_, cmd_args, apply_out)) {
+            for (const auto &id : newly_added) {
+              added_devices_.push_back(id);
+            }
+            if (should_enable_cloak) {
+              toggled_cloak_ = true;
+            }
+            BOOST_LOG(info) << "HidHide auto-cloak active: hid "sv << newly_added.size()
+                            << " new competing device(s), existing="sv << existing_lower.size()
+                            << ", cloak_toggled="sv << (should_enable_cloak ? "yes"sv : "no"sv);
+          }
+          else {
+            BOOST_LOG(warning) << "HidHide auto-cloak: failed to apply hide rules"sv;
+          }
+        }
+        else {
+          BOOST_LOG(info) << "HidHide auto-cloak: no new competing devices to hide (existing="sv
+                          << existing_lower.size() << ", cloaked="sv << (currently_cloaked ? "yes"sv : "no"sv) << ')';
+        }
+
+        ++active_leases_;
+        return std::shared_ptr<void>(this, [](void *ptr) {
+          static_cast<hidhide_manager_t *>(ptr)->release();
+        });
+      }
+
+      void
+      release() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (active_leases_ <= 0) {
+          return;
+        }
+        --active_leases_;
+        if (active_leases_ > 0) {
+          return;
+        }
+
+        if (added_devices_.empty() && !toggled_cloak_) {
+          return;
+        }
+
+        std::vector<std::wstring> cmd_args;
+        for (const auto &id : added_devices_) {
+          cmd_args.push_back(L"--dev-unhide");
+          cmd_args.push_back(utf8_to_wide_hh(id));
+        }
+        if (toggled_cloak_) {
+          cmd_args.push_back(L"--cloak-off");
+        }
+
+        std::string restore_out;
+        const bool ok = !cli_path_.empty() && run_hidhide_cli(cli_path_, cmd_args, restore_out);
+        BOOST_LOG(info) << "HidHide auto-cloak released: restored "sv << added_devices_.size()
+                        << " device(s), cloak_restored="sv << (toggled_cloak_ ? "yes"sv : "no"sv)
+                        << ", ok="sv << (ok ? "yes"sv : "no"sv);
+
+        added_devices_.clear();
+        toggled_cloak_ = false;
+      }
+
+      ~hidhide_manager_t() {
+        if (!added_devices_.empty() || toggled_cloak_) {
+          active_leases_ = 1;
+          release();
+        }
+      }
+
+    private:
+      std::mutex mutex_;
+      int active_leases_ = 0;
+      bool toggled_cloak_ = false;
+      bool logged_unavailable_ = false;
+      std::wstring cli_path_;
+      std::vector<std::string> added_devices_;
+    };
+  }  // namespace
+
+  std::shared_ptr<void>
+  acquire_hidhide_cloak_lease() {
+    return hidhide_manager_t::instance().acquire();
   }
 }  // namespace platf

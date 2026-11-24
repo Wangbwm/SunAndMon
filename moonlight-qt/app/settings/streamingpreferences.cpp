@@ -64,6 +64,7 @@
 #define SER_SWAPWINALTKEYS "swapwinaltkeys"
 #define SER_MUTEONFOCUSLOSS "muteonfocusloss"
 #define SER_BACKGROUNDGAMEPAD "backgroundgamepad"
+#define SER_HIDHIDEAUTOCLOAK "hidhideautocloak"
 #define SER_GAMEPADUINAVIGATION "enablegamepaduinavigation"
 #define SER_GAMEPADQUITCOMBO "gamepadquitcombo"
 #define SER_GAMEPADDEADZONE "gamepaddeadzone"
@@ -85,6 +86,8 @@
 #define SER_HDRMINBRIGHTNESS "hdrminbrightness"
 #define SER_HDRMAXAVERAGEBRIGHTNESS "hdrmaxaveragebrightness"
 #define SER_AUTOUPDATECHECK "autoupdatecheck"
+#define SER_INCLUDEPRERELEASEUPDATES "includeprereleaseupdates"
+#define SER_CUSTOMUPDATEURL "customupdateurl"
 #define SER_USBFORWARDING "usbforwarding"
 #define SER_USBFORWARDINGBOUND "usbforwardingbound"
 #define SER_RENDERER "renderer"
@@ -297,6 +300,8 @@ void StreamingPreferences::reload()
     enableMicrophone = settings.value(SER_MICROPHONE, false).toBool();
     overlayMenuPosition = loadOverlayMenuPlacement(settings);
     autoUpdateCheck = settings.value(SER_AUTOUPDATECHECK, true).toBool();
+    includePreReleaseUpdates = settings.value(SER_INCLUDEPRERELEASEUPDATES, false).toBool();
+    customUpdateUrl = settings.value(SER_CUSTOMUPDATEURL, QString()).toString();
     usbForwardingEnabled = settings.value(SER_USBFORWARDING, false).toBool();
     m_UsbForwardingBoundDevices = settings.value(SER_USBFORWARDINGBOUND, QStringList()).toStringList();
 
@@ -319,6 +324,7 @@ void StreamingPreferences::reload()
     swapWinAltKeys = settings.value(SER_SWAPWINALTKEYS, false).toBool();
     muteOnFocusLoss = settings.value(SER_MUTEONFOCUSLOSS, false).toBool();
     backgroundGamepad = settings.value(SER_BACKGROUNDGAMEPAD, false).toBool();
+    hidHideAutoCloak = settings.value(SER_HIDHIDEAUTOCLOAK, false).toBool();
     m_PersistedGamepadUiNavigation = settings.value(SER_GAMEPADUINAVIGATION, true).toBool();
     enableGamepadUiNavigation = m_HasGamepadUiNavigationLaunchOverride
                                     ? enableGamepadUiNavigation
@@ -809,6 +815,7 @@ void StreamingPreferences::save()
     settings.setValue(SER_SWAPWINALTKEYS, swapWinAltKeys);
     settings.setValue(SER_MUTEONFOCUSLOSS, muteOnFocusLoss);
     settings.setValue(SER_BACKGROUNDGAMEPAD, backgroundGamepad);
+    settings.setValue(SER_HIDHIDEAUTOCLOAK, hidHideAutoCloak);
     settings.setValue(SER_GAMEPADUINAVIGATION, m_HasGamepadUiNavigationLaunchOverride
                                                    ? m_PersistedGamepadUiNavigation
                                                    : enableGamepadUiNavigation);
@@ -824,6 +831,8 @@ void StreamingPreferences::save()
     settings.setValue(SER_MICROPHONE, enableMicrophone);
     settings.setValue(SER_OVERLAYMENUPLACEMENT, static_cast<int>(overlayMenuPosition));
     settings.setValue(SER_AUTOUPDATECHECK, autoUpdateCheck);
+    settings.setValue(SER_INCLUDEPRERELEASEUPDATES, includePreReleaseUpdates);
+    settings.setValue(SER_CUSTOMUPDATEURL, customUpdateUrl);
     settings.setValue(SER_USBFORWARDING, usbForwardingEnabled);
     settings.setValue(SER_USBFORWARDINGBOUND, m_UsbForwardingBoundDevices);
 }

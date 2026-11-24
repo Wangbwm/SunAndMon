@@ -19,6 +19,7 @@ Rectangle {
     property string connectionAction: "desktop"
     property bool showingLocal: false
     property bool startupChangeFailed: false
+    property bool virtualDisplayChangeFailed: false
     property bool elevatedServiceChangeFailed: false
     property bool windowsConsoleHostChangeFailed: false
     property url coverSource: "qrc:/res/device-cover.png"
@@ -790,6 +791,51 @@ Rectangle {
                                   ? qsTr("The system service registers this host with the center before Windows sign-in. Use the device shown in the center list.")
                                   : qsTr("Sign in to the center, enable the system service and stop local hosting to switch modes.")
                             color: dashboard.windowsConsoleHostChangeFailed ? Theme.danger : dashboard.muted
+                        }
+                        Rectangle {
+                            visible: dashboard.center.hostAvailable
+                            Layout.fillWidth: true
+                            Layout.leftMargin: 12
+                            Layout.rightMargin: 12
+                            implicitHeight: 1
+                            color: dashboard.line
+                        }
+                        RowLayout {
+                            visible: dashboard.center.hostAvailable
+                            Layout.fillWidth: true
+                            Layout.leftMargin: 12
+                            Layout.rightMargin: 12
+                            Layout.topMargin: 10
+                            Layout.bottomMargin: 4
+                            spacing: 12
+                            Copy {
+                                Layout.fillWidth: true
+                                text: qsTr("Enable virtual display")
+                                wrapMode: Text.WordWrap
+                            }
+                            HardSwitch {
+                                id: virtualDisplaySwitch
+                                Accessible.name: qsTr("Enable virtual display")
+                                checked: dashboard.center.hostVirtualDisplay
+                                onToggled: {
+                                    dashboard.virtualDisplayChangeFailed = !dashboard.center.setHostVirtualDisplay(checked)
+                                    checked = Qt.binding(() => dashboard.center.hostVirtualDisplay)
+                                }
+                            }
+                        }
+                        Copy {
+                            visible: dashboard.center.hostAvailable
+                            Layout.fillWidth: true
+                            Layout.leftMargin: 12
+                            Layout.rightMargin: 12
+                            Layout.bottomMargin: 10
+                            wrapMode: Text.WordWrap
+                            text: dashboard.virtualDisplayChangeFailed
+                                ? qsTr("Could not save virtual display setting.")
+                                : Qt.platform.os === "linux"
+                                  ? qsTr("Wakes the virtual display on demand when a client connects while the screen is blanked, without disabling idle screen sleep.")
+                                  : qsTr("Automatically enables a virtual display (VDD) when no active physical display is available.")
+                            color: dashboard.virtualDisplayChangeFailed ? Theme.danger : dashboard.muted
                         }
                     }
                 }

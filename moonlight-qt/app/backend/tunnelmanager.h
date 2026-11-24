@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QJsonObject>
 #include <QList>
 #include <QNetworkAccessManager>
 #include <QPair>
@@ -14,6 +15,7 @@ class TunnelManager : public QObject
     Q_OBJECT
     Q_PROPERTY(bool available READ available CONSTANT)
     Q_PROPERTY(bool easytierAvailable READ easytierAvailable NOTIFY changed)
+    Q_PROPERTY(bool managedBySystemService READ managedBySystemService NOTIFY changed)
 
     // Summary properties (compatible with single-badge views)
     Q_PROPERTY(QString state READ state NOTIFY changed)
@@ -52,6 +54,15 @@ public:
 
     bool available() const;
     bool easytierAvailable() const { return m_EasyTierAvailable; }
+    bool managedBySystemService() const { return m_SystemServiceMode || m_AttachedToSystemDaemon; }
+
+    void setSystemServiceMode(bool enabled);
+    void setPreferSystemServiceAttach(bool prefer);
+    QJsonObject exportProfile() const;
+    void applyBootProfile(const QJsonObject& profile);
+    void reattachAfterServiceModeChange(bool serviceEnabled);
+    static QString systemTunnelStateDir();
+    static bool syncUserStateToSystemDir(const QString& userStateDir);
 
     QString state() const;
     QString summaryBadge() const;
@@ -127,13 +138,16 @@ signals:
 private:
     QString daemonExecutable() const;
     QString tunnelStateDir() const;
+    QString userTunnelStateDir() const;
     QString daemonEndpointFile() const;
+    static QString systemDaemonEndpointFile();
     void writeDaemonEndpointFile() const;
     void removeDaemonEndpointFileIfOwned() const;
     void loadSettings();
     void saveSettings() const;
     void ensureDaemonRunning();
     void tryAttachExistingDaemon(bool spawnFallback);
+    void probeDaemonEndpoint(const QString& endpointPath, bool isSystemEndpoint, bool spawnFallback);
     void spawnLocalDaemon();
     void stopDaemon();
     void sendStartTailscale();
@@ -153,6 +167,10 @@ private:
     quint16 m_DaemonPort = 0;
     bool m_DaemonReady = false;
     bool m_AttachedToExistingDaemon = false;
+    bool m_AttachedToSystemDaemon = false;
+    bool m_SystemServiceMode = false;
+    bool m_PreferSystemServiceAttach = false;
+    int m_SystemAttachRetries = 0;
     bool m_ProbingExistingDaemon = false;
     bool m_SecondaryMode = false;
     int m_PollFailures = 0;

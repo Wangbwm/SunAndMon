@@ -1893,6 +1893,34 @@
         <translation>即使不是焦点窗口，也允许 Moonlight 捕获手柄的输入</translation>
     </message>
     <message>
+        <source>Auto-hide conflicting host gamepads with HidHide</source>
+        <translation>串流时通过主机 HidHide 自动隐藏冲突手柄</translation>
+    </message>
+    <message>
+        <source>When streaming to a Windows host with HidHide installed, temporarily hides competing local gamepads (such as analog keyboard virtual controllers) during the stream and restores them after disconnecting.</source>
+        <translation>连接到已安装 HidHide 的 Windows 主机时，在串流期间自动隐藏主机本地冲突手柄（如磁轴键盘虚拟手柄等），断开串流后自动恢复；不会改动主机上已手动开启的 HidHide 规则。</translation>
+    </message>
+    <message>
+        <source>Local HidHide driver</source>
+        <translation>本机 HidHide 驱动状态</translation>
+    </message>
+    <message>
+        <source>Installed. This PC can automatically hide competing local gamepads when acting as a streaming host.</source>
+        <translation>已安装。本机作为被控主机时，支持在串流期间自动隐藏本地冲突手柄。</translation>
+    </message>
+    <message>
+        <source>Not installed on this PC. Install HidHide on the Windows host if local virtual controllers conflict with remote gamepads.</source>
+        <translation>本机未安装。如果 Windows 被控主机上的本地虚拟手柄与远程手柄冲突，建议在该主机安装 HidHide。</translation>
+    </message>
+    <message>
+        <source>Refresh</source>
+        <translation>刷新</translation>
+    </message>
+    <message>
+        <source>Download HidHide</source>
+        <translation>下载 HidHide</translation>
+    </message>
+    <message>
         <source>Gamepad quit combo</source>
         <translation>手柄退出组合键</translation>
     </message>
@@ -4450,6 +4478,22 @@
     <message>
         <source>Allow remote UAC control (system service)</source>
         <translation>允许远程操作 UAC 弹窗（系统服务）</translation>
+    </message>
+    <message>
+        <source>Enable virtual display</source>
+        <translation>启用虚拟屏（服务端）</translation>
+    </message>
+    <message>
+        <source>Could not save virtual display setting.</source>
+        <translation>无法保存虚拟屏设置。</translation>
+    </message>
+    <message>
+        <source>Wakes the virtual display on demand when a client connects while the screen is blanked, without disabling idle screen sleep.</source>
+        <translation>保留系统空闲息屏；当息屏状态下有客户端连接时自动唤醒虚拟屏进行串流，断开后照常自动息屏。</translation>
+    </message>
+    <message>
+        <source>Automatically enables a virtual display (VDD) when no active physical display is available.</source>
+        <translation>当无可用物理显示器或无头被控时自动启用内置虚拟屏（VDD）。</translation>
     </message>
     <message>
         <source>Could not change the elevated host service.</source>

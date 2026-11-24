@@ -22,9 +22,14 @@
 #include <QStandardPaths>
 #include <openssl/rand.h>
 #include <cstdio>
+#include <algorithm>
+#include <map>
+#include <string>
 #include <utility>
+#include <vector>
 
 #ifdef Q_OS_WIN
+#include <QWinEventNotifier>
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
@@ -327,6 +332,197 @@ bool validBootHostCenter(const QUrl& url, const QByteArray& key, const QString& 
            CenterKeyFormat.match(QString::fromLatin1(key)).hasMatch() &&
            (ip.isEmpty() || !QHostAddress(ip).isNull());
 }
+
+struct CaseInsensitiveWideLess {
+    bool operator()(const std::wstring& a, const std::wstring& b) const
+    {
+        return _wcsicmp(a.c_str(), b.c_str()) < 0;
+    }
+};
+
+bool launchBootClipboardAgentInSession(DWORD sessionId,
+                                       quint16 webPort,
+                                       const QByteArray& token,
+                                       const QByteArray& certPem,
+                                       HANDLE& outProcess,
+                                       HANDLE& outStdinWrite)
+{
+    outProcess = nullptr;
+    outStdinWrite = nullptr;
+
+    using WtsQueryUserTokenFn = BOOL (WINAPI *)(ULONG, PHANDLE);
+    using CreateEnvBlockFn = BOOL (WINAPI *)(LPVOID*, HANDLE, BOOL);
+    using DestroyEnvBlockFn = BOOL (WINAPI *)(LPVOID);
+
+    HMODULE wtsMod = LoadLibraryW(L"wtsapi32.dll");
+    HMODULE userEnvMod = LoadLibraryW(L"userenv.dll");
+    const auto freeMods = qScopeGuard([&] {
+        if (userEnvMod) FreeLibrary(userEnvMod);
+        if (wtsMod) FreeLibrary(wtsMod);
+    });
+    if (!wtsMod || !userEnvMod) {
+        return false;
+    }
+    auto fnWtsQueryUserToken = reinterpret_cast<WtsQueryUserTokenFn>(GetProcAddress(wtsMod, "WTSQueryUserToken"));
+    auto fnCreateEnvBlock = reinterpret_cast<CreateEnvBlockFn>(GetProcAddress(userEnvMod, "CreateEnvironmentBlock"));
+    auto fnDestroyEnvBlock = reinterpret_cast<DestroyEnvBlockFn>(GetProcAddress(userEnvMod, "DestroyEnvironmentBlock"));
+    if (!fnWtsQueryUserToken || !fnCreateEnvBlock || !fnDestroyEnvBlock) {
+        return false;
+    }
+
+    HANDLE userToken = nullptr;
+    if (!fnWtsQueryUserToken(sessionId, &userToken) || !userToken) {
+        // Expected on lock/sign-in screen before a user session token exists.
+        return false;
+    }
+    const auto closeUserToken = qScopeGuard([&] { CloseHandle(userToken); });
+
+    LPVOID baseEnv = nullptr;
+    if (!fnCreateEnvBlock(&baseEnv, userToken, FALSE) || !baseEnv) {
+        return false;
+    }
+    const auto freeBaseEnv = qScopeGuard([&] { fnDestroyEnvBlock(baseEnv); });
+
+    // Merge user's session environment with clipboard auth secrets into a sorted
+    // UTF-16LE block required by CreateProcessAsUserW(CREATE_UNICODE_ENVIRONMENT).
+    std::map<std::wstring, std::wstring, CaseInsensitiveWideLess> envMap;
+    for (const wchar_t* entry = static_cast<const wchar_t*>(baseEnv); *entry != L'\0'; entry += wcslen(entry) + 1) {
+        const wchar_t* eq = wcschr(entry + (entry[0] == L'=' ? 1 : 0), L'=');
+        if (eq) {
+            envMap[std::wstring(entry, eq)] = std::wstring(eq + 1);
+        }
+    }
+    envMap[L"SUNANDMON_CLIPBOARD_TOKEN"] = QString::fromLatin1(token).toStdWString();
+    envMap[L"SUNANDMON_CLIPBOARD_CERT"] = QString::fromLatin1(certPem.toBase64()).toStdWString();
+
+    std::vector<wchar_t> mergedEnv;
+    mergedEnv.reserve(8192);
+    for (const auto& kv : envMap) {
+        mergedEnv.insert(mergedEnv.end(), kv.first.begin(), kv.first.end());
+        mergedEnv.push_back(L'=');
+        mergedEnv.insert(mergedEnv.end(), kv.second.begin(), kv.second.end());
+        mergedEnv.push_back(L'\0');
+    }
+    mergedEnv.push_back(L'\0');
+
+    SECURITY_ATTRIBUTES inheritableSa{};
+    inheritableSa.nLength = sizeof(inheritableSa);
+    inheritableSa.bInheritHandle = TRUE;
+
+    HANDLE stdinRead = nullptr;
+    HANDLE stdinWrite = nullptr;
+    if (!CreatePipe(&stdinRead, &stdinWrite, &inheritableSa, 0)) {
+        return false;
+    }
+    SetHandleInformation(stdinWrite, HANDLE_FLAG_INHERIT, 0);
+
+    HANDLE nulHandle = CreateFileW(L"NUL", GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                   &inheritableSa, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+
+    const QString appDir = QCoreApplication::applicationDirPath();
+    const QString helperPath = QDir(appDir).filePath(QStringLiteral("moonlight-clipboard-helper.exe"));
+    if (!QFileInfo::exists(helperPath)) {
+        CloseHandle(stdinRead);
+        CloseHandle(stdinWrite);
+        if (nulHandle != INVALID_HANDLE_VALUE) CloseHandle(nulHandle);
+        return false;
+    }
+
+    const std::wstring exeW = QDir::toNativeSeparators(helperPath).toStdWString();
+    const std::wstring dirW = QDir::toNativeSeparators(appDir).toStdWString();
+    std::wstring cmdW = L"\"" + exeW + L"\" --host-agent " + std::to_wstring(webPort);
+    std::vector<wchar_t> cmdBuf(cmdW.begin(), cmdW.end());
+    cmdBuf.push_back(L'\0');
+
+    wchar_t desktopName[] = L"winsta0\\default";
+    STARTUPINFOEXW si{};
+    si.StartupInfo.cb = sizeof(si);
+    si.StartupInfo.lpDesktop = desktopName;
+    si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    si.StartupInfo.hStdInput = stdinRead;
+    si.StartupInfo.hStdOutput = nulHandle != INVALID_HANDLE_VALUE ? nulHandle : nullptr;
+    si.StartupInfo.hStdError = nulHandle != INVALID_HANDLE_VALUE ? nulHandle : nullptr;
+
+    HANDLE inheritedHandles[2] = {stdinRead, nulHandle};
+    const DWORD handleCount = nulHandle != INVALID_HANDLE_VALUE ? 2 : 1;
+
+    SIZE_T attrSize = 0;
+    InitializeProcThreadAttributeList(nullptr, 1, 0, &attrSize);
+    LPPROC_THREAD_ATTRIBUTE_LIST attrList = nullptr;
+    if (attrSize > 0) {
+        attrList = static_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(HeapAlloc(GetProcessHeap(), 0, attrSize));
+        if (attrList && InitializeProcThreadAttributeList(attrList, 1, 0, &attrSize)) {
+            if (UpdateProcThreadAttribute(attrList, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+                                          inheritedHandles, handleCount * sizeof(HANDLE), nullptr, nullptr)) {
+                si.lpAttributeList = attrList;
+            } else {
+                DeleteProcThreadAttributeList(attrList);
+                HeapFree(GetProcessHeap(), 0, attrList);
+                attrList = nullptr;
+            }
+        } else if (attrList) {
+            HeapFree(GetProcessHeap(), 0, attrList);
+            attrList = nullptr;
+        }
+    }
+    const auto freeAttrList = qScopeGuard([&] {
+        if (attrList) {
+            DeleteProcThreadAttributeList(attrList);
+            HeapFree(GetProcessHeap(), 0, attrList);
+        }
+    });
+
+    const DWORD baseFlags = CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT |
+                            (attrList ? EXTENDED_STARTUPINFO_PRESENT : 0);
+    if (!attrList) {
+        si.StartupInfo.cb = sizeof(STARTUPINFOW);
+    }
+
+    // Boot worker runs inside sunshinesvc's Session 0 Job Object (with
+    // JOB_OBJECT_LIMIT_BREAKAWAY_OK). Windows Job Objects cannot span sessions,
+    // so launching into Session N requires CREATE_BREAKAWAY_FROM_JOB.
+    PROCESS_INFORMATION pi{};
+    BOOL created = CreateProcessAsUserW(
+        userToken,
+        exeW.c_str(),
+        cmdBuf.data(),
+        nullptr,
+        nullptr,
+        TRUE,
+        baseFlags | CREATE_BREAKAWAY_FROM_JOB,
+        mergedEnv.data(),
+        dirW.c_str(),
+        reinterpret_cast<LPSTARTUPINFOW>(&si),
+        &pi);
+    if (!created) {
+        created = CreateProcessAsUserW(
+            userToken,
+            exeW.c_str(),
+            cmdBuf.data(),
+            nullptr,
+            nullptr,
+            TRUE,
+            baseFlags,
+            mergedEnv.data(),
+            dirW.c_str(),
+            reinterpret_cast<LPSTARTUPINFOW>(&si),
+            &pi);
+    }
+
+    CloseHandle(stdinRead);
+    if (nulHandle != INVALID_HANDLE_VALUE) {
+        CloseHandle(nulHandle);
+    }
+    if (!created) {
+        CloseHandle(stdinWrite);
+        return false;
+    }
+
+    CloseHandle(pi.hThread);
+    outProcess = pi.hProcess;
+    outStdinWrite = stdinWrite;
+    return true;
+}
 #elif defined(Q_OS_LINUX)
 QString linuxConfigDir()
 {
@@ -428,6 +624,90 @@ QString resolveHostConfigDir(bool bootWorker = false)
 #else
     return {};
 #endif
+}
+
+std::optional<bool> readSunshineConfBool(const QString& confPath, const QString& key)
+{
+    QFile file(confPath);
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        return std::nullopt;
+    }
+    const QString content = QString::fromUtf8(file.readAll());
+    const QStringList lines = content.split('\n');
+    for (QString line : lines) {
+        const int commentPos = line.indexOf('#');
+        if (commentPos >= 0) {
+            line.truncate(commentPos);
+        }
+        const int eqPos = line.indexOf('=');
+        if (eqPos < 0) {
+            continue;
+        }
+        if (line.left(eqPos).trimmed() != key) {
+            continue;
+        }
+        const QString val = line.mid(eqPos + 1).trimmed().toLower();
+        if (val == QLatin1String("enabled") || val == QLatin1String("true") ||
+            val == QLatin1String("1") || val == QLatin1String("yes") || val == QLatin1String("on")) {
+            return true;
+        }
+        if (val == QLatin1String("disabled") || val == QLatin1String("false") ||
+            val == QLatin1String("0") || val == QLatin1String("no") || val == QLatin1String("off")) {
+            return false;
+        }
+    }
+    return std::nullopt;
+}
+
+bool writeSunshineConfKeys(const QString& confPath, const QVector<QPair<QString, QString>>& updates)
+{
+    QFileInfo info(confPath);
+    QDir().mkpath(info.absolutePath());
+
+    QStringList lines;
+    {
+        QFile in(confPath);
+        if (in.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            const QString existing = QString::fromUtf8(in.readAll());
+            if (!existing.isEmpty()) {
+                lines = existing.split('\n');
+                if (!lines.isEmpty() && lines.last().isEmpty()) {
+                    lines.removeLast();
+                }
+            }
+        }
+    }
+
+    for (const auto& kv : updates) {
+        bool replaced = false;
+        for (QString& line : lines) {
+            QString stripped = line;
+            const int commentPos = stripped.indexOf('#');
+            if (commentPos >= 0) {
+                stripped.truncate(commentPos);
+            }
+            const int eqPos = stripped.indexOf('=');
+            if (eqPos >= 0 && stripped.left(eqPos).trimmed() == kv.first) {
+                line = kv.first + QStringLiteral(" = ") + kv.second;
+                replaced = true;
+                break;
+            }
+        }
+        if (!replaced) {
+            lines.append(kv.first + QStringLiteral(" = ") + kv.second);
+        }
+    }
+
+    QSaveFile out(confPath);
+    if (!out.open(QIODevice::WriteOnly | QIODevice::Text)) {
+        return false;
+    }
+    const QByteArray data = (lines.join('\n') + '\n').toUtf8();
+    if (out.write(data) != data.size()) {
+        out.cancelWriting();
+        return false;
+    }
+    return out.commit();
 }
 
 QByteArray randomHex()
@@ -923,6 +1203,17 @@ bool CenterClient::acquirePrimaryInstanceLock()
         return false;
     }
     m_PrimaryLockHandle = mutex;
+    if (m_ActivateEventHandle == nullptr) {
+        HANDLE activateEvent = CreateEventW(nullptr, FALSE, FALSE, L"Local\\SunAndMon.ActivatePrimary");
+        if (activateEvent != nullptr) {
+            m_ActivateEventHandle = activateEvent;
+            auto* notifier = new QWinEventNotifier(activateEvent, this);
+            connect(notifier, &QWinEventNotifier::activated, this, [this](HANDLE) {
+                emit activateWindowRequested();
+            });
+            m_ActivateNotifier = notifier;
+        }
+    }
     return true;
 #elif defined(Q_OS_LINUX)
     auto* lock = new QLockFile(QDir(linuxConfigDir()).filePath(QStringLiteral("primary-instance.lock")));
@@ -940,6 +1231,16 @@ bool CenterClient::acquirePrimaryInstanceLock()
 
 void CenterClient::releasePrimaryInstanceLock()
 {
+    if (m_ActivateNotifier != nullptr) {
+        delete m_ActivateNotifier;
+        m_ActivateNotifier = nullptr;
+    }
+#ifdef Q_OS_WIN
+    if (m_ActivateEventHandle != nullptr) {
+        CloseHandle(static_cast<HANDLE>(m_ActivateEventHandle));
+        m_ActivateEventHandle = nullptr;
+    }
+#endif
     if (m_PrimaryLockHandle == nullptr) {
         return;
     }
@@ -991,7 +1292,8 @@ bool CenterClient::openInNewWindow(const QString& id, const QString& action) con
 
 bool CenterClient::openNewClientWindow() const
 {
-    return QProcess::startDetached(QCoreApplication::applicationFilePath(), {});
+    return QProcess::startDetached(QCoreApplication::applicationFilePath(),
+                                   {QStringLiteral("--new-window")});
 }
 
 void CenterClient::reportEmbedLine(const QString& line) const
@@ -1033,6 +1335,7 @@ void CenterClient::startOnLaunch()
     }
 #endif
     if (m_Tunnel) {
+        m_Tunnel->setPreferSystemServiceAttach(!m_WindowsBootWorker && windowsConsoleHost());
         m_Tunnel->startOnLaunch(m_SecondaryInstance);
     }
     if (m_SecondaryInstance) {
@@ -1059,6 +1362,52 @@ bool CenterClient::startAtLogin() const
 #else
     return false;
 #endif
+}
+
+bool CenterClient::hostVirtualDisplay() const
+{
+    const QString configDir = resolveHostConfigDir();
+    if (configDir.isEmpty()) {
+        return false;
+    }
+    const QString confPath = QDir(configDir).filePath(QStringLiteral("sunshine.conf"));
+    if (const auto val = readSunshineConfBool(confPath, QStringLiteral("virtual_display"))) {
+        return *val;
+    }
+#ifdef Q_OS_WIN
+    if (const auto vddVal = readSunshineConfBool(confPath, QStringLiteral("vdd_headless_create"))) {
+        return *vddVal;
+    }
+#endif
+    return false;
+}
+
+bool CenterClient::setHostVirtualDisplay(bool enabled)
+{
+    const QString configDir = resolveHostConfigDir();
+    if (configDir.isEmpty()) {
+        return false;
+    }
+    const QString stateStr = enabled ? QStringLiteral("enabled") : QStringLiteral("disabled");
+    QVector<QPair<QString, QString>> updates {
+        { QStringLiteral("virtual_display"), stateStr }
+    };
+#ifdef Q_OS_WIN
+    updates.append({ QStringLiteral("vdd_headless_create"), stateStr });
+#endif
+    const QString confPath = QDir(configDir).filePath(QStringLiteral("sunshine.conf"));
+    if (!writeSunshineConfKeys(confPath, updates)) {
+        return false;
+    }
+#ifdef Q_OS_WIN
+    // Best-effort sync to Session 0 system-service config when accessible.
+    const QString sysConf = QStringLiteral("C:/Windows/System32/config/systemprofile/AppData/Roaming/SunAndMon/host/sunshine.conf");
+    if (QFileInfo::exists(sysConf)) {
+        writeSunshineConfKeys(sysConf, updates);
+    }
+#endif
+    emit changed();
+    return true;
 }
 
 bool CenterClient::setStartAtLogin(bool enabled)
@@ -1153,7 +1502,11 @@ bool CenterClient::setWindowsConsoleHost(bool enabled)
     const bool ok = runElevatedServiceHelper(QCoreApplication::applicationFilePath(),
         enabled ? L"--sunandmon-configure-center-boot-host" : L"--sunandmon-disable-center-boot-host");
     emit changed();
-    return ok && windowsConsoleHost() == enabled;
+    const bool finalMatch = ok && windowsConsoleHost() == enabled;
+    if (finalMatch && m_Tunnel) {
+        m_Tunnel->reattachAfterServiceModeChange(enabled);
+    }
+    return finalMatch;
 #else
     Q_UNUSED(enabled);
     return false;
@@ -1169,8 +1522,18 @@ int CenterClient::configureWindowsBootHost(bool enabled)
         const auto address = settings.value(QStringLiteral("center/url")).toString();
         const auto ip = settings.value(QStringLiteral("center/directIp")).toString();
         const auto key = protectCenterKey(settings.value(SavedCenterKey).toByteArray(), address.toUtf8(), false);
+        TunnelManager tunnelSnapshot;
+        const QString userTunnelDir = QDir(QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation))
+                                          .filePath(QStringLiteral("tunnel"));
+        TunnelManager::syncUserStateToSystemDir(userTunnelDir);
+        const QJsonObject profile{
+            {QStringLiteral("url"), address},
+            {QStringLiteral("ip"), ip},
+            {QStringLiteral("key"), QString::fromLatin1(key)},
+            {QStringLiteral("tunnel"), tunnelSnapshot.exportProfile()},
+        };
         if (!validBootHostCenter(QUrl(address, QUrl::StrictMode), key, ip) ||
-            !saveBootHostSettings({{"url", address}, {"ip", ip}, {"key", QString::fromLatin1(key)}})) {
+            !saveBootHostSettings(profile)) {
             return 1;
         }
     }
@@ -1201,6 +1564,19 @@ int CenterClient::runWindowsBootHost()
     host.m_Key = key;
     host.computeLocalHostId();
     publishBootDeviceIdentity(host.m_HostId);
+
+    // Take over built-in tunnel (Tailscale + EasyTier) inside Session 0 before Windows sign-in
+    // using shared C:\ProgramData\SunAndMon\tunnel state & daemon descriptor.
+    if (host.m_Tunnel) {
+        host.m_Tunnel->setSystemServiceMode(true);
+        const QJsonObject tunnelObj = profile.value(QStringLiteral("tunnel")).toObject();
+        if (!tunnelObj.isEmpty()) {
+            host.m_Tunnel->applyBootProfile(tunnelObj);
+        }
+        host.m_Tunnel->startOnLaunch(false);
+    }
+    host.loadCenterTunnelDefaults();
+
     QTimer consoleWatch;
     consoleWatch.setInterval(3000);
     DWORD captureSession = 0;
@@ -1212,6 +1588,8 @@ int CenterClient::runWindowsBootHost()
         if (host.hostActive()) {
             if (captureSession != current || host.hostStartupTimedOut()) {
                 host.stopHost();
+            } else if (host.hostReady()) {
+                host.syncBootClipboardAgent();
             }
         } else if (!host.hostStopping()) {
             captureSession = current;
@@ -1633,6 +2011,9 @@ void CenterClient::loadCenterTunnelDefaults()
         reply->deleteLater();
         if (!connected() || reply->error() != QNetworkReply::NoError ||
             reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() != 200) {
+            if (m_WindowsBootWorker && m_CenterTunnelDefaults.isEmpty()) {
+                QTimer::singleShot(10000, this, &CenterClient::loadCenterTunnelDefaults);
+            }
             return;
         }
         const auto doc = QJsonDocument::fromJson(reply->readAll());
@@ -1643,6 +2024,35 @@ void CenterClient::loadCenterTunnelDefaults()
         if (map != m_CenterTunnelDefaults) {
             m_CenterTunnelDefaults = map;
             emit changed();
+        }
+        // In pre-login system service mode, if BootHost had no saved tunnel profile
+        // yet (e.g. upgraded from an earlier install), automatically seed and connect
+        // the Center-advertised EasyTier/Tailscale defaults so pre-login tunnel works
+        // immediately without re-configuring.
+        if (m_WindowsBootWorker && m_Tunnel &&
+            !m_Tunnel->tsAutoConnect() && !m_Tunnel->etAutoConnect()) {
+            const QString provider = map.value(QStringLiteral("provider")).toString().trimmed().toLower();
+            if (provider == QStringLiteral("easytier") &&
+                !map.value(QStringLiteral("networkName")).toString().trimmed().isEmpty()) {
+                m_Tunnel->applyCenterDefaults(map);
+                m_Tunnel->saveAndConnectEasyTier(
+                    true,
+                    m_Tunnel->hostname(),
+                    m_Tunnel->etNetworkName(),
+                    m_Tunnel->etNetworkSecret(),
+                    m_Tunnel->etPeers(),
+                    m_Tunnel->etStaticIp(),
+                    m_Tunnel->etCoreBinary());
+            } else if (provider == QStringLiteral("tailscale") &&
+                       !map.value(QStringLiteral("authKey")).toString().trimmed().isEmpty()) {
+                m_Tunnel->applyCenterDefaults(map);
+                m_Tunnel->saveAndConnectTailscale(
+                    true,
+                    m_Tunnel->hostname(),
+                    m_Tunnel->tsControlUrl(),
+                    m_Tunnel->tsAuthKey(),
+                    false);
+            }
         }
     });
 }
@@ -2065,6 +2475,7 @@ void CenterClient::startClipboardAgent()
 {
 #if defined(Q_OS_WIN) || defined(Q_OS_LINUX)
     if (m_WindowsBootWorker) {
+        syncBootClipboardAgent();
         return;
     }
     if (m_ClipboardAgent.state() != QProcess::NotRunning || m_WebPort == 0) {
@@ -2083,8 +2494,55 @@ void CenterClient::startClipboardAgent()
 #endif
 }
 
+void CenterClient::syncBootClipboardAgent()
+{
+#ifdef Q_OS_WIN
+    if (!m_WindowsBootWorker || !hostReady() || m_WebPort == 0 ||
+        m_PublicCertificate.isEmpty() || m_ManagedToken.size() != 64) {
+        return;
+    }
+    const DWORD activeSession = WTSGetActiveConsoleSessionId();
+    if (activeSession == 0 || activeSession == 0xFFFFFFFFu) {
+        stopClipboardAgent();
+        return;
+    }
+    if (m_BootClipboardProcess != nullptr) {
+        const DWORD waitRes = WaitForSingleObject(static_cast<HANDLE>(m_BootClipboardProcess), 0);
+        if (waitRes == WAIT_TIMEOUT && m_BootClipboardSessionId == activeSession) {
+            return;
+        }
+        stopClipboardAgent();
+    }
+
+    HANDLE proc = nullptr;
+    HANDLE stdinWrite = nullptr;
+    if (launchBootClipboardAgentInSession(activeSession, m_WebPort, m_ManagedToken,
+                                          m_PublicCertificate, proc, stdinWrite)) {
+        m_BootClipboardProcess = proc;
+        m_BootClipboardStdin = stdinWrite;
+        m_BootClipboardSessionId = activeSession;
+    }
+#endif
+}
+
 void CenterClient::stopClipboardAgent()
 {
+#ifdef Q_OS_WIN
+    if (m_BootClipboardStdin != nullptr) {
+        CloseHandle(static_cast<HANDLE>(m_BootClipboardStdin));
+        m_BootClipboardStdin = nullptr;
+    }
+    if (m_BootClipboardProcess != nullptr) {
+        HANDLE proc = static_cast<HANDLE>(m_BootClipboardProcess);
+        if (WaitForSingleObject(proc, 1500) != WAIT_OBJECT_0) {
+            TerminateProcess(proc, 0);
+            WaitForSingleObject(proc, 500);
+        }
+        CloseHandle(proc);
+        m_BootClipboardProcess = nullptr;
+    }
+    m_BootClipboardSessionId = 0xFFFFFFFFu;
+#endif
     if (m_ClipboardAgent.state() != QProcess::NotRunning) {
         m_ClipboardAgent.closeWriteChannel();
         if (!m_ClipboardAgent.waitForFinished(1500)) {

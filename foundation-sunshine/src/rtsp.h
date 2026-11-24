@@ -68,9 +68,11 @@ namespace rtsp_stream {
     // Shared with the active stream after RTSP allocation; released on failure/expiry.
     std::shared_ptr<void> nvidia_vsync_lease;
     std::shared_ptr<void> touch_keyboard_lease;
+    std::shared_ptr<void> hidhide_lease;
 
     bool host_audio;
     bool privacy_screen {false};
+    bool hidhide_auto_cloak {false};
     std::string unique_id;
     std::string client_name;
     int width;

@@ -125,10 +125,12 @@ begin
   { Ensure no lingering SunAndMon / host / tunnel processes lock files in the install dir }
   RunHiddenCmd(ExpandConstant('{sys}\taskkill.exe'), '/F /T /IM SunAndMon.exe');
   RunHiddenCmd(ExpandConstant('{sys}\taskkill.exe'), '/F /T /IM sunshine.exe');
+  RunHiddenCmd(ExpandConstant('{sys}\taskkill.exe'), '/F /T /IM sunshine-gui.exe');
   RunHiddenCmd(ExpandConstant('{sys}\taskkill.exe'), '/F /T /IM sunshinesvc.exe');
   RunHiddenCmd(ExpandConstant('{sys}\taskkill.exe'), '/F /T /IM sunandmon-tunnel.exe');
   RunHiddenCmd(ExpandConstant('{sys}\taskkill.exe'), '/F /T /IM easytier-core.exe');
   RunHiddenCmd(ExpandConstant('{sys}\taskkill.exe'), '/F /T /IM moonlight-clipboard-helper.exe');
+  RegDeleteValue(HKEY_CURRENT_USER, 'Software\Microsoft\Windows\CurrentVersion\Run', 'Sunshine GUI Desktop');
   Sleep(800);
 end;
 

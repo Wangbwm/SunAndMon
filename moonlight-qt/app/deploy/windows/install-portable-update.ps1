@@ -184,6 +184,9 @@ function Get-ReplacedItems {
         $_.Name -ne 'Moonlight Game Streaming Project' -and
         $_.Name -ne 'portable.dat' -and
         $_.Name -ne 'portable.dat.inactive' -and
+        $_.Name -notlike 'unins*.exe' -and
+        $_.Name -notlike 'unins*.dat' -and
+        $_.Name -notlike 'unins*.msg' -and
         (!$PreserveTunnel -or $_.Name -ine 'tunnel') -and
         $_.Name -notlike 'Moonlight-*.log' -and
         $_.Name -notlike 'SunAndMon-*.log' -and

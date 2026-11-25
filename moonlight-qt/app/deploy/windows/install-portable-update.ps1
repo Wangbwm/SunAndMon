@@ -278,9 +278,27 @@ try {
     Write-UpdateLog "Extracted payload root=$payloadRoot mode=$updateMode hasTunnel=$payloadHasTunnel hasHost=$payloadHasHost"
 
     if ($isFullBundle) {
+        # Re-stop service and any app/host/tunnel processes that may have started while extracting.
+        Stop-SunAndMonHostServiceIfRunning
+        Stop-InstallDirProcesses
+
+        $precheckPaths = @(
+            $ExePath,
+            (Join-Path $InstallDir 'platforms\qwindows.dll'),
+            (Join-Path $InstallDir 'imageformats\qgif.dll')
+        )
         if ($payloadHasHost) {
-            Wait-ForUnlockedFile -Path (Join-Path $InstallDir 'host\sunshine.exe')
+            $precheckPaths += (Join-Path $InstallDir 'host\sunshine.exe')
+            $precheckPaths += (Join-Path $InstallDir 'host\tools\sunshinesvc.exe')
         }
+        if ($payloadHasTunnel) {
+            $precheckPaths += (Join-Path $InstallDir 'tunnel\sunandmon-tunnel.exe')
+            $precheckPaths += (Join-Path $InstallDir 'tunnel\easytier-core.exe')
+        }
+        foreach ($checkPath in $precheckPaths) {
+            Wait-ForUnlockedFile -Path $checkPath
+        }
+
         $itemsToReplace = @(Get-ReplacedItems -Path $InstallDir -PreserveTunnel (!$payloadHasTunnel))
         foreach ($item in $itemsToReplace) {
             Move-Item -LiteralPath $item.FullName -Destination $backupDir -Force

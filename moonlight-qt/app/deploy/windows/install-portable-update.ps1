@@ -23,6 +23,9 @@ $serviceWasRunning = [bool]$RestartService
 $addedRelPaths = New-Object System.Collections.Generic.List[string]
 $backedUpRelPaths = New-Object System.Collections.Generic.List[string]
 $updateMode = 'full'
+$updateMutex = $null
+$ownsMutex = $false
+$rollbackFailed = $false
 
 function Write-UpdateLog {
     param([string]$Message)
@@ -175,18 +178,54 @@ function Test-IsFullBundlePayload {
 }
 
 function Get-ReplacedItems {
-    param([string]$Path)
+    param([string]$Path, [bool]$PreserveTunnel = $false)
     Get-ChildItem -LiteralPath $Path -Force | Where-Object {
         $itemFullPath = [System.IO.Path]::GetFullPath($_.FullName).TrimEnd('\', '/')
         $_.Name -ne 'Moonlight Game Streaming Project' -and
         $_.Name -ne 'portable.dat' -and
         $_.Name -ne 'portable.dat.inactive' -and
+        (!$PreserveTunnel -or $_.Name -ine 'tunnel') -and
         $_.Name -notlike 'Moonlight-*.log' -and
         $_.Name -notlike 'SunAndMon-*.log' -and
         $_.Name -notlike '.backup-*' -and
+        $_.Name -notlike '.repair-*' -and
         $_.Name -notlike 'update-backup-*' -and
         ![string]::Equals($itemFullPath, $workspaceFullPath, [System.StringComparison]::OrdinalIgnoreCase)
     }
+}
+
+function Acquire-HotUpdateMutex {
+    foreach ($mutexName in @('Global\SunAndMonHotUpdateLock', 'Local\SunAndMonHotUpdateLock')) {
+        try {
+            $m = New-Object System.Threading.Mutex($false, $mutexName)
+            try {
+                if ($m.WaitOne(0)) {
+                    $script:updateMutex = $m
+                    $script:ownsMutex = $true
+                    return $true
+                }
+                else {
+                    $m.Dispose()
+                    return $false
+                }
+            }
+            catch [System.Threading.AbandonedMutexException] {
+                $script:updateMutex = $m
+                $script:ownsMutex = $true
+                return $true
+            }
+        }
+        catch [System.UnauthorizedAccessException] {
+            continue
+        }
+    }
+    return $true
+}
+
+function Expand-ZipFast {
+    param([string]$ArchivePath, [string]$DestinationDir)
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    [System.IO.Compression.ZipFile]::ExtractToDirectory($ArchivePath, $DestinationDir)
 }
 
 function Start-RelaunchApp {
@@ -206,6 +245,11 @@ function Start-RelaunchApp {
 }
 
 try {
+    if (!(Acquire-HotUpdateMutex)) {
+        Write-UpdateLog "Another SunAndMon hot update is already in progress; exiting duplicate updater (ParentPid=$ParentPid)."
+        return
+    }
+
     Write-UpdateLog "Hot update started. InstallDir=$installFullPath Zip=$ZipPath ParentPid=$ParentPid RestartService=$serviceWasRunning"
     Wait-ForParentExit -PidToWait $ParentPid
     Stop-SunAndMonHostServiceIfRunning
@@ -222,14 +266,19 @@ try {
     $requiredFreeBytes = Get-RequiredFreeBytes -ArchivePath $ZipPath
     Assert-FreeSpace -Path $InstallDir -RequiredBytes $requiredFreeBytes
 
-    Expand-Archive -LiteralPath $ZipPath -DestinationPath $extractDir -Force
+    Expand-ZipFast -ArchivePath $ZipPath -DestinationDir $extractDir
     $payloadRoot = Get-PayloadRoot -Root $extractDir
     $isFullBundle = Test-IsFullBundlePayload -PayloadRoot $payloadRoot
+    $payloadHasTunnel = Test-Path -LiteralPath (Join-Path $payloadRoot 'tunnel\sunandmon-tunnel.exe')
+    $payloadHasHost = Test-Path -LiteralPath (Join-Path $payloadRoot 'host\sunshine.exe')
     $updateMode = if ($isFullBundle) { 'full' } else { 'overlay' }
-    Write-UpdateLog "Extracted payload root=$payloadRoot mode=$updateMode"
+    Write-UpdateLog "Extracted payload root=$payloadRoot mode=$updateMode hasTunnel=$payloadHasTunnel hasHost=$payloadHasHost"
 
     if ($isFullBundle) {
-        $itemsToReplace = @(Get-ReplacedItems -Path $InstallDir)
+        if ($payloadHasHost) {
+            Wait-ForUnlockedFile -Path (Join-Path $InstallDir 'host\sunshine.exe')
+        }
+        $itemsToReplace = @(Get-ReplacedItems -Path $InstallDir -PreserveTunnel (!$payloadHasTunnel))
         foreach ($item in $itemsToReplace) {
             Move-Item -LiteralPath $item.FullName -Destination $backupDir -Force
         }
@@ -292,11 +341,14 @@ catch {
     if ($backupDir -and (Test-Path -LiteralPath $backupDir)) {
         try {
             if ($updateMode -eq 'full') {
-                Get-ReplacedItems -Path $InstallDir | ForEach-Object {
-                    Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
-                }
                 Get-ChildItem -LiteralPath $backupDir -Force | ForEach-Object {
-                    Move-Item -LiteralPath $_.FullName -Destination $InstallDir -Force
+                    try {
+                        Copy-Item -LiteralPath $_.FullName -Destination $InstallDir -Recurse -Force -ErrorAction Stop
+                    }
+                    catch {
+                        $script:rollbackFailed = $true
+                        Write-UpdateLog "Rollback item error ($($_.Name)): $($_.Exception.Message)"
+                    }
                 }
             }
             else {
@@ -307,12 +359,28 @@ catch {
                 foreach ($rel in $backedUpRelPaths) {
                     $bak = Join-Path $backupDir $rel
                     $dst = Join-Path $InstallDir $rel
-                    if (Test-Path -LiteralPath $bak) { Copy-Item -LiteralPath $bak -Destination $dst -Force }
+                    if (Test-Path -LiteralPath $bak) {
+                        try {
+                            Copy-Item -LiteralPath $bak -Destination $dst -Force -ErrorAction Stop
+                        }
+                        catch {
+                            $script:rollbackFailed = $true
+                            Write-UpdateLog "Rollback item error ($rel): $($_.Exception.Message)"
+                        }
+                    }
                 }
             }
-            Write-UpdateLog "Rollback completed."
+            if (!$rollbackFailed) {
+                Write-UpdateLog "Rollback completed."
+            }
+            else {
+                Write-UpdateLog "Rollback completed with partial errors; backup preserved at $backupDir."
+            }
         }
-        catch { Write-UpdateLog "Rollback error: $($_.Exception.Message)" }
+        catch {
+            $script:rollbackFailed = $true
+            Write-UpdateLog "Rollback error: $($_.Exception.Message)"
+        }
     }
     if ($serviceWasRunning) {
         try { Start-Service -Name $serviceName -ErrorAction SilentlyContinue } catch {}
@@ -321,7 +389,15 @@ catch {
 }
 finally {
     try { Set-Location -LiteralPath $env:TEMP } catch {}
+    if ($ownsMutex -and $updateMutex) {
+        try { $updateMutex.ReleaseMutex() } catch {}
+    }
+    if ($updateMutex) {
+        try { $updateMutex.Dispose() } catch {}
+    }
     if (Test-Path -LiteralPath $extractDir) { Remove-Item -LiteralPath $extractDir -Recurse -Force -ErrorAction SilentlyContinue }
-    if ($backupDir -and (Test-Path -LiteralPath $backupDir)) { Remove-Item -LiteralPath $backupDir -Recurse -Force -ErrorAction SilentlyContinue }
-    if (Test-Path -LiteralPath $WorkspaceDir) { Remove-Item -LiteralPath $WorkspaceDir -Recurse -Force -ErrorAction SilentlyContinue }
+    if (!$rollbackFailed) {
+        if ($backupDir -and (Test-Path -LiteralPath $backupDir)) { Remove-Item -LiteralPath $backupDir -Recurse -Force -ErrorAction SilentlyContinue }
+        if (Test-Path -LiteralPath $WorkspaceDir) { Remove-Item -LiteralPath $WorkspaceDir -Recurse -Force -ErrorAction SilentlyContinue }
+    }
 }
